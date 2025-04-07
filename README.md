@@ -2,8 +2,7 @@
 
 | 👤 Developer          | 🏷️ Role                            | 💖 Support Us                                                                                                         |
 | --------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| **[MikeTheTech](https://github.com/itsmikethetech)** | Project Manager, Programmer | [Patreon](https://www.patreon.com/mikethetech) :gem: / [GitHub Sponsors](https://github.com/sponsors/itsmikethetech/) 💖  |
-| **[Bud3699](https://github.com/bud3699)**     | Lead Programmer             | [Buy Me a Beer](https://buymeacoffee.com/bud3699) :beer:                                                                 |
+| **[MikeTheTech](https://github.com/itsmikethetech)** | Project Manager, Lead Programmer | [Patreon](https://www.patreon.com/mikethetech) :gem: / [GitHub Sponsors](https://github.com/sponsors/itsmikethetech/) 💖  |
 | **[Jocke](https://github.com/zjoasan)**       | Programmer, Concept Design  | [GitHub Sponsors ](https://github.com/sponsors/zjoasan) 💖                                                             |
 
 :bulb: *We appreciate your support—every contribution helps us keep building amazing experiences!*
@@ -22,10 +21,6 @@ Unlike traditional monitors, this virtual display supports custom resolutions an
 > - **Microsoft Visual C++ Redistributable**  
 >   If you encounter the error `vcruntime140.dll not found`, download and install the latest version from the [Microsoft Visual C++ Redistributable page](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170).
 
-## 🖥️ EDID Database
-- [EDID Database by Bud3699](https://edid.mikethetech.com/)
-
-  You can use this database to load custom edid's into the driver! Or just general edid usage :) 
 
 ## 🛠️ Installation
 
@@ -80,7 +75,7 @@ HDR Support Now Available for Windows 11 23H2+
 ## Developers
 
 - Shoutout to **[MikeTheTech](https://github.com/itsmikethetech)** Project Manager, Owner, and Programmer!
-- Shoutout to **[Bud](https://github.com/bud3699)** Lead Programmer and author of a ton of features, the companion & installer work.
+- Shoutout to **[Bud](https://github.com/bud3699)** Old Lead Programmer and author of a ton of features, the companion & installer work.
 - Shoutout to **[zjoasan](https://github.com/zjoasan)** Programmer. For scripts, EDID integration, and parts of installer.
 
 ## Acknowledgements
@@ -94,7 +89,7 @@ HDR Support Now Available for Windows 11 23H2+
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=VirtualDisplay/Virtual-Display-Driver&type=Date)](https://star-history.com/#VirtualDisplay/Virtual-Display-Driver&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=VirtualDrivers/Virtual-Display-Driver&type=Date)](https://www.star-history.com/#VirtualDrivers/Virtual-Display-Driver&Date)
 
 ## Disclaimer:
 

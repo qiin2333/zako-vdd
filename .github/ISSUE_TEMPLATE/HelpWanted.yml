@@ -1,20 +1,20 @@
-name: Bug Report
-description: File a bug report.
-title: "[Bug]: "
-labels: ["bug", "triage"]
+name: Help Request
+description: Request help with an issue.
+title: "[Help]: "
+labels: ["help wanted", "triage"]
 assignees: ["zjoasan", "bud3699", "itsmikethetech"]
 
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to fill out this bug report!
+        Thanks for reaching out! Please provide as much detail as possible to help us assist you.
   
   - type: dropdown
     id: OS
     attributes:
       label: Which OS?
-      description: What version of Windows are you running?
+      description: What version of Windows are you using?
       options:
         - Win11 Pro
         - Win11 Home
@@ -46,7 +46,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        If you struggle finding Windows edition and version, go to Settings -> System -> About. Under Windows specifications.
+        If you need help finding your Windows version, go to Settings -> System -> About.
   
   - type: input
     id: driver-version
@@ -61,7 +61,7 @@ body:
     id: device-specs
     attributes:
       label: Device Specifications
-      description: Provide details about your hardware. This is to help us indentify whether its a potential hardware issue.
+      description: Provide details about your hardware. This is to help us indentify whether its a potential hardware incompatibility. This isnt needed but helps.
       placeholder: |
         CPU: Example CPU
         GPU: Example GPU
@@ -71,46 +71,42 @@ body:
       required: false
   
   - type: textarea
-    id: bug-info
+    id: issue-info
     attributes:
-      label: Describe the bug
-      description: Free text description.
+      label: What issue are you experiencing or what do you need help with?
+      description: Describe the issue you need help with.
       placeholder: |
-        Tell us what you see!
-        A clear and concise description of what the bug is.
+        Provide a clear and concise description of the help you need.
     validations:
       required: true 
   
   - type: textarea
-    id: reproduce-info
+    id: troubleshooting-steps
     attributes:
-      label: Steps to reproduce
-      description: And if you can, how to reproduce 
+      label: Troubleshooting steps taken
+      description: What have you tried so far to fix the issue?
       placeholder: |
-        Tell us how to reproduce!
-        1. Go to '...'
-        2. Click on '....'
-        3. Observe issue.
+        List steps you've taken to resolve/assist the problem.
     validations:
       required: false 
   
   - type: textarea
-    id: expected-info
+    id: expected-outcome
     attributes:
-      label: Expected behavior
-      description: Please inform us about expected behavior.
+      label: Expected outcome
+      description: What were you expecting/want to happen?
       placeholder: |
-        Description of behavior!
-        When I clicked...
+        Describe the behavior you expected/want.
     validations:
       required: false 
   
   - type: textarea
-    id: log-file
+    id: additional-info
     attributes:
-      label: Log File 
-      description: Please attach the log file to help us diagnose the issue. You can drag and drop the file here or click to upload. The log can be retrieved by enabling the log file in the XML, then restarting the driver.
-      placeholder: Drag and drop the log file here or click to upload.
+      label: Additional information
+      description: Any extra details that might help us assist you.
+      placeholder: |
+        Provide any relevant logs, screenshots, or error messages.
     validations:
       required: false
 
@@ -118,7 +114,7 @@ body:
     id: contact
     attributes:
       label: Contact Details
-      description: How can we get in touch with you if we need more info?
+      description: How can we reach you if we need more information?
       placeholder: ex. email@example.com
     validations:
       required: false

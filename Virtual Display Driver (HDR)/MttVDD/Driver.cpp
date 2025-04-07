@@ -106,20 +106,57 @@ bool hardwareCursor = false;
 bool preventManufacturerSpoof = false;
 bool edidCeaOverride = false;
 bool sendLogsThroughPipe = true;
+
+//Mouse settings
+bool alphaCursorSupport = true;
+int CursorMaxX = 128;
+int CursorMaxY = 128;
+IDDCX_XOR_CURSOR_SUPPORT XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
+
+
+//Rest
 IDDCX_BITS_PER_COMPONENT SDRCOLOUR = IDDCX_BITS_PER_COMPONENT_8;
 IDDCX_BITS_PER_COMPONENT HDRCOLOUR = IDDCX_BITS_PER_COMPONENT_10;
+
+wstring ColourFormat = L"RGB";
 
 std::map<std::wstring, std::pair<std::wstring, std::wstring>> SettingsQueryMap = {
 	{L"LoggingEnabled", {L"LOGS", L"logging"}},
 	{L"DebugLoggingEnabled", {L"DEBUGLOGS", L"debuglogging"}},
-	{L"HDRPlusEnabled", {L"HDRPLUS", L"HDRPlus"}},
-	{L"SDR10Enabled", {L"SDR10BIT", L"SDR10bit"}},
 	{L"CustomEdidEnabled", {L"CUSTOMEDID", L"CustomEdid"}},
-	{L"HardwareCursorEnabled", {L"HARDWARECURSOR", L"HardwareCursor"}},
+
 	{L"PreventMonitorSpoof", {L"PREVENTMONITORSPOOF", L"PreventSpoof"}},
 	{L"EdidCeaOverride", {L"EDIDCEAOVERRIDE", L"EdidCeaOverride"}},
 	{L"SendLogsThroughPipe", {L"SENDLOGSTHROUGHPIPE", L"SendLogsThroughPipe"}},
+	//Cursor Begin
+	{L"HardwareCursorEnabled", {L"HARDWARECURSOR", L"HardwareCursor"}},
+	{L"AlphaCursorSupport", {L"ALPHACURSORSUPPORT", L"AlphaCursorSupport"}},
+	{L"CursorMaxX", {L"CURSORMAXX", L"CursorMaxX"}},
+	{L"CursorMaxY", {L"CURSORMAXY", L"CursorMaxY"}},
+	{L"XorCursorSupportLevel", {L"XORCURSORSUPPORTLEVEL", L"XorCursorSupportLevel"}},
+	///Cursor End
+	//Colour Begin
+	{L"HDRPlusEnabled", {L"HDRPLUS", L"HDRPlus"}},
+	{L"SDR10Enabled", {L"SDR10BIT", L"SDR10bit"}},
+	{L"ColourFormat", {L"COLOURFORMAT", L"ColourFormat"}},
+	//Colour End
 };
+
+const char* XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level) {
+	switch (level) {
+	case IDDCX_XOR_CURSOR_SUPPORT_UNINITIALIZED:
+		return "IDDCX_XOR_CURSOR_SUPPORT_UNINITIALIZED";
+	case IDDCX_XOR_CURSOR_SUPPORT_NONE:
+		return "IDDCX_XOR_CURSOR_SUPPORT_NONE";
+	case IDDCX_XOR_CURSOR_SUPPORT_FULL:
+		return "IDDCX_XOR_CURSOR_SUPPORT_FULL";
+	case IDDCX_XOR_CURSOR_SUPPORT_EMULATION:
+		return "IDDCX_XOR_CURSOR_SUPPORT_EMULATION";
+	default:
+		return "Unknown";
+	}
+}
+
 
 vector<unsigned char> Microsoft::IndirectDisp::IndirectDeviceContext::s_KnownMonitorEdid; //Changed to support static vector
 
@@ -144,6 +181,14 @@ void LogQueries(const char* severity, const std::wstring& xmlName) {
 	}
 }
 
+string WStringToString(const wstring& wstr) { //basically just a function for converting strings since codecvt is depricated in c++ 17
+	if (wstr.empty()) return "";
+
+	int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
+	string str(size_needed, 0);
+	WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &str[0], size_needed, NULL, NULL);
+	return str;
+}
 
 bool EnabledQuery(const std::wstring& settingKey) {
 	auto it = SettingsQueryMap.find(settingKey);
@@ -238,14 +283,168 @@ check_xml:
 	return xmlLoggingValue;
 }
 
-string WStringToString(const wstring& wstr) { //basically just a function for converting strings since codecvt is depricated in c++ 17
-	if (wstr.empty()) return "";
+int GetIntegerSetting(const std::wstring& settingKey) {
+	auto it = SettingsQueryMap.find(settingKey);
+	if (it == SettingsQueryMap.end()) {
+		vddlog("e", "requested data not found in xml, consider updating xml!");
+		return -1;
+	}
 
-	int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
-	string str(size_needed, 0);
-	WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &str[0], size_needed, NULL, NULL);
-	return str;
+	std::wstring regName = it->second.first;
+	std::wstring xmlName = it->second.second;
+
+	std::wstring settingsname = confpath + L"\\vdd_settings.xml";
+	HKEY hKey;
+	DWORD dwValue;
+	DWORD dwBufferSize = sizeof(dwValue);
+	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver", 0, KEY_READ, &hKey);
+
+	if (lResult == ERROR_SUCCESS) {
+		lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)&dwValue, &dwBufferSize);
+		if (lResult == ERROR_SUCCESS) {
+			RegCloseKey(hKey);
+			LogQueries("d", xmlName + L" - Retrieved integer value: " + std::to_wstring(dwValue));
+			return static_cast<int>(dwValue);
+		}
+		else {
+			LogQueries("d", xmlName + L" - Failed to retrieve integer value from registry. Attempting to read as string.");
+			wchar_t path[MAX_PATH];
+			dwBufferSize = sizeof(path);
+			lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)path, &dwBufferSize);
+			RegCloseKey(hKey);
+			if (lResult == ERROR_SUCCESS) {
+				try {
+					int logValue = std::stoi(path);
+					LogQueries("d", xmlName + L" - Retrieved string value: " + std::to_wstring(logValue));
+					return logValue;
+				}
+				catch (const std::exception&) {
+					LogQueries("d", xmlName + L" - Failed to convert registry string value to integer.");
+				}
+			}
+		}
+	}
+
+	CComPtr<IStream> pFileStream;
+	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READ, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
+	if (FAILED(hr)) {
+		LogQueries("d", xmlName + L" - Failed to create file stream for XML settings.");
+		return -1;
+	}
+
+	CComPtr<IXmlReader> pReader;
+	hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, nullptr);
+	if (FAILED(hr)) {
+		LogQueries("d", xmlName + L" - Failed to create XML reader.");
+		return -1;
+	}
+
+	hr = pReader->SetInput(pFileStream);
+	if (FAILED(hr)) {
+		LogQueries("d", xmlName + L" - Failed to set input for XML reader.");
+		return -1;
+	}
+
+	XmlNodeType nodeType;
+	const wchar_t* pwszLocalName;
+	int xmlLoggingValue = -1;
+
+	while (S_OK == pReader->Read(&nodeType)) {
+		if (nodeType == XmlNodeType_Element) {
+			pReader->GetLocalName(&pwszLocalName, nullptr);
+			if (wcscmp(pwszLocalName, xmlName.c_str()) == 0) {
+				pReader->Read(&nodeType);
+				if (nodeType == XmlNodeType_Text) {
+					const wchar_t* pwszValue;
+					pReader->GetValue(&pwszValue, nullptr);
+					try {
+						xmlLoggingValue = std::stoi(pwszValue);
+						LogQueries("i", xmlName + L" - Retrieved from XML: " + std::to_wstring(xmlLoggingValue));
+					}
+					catch (const std::exception&) {
+						LogQueries("d", xmlName + L" - Failed to convert XML string value to integer.");
+					}
+					break;
+				}
+			}
+		}
+	}
+
+	return xmlLoggingValue;
 }
+
+std::wstring GetStringSetting(const std::wstring& settingKey) {
+	auto it = SettingsQueryMap.find(settingKey);
+	if (it == SettingsQueryMap.end()) {
+		vddlog("e", "requested data not found in xml, consider updating xml!");
+		return L""; 
+	}
+
+	std::wstring regName = it->second.first;
+	std::wstring xmlName = it->second.second;
+
+	std::wstring settingsname = confpath + L"\\vdd_settings.xml";
+	HKEY hKey;
+	DWORD dwBufferSize = MAX_PATH;
+	wchar_t buffer[MAX_PATH];
+
+	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver", 0, KEY_READ, &hKey);
+	if (lResult == ERROR_SUCCESS) {
+		lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)buffer, &dwBufferSize);
+		RegCloseKey(hKey);
+
+		if (lResult == ERROR_SUCCESS) {
+			LogQueries("d", xmlName + L" - Retrieved string value from registry: " + buffer);
+			return std::wstring(buffer);  
+		}
+		else {
+			LogQueries("d", xmlName + L" - Failed to retrieve string value from registry. Attempting to read as XML.");
+		}
+	}
+
+	CComPtr<IStream> pFileStream;
+	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READ, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
+	if (FAILED(hr)) {
+		LogQueries("d", xmlName + L" - Failed to create file stream for XML settings.");
+		return L""; 
+	}
+
+	CComPtr<IXmlReader> pReader;
+	hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, nullptr);
+	if (FAILED(hr)) {
+		LogQueries("d", xmlName + L" - Failed to create XML reader.");
+		return L""; 
+	}
+
+	hr = pReader->SetInput(pFileStream);
+	if (FAILED(hr)) {
+		LogQueries("d", xmlName + L" - Failed to set input for XML reader.");
+		return L"";  
+	}
+
+	XmlNodeType nodeType;
+	const wchar_t* pwszLocalName;
+	std::wstring xmlLoggingValue = L"";  
+
+	while (S_OK == pReader->Read(&nodeType)) {
+		if (nodeType == XmlNodeType_Element) {
+			pReader->GetLocalName(&pwszLocalName, nullptr);
+			if (wcscmp(pwszLocalName, xmlName.c_str()) == 0) {
+				pReader->Read(&nodeType);
+				if (nodeType == XmlNodeType_Text) {
+					const wchar_t* pwszValue;
+					pReader->GetValue(&pwszValue, nullptr);
+					xmlLoggingValue = pwszValue;
+					LogQueries("i", xmlName + L" - Retrieved from XML: " + xmlLoggingValue);
+					break;
+				}
+			}
+		}
+	}
+
+	return xmlLoggingValue;  
+}
+
 
 int gcd(int a, int b) {
 	while (b != 0) {
@@ -1270,16 +1469,42 @@ extern "C" NTSTATUS DriverEntry(
 	initpath();
 	logsEnabled = EnabledQuery(L"LoggingEnabled");
 	debugLogs = EnabledQuery(L"DebugLoggingEnabled");
+
+	customEdid = EnabledQuery(L"CustomEdidEnabled");
+	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
+	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
+	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
+
+
+	//colour
 	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
 	SDR10 = EnabledQuery(L"SDR10Enabled");
 	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
 	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
+	ColourFormat = GetStringSetting(L"ColourFormat");
 
-	customEdid = EnabledQuery(L"CustomEdidEnabled");
+	//Cursor
 	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
-	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
-	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
-	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
+	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport");
+	CursorMaxX = GetIntegerSetting(L"CursorMaxX");
+	CursorMaxY = GetIntegerSetting(L"CursorMaxY");
+
+	int xorCursorSupportLevelInt = GetIntegerSetting(L"XorCursorSupportLevel");
+	std::string xorCursorSupportLevelName;
+
+	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3) {
+		vddlog("w", "Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
+		XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
+	}
+	else {
+		XorCursorSupportLevel = static_cast<IDDCX_XOR_CURSOR_SUPPORT>(xorCursorSupportLevelInt);
+	}
+
+	xorCursorSupportLevelName = XorCursorSupportLevelToString(XorCursorSupportLevel);
+
+	vddlog("i", ("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
+
+
 
 	vddlog("i", "Driver Starting");
 	string utf8_confpath = WStringToString(confpath);
@@ -2556,10 +2781,10 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 			IDDCX_CURSOR_CAPS cursorInfo = {};
 			cursorInfo.Size = sizeof(cursorInfo);
 			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL; 
-			cursorInfo.AlphaCursorSupport = true;
+			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
 
-			cursorInfo.MaxX = 512;       //Apparently in most cases 128 is fine but for safe guarding we will go 512, older intel cpus may be limited to 64x64
-			cursorInfo.MaxY = 512;  
+			cursorInfo.MaxX = CursorMaxX;       //Apparently in most cases 128 is fine but for safe guarding we will go 512, older intel cpus may be limited to 64x64
+			cursorInfo.MaxY = CursorMaxY;
 
 			//DirectXDevice->QueryMaxCursorSize(&cursorInfo.MaxX, &cursorInfo.MaxY);                 Experimental to get max cursor size - THIS IS NTO WORKING CODE
 
@@ -2756,13 +2981,30 @@ void CreateTargetMode2(IDDCX_TARGET_MODE2& Mode, UINT Width, UINT Height, UINT V
 	vddlog("d", logStream.str().c_str());
 
 	Mode.Size = sizeof(Mode);
-	Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;
+
+
+	if (ColourFormat == L"RGB") {
+		Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;
+	}
+	else if (ColourFormat == L"YCbCr444") {
+		Mode.BitsPerComponent.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
+	}
+	else if (ColourFormat == L"YCbCr422") {
+		Mode.BitsPerComponent.YCbCr422 = SDRCOLOUR | HDRCOLOUR; 
+	}
+	else if (ColourFormat == L"YCbCr420") {
+		Mode.BitsPerComponent.YCbCr420 = SDRCOLOUR | HDRCOLOUR; 
+	}
+	else {
+		Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;  // Default to RGB
+	}
 	
 
 	logStream.str(""); 
 	logStream << "IDDCX_TARGET_MODE2 configured with Size: " << Mode.Size
-		<< " and BitsPerComponent.Rgb: " << Mode.BitsPerComponent.Rgb;
+		<< " and colour format " << WStringToString(ColourFormat);
 	vddlog("d", logStream.str().c_str());
+
 
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
@@ -2856,11 +3098,26 @@ NTSTATUS VirtualDisplayDriverEvtIddCxAdapterQueryTargetInfo(
 	UNREFERENCED_PARAMETER(pInArgs);
 
 	pOutArgs->TargetCaps = IDDCX_TARGET_CAPS_HIGH_COLOR_SPACE | IDDCX_TARGET_CAPS_WIDE_COLOR_SPACE;
-	pOutArgs->DitheringSupport.Rgb = HDRCOLOUR;
+
+	if (ColourFormat == L"RGB") {
+		pOutArgs->DitheringSupport.Rgb = SDRCOLOUR | HDRCOLOUR;
+	}
+	else if (ColourFormat == L"YCbCr444") {
+		pOutArgs->DitheringSupport.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
+	}
+	else if (ColourFormat == L"YCbCr422") {
+		pOutArgs->DitheringSupport.YCbCr422 = SDRCOLOUR | HDRCOLOUR; 
+	}
+	else if (ColourFormat == L"YCbCr420") {
+		pOutArgs->DitheringSupport.YCbCr420 = SDRCOLOUR | HDRCOLOUR; 
+	}
+	else {
+		pOutArgs->DitheringSupport.Rgb = SDRCOLOUR | HDRCOLOUR;  // Default to RGB
+	}
 
 	logStream.str("");
 	logStream << "Target capabilities set to: " << pOutArgs->TargetCaps
-		<< "\nDithering support set to: " << pOutArgs->DitheringSupport.Rgb;
+		<< "\nDithering support colour format set to: " << WStringToString(ColourFormat);
 	vddlog("d", logStream.str().c_str());
 
 	return STATUS_SUCCESS;
@@ -2931,13 +3188,30 @@ NTSTATUS VirtualDisplayDriverEvtIddCxParseMonitorDescription2(
 			pInArgs->pMonitorModes[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
 			pInArgs->pMonitorModes[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
 
-			pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;
+
+			if (ColourFormat == L"RGB") {
+				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;
+				
+			}
+			else if (ColourFormat == L"YCbCr444") {
+				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
+			}
+			else if (ColourFormat == L"YCbCr422") {
+				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.YCbCr422 = SDRCOLOUR | HDRCOLOUR;
+			}
+			else if (ColourFormat == L"YCbCr420") {
+				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.YCbCr420 = SDRCOLOUR | HDRCOLOUR;
+			}
+			else {
+				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;  // Default to RGB
+			}
+
 
 
 			logStream << "\n  ModeIndex: " << ModeIndex
 				<< "\n    Size: " << pInArgs->pMonitorModes[ModeIndex].Size
 				<< "\n    Origin: " << pInArgs->pMonitorModes[ModeIndex].Origin
-				<< "\n    BitsPerComponent.Rgb: " << pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.Rgb;
+				<< "\n    Colour Format: " << WStringToString(ColourFormat);
 		}
 
 		vddlog("d", logStream.str().c_str());
@@ -2998,7 +3272,7 @@ NTSTATUS VirtualDisplayDriverEvtIddCxMonitorQueryTargetModes2(
 		{
 			logStream << "\n  TargetModeIndex: " << i
 				<< "\n    Size: " << TargetModes[i].Size
-				<< "\n    BitsPerComponent.Rgb: " << TargetModes[i].BitsPerComponent.Rgb;
+				<< "\n    ColourFormat: " << WStringToString(ColourFormat);
 		}
 		vddlog("d", logStream.str().c_str());
 	}

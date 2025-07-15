@@ -87,8 +87,8 @@ struct
 } Options;
 vector<tuple<int, int, int, int>> monitorModes;
 vector< DISPLAYCONFIG_VIDEO_SIGNAL_INFO> s_KnownMonitorModes2;
-UINT numVirtualDisplays;
-wstring gpuname;
+UINT numVirtualDisplays = 1;
+wstring gpuname = L"";
 wstring confpath = []() {
     wchar_t sysDrive[MAX_PATH];
     DWORD len = GetEnvironmentVariableW(L"SystemDrive", sysDrive, MAX_PATH);
@@ -1058,15 +1058,91 @@ void logAvailableGPUs() {
 	}
 }
 
-
-
-
-
 void ReloadDriver(HANDLE hPipe) {
-	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(hPipe);
-	if (pContext && pContext->pContext) {
-		pContext->pContext->InitAdapter();
-		vddlog("i", "Adapter reinitialized");
+	UNREFERENCED_PARAMETER(hPipe);
+	
+	vddlog("i", "Starting driver reload process");
+	
+	if (g_GlobalDevice != nullptr) {
+		lock_guard<mutex> lock(g_Mutex);
+		auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+		if (pContext && pContext->pContext) {
+			try {
+				// Step 1: Save current numVirtualDisplays before configuration reload
+				UINT oldNumVirtualDisplays = numVirtualDisplays;
+				vddlog("d", ("Saving current monitor count for cleanup: " + std::to_string(oldNumVirtualDisplays)).c_str());
+				
+				// Step 2: Clean up existing monitors first
+				vddlog("d", "Cleaning up existing monitors before reload");
+				
+				// Stop any active SwapChain processing
+				if (pContext->pContext->HasActiveSwapChain()) {
+					vddlog("d", "Stopping active SwapChain processing before reload");
+					pContext->pContext->UnassignSwapChain();
+					
+					// Additional wait to ensure cleanup completes
+					Sleep(100);
+				}
+				
+				// Destroy existing monitors using the OLD monitor count
+				for (unsigned int i = 0; i < oldNumVirtualDisplays; i++) {
+					if (pContext->pContext->HasActiveMonitor()) {
+						vddlog("d", ("Destroying existing monitor " + std::to_string(i) + " before reload").c_str());
+						pContext->pContext->DestroyMonitor(i);
+						
+						// Wait between monitor destructions
+						if (i < oldNumVirtualDisplays - 1) {
+							Sleep(50);
+						}
+					}
+				}
+				
+				// Step 3: Wait for system stabilization after cleanup
+				vddlog("d", "Waiting for system stabilization after cleanup");
+				Sleep(200);
+				
+				// Step 4: Reinitialize the adapter (this will reload XML configuration)
+				vddlog("d", "Reinitializing adapter with new configuration");
+				pContext->pContext->InitAdapter();
+				
+				// Step 5: Post-initialization stabilization
+				vddlog("d", "Waiting for adapter initialization to stabilize");
+				Sleep(100);
+				
+				vddlog("i", ("Driver reload completed successfully. Monitor count changed from " 
+					+ std::to_string(oldNumVirtualDisplays) + " to " + std::to_string(numVirtualDisplays)).c_str());
+			}
+			catch (const std::exception& e) {
+				stringstream errorStream;
+				errorStream << "Exception during driver reload: " << e.what();
+				vddlog("e", errorStream.str().c_str());
+				
+				// Try to continue with initialization anyway
+				try {
+					pContext->pContext->InitAdapter();
+					vddlog("w", "Adapter reinitialized after exception");
+				}
+				catch (...) {
+					vddlog("e", "Failed to reinitialize adapter after exception");
+				}
+			}
+			catch (...) {
+				vddlog("e", "Unknown exception during driver reload");
+				
+				// Try to continue with initialization anyway
+				try {
+					pContext->pContext->InitAdapter();
+					vddlog("w", "Adapter reinitialized after unknown exception");
+				}
+				catch (...) {
+					vddlog("e", "Failed to reinitialize adapter after unknown exception");
+				}
+			}
+		} else {
+			vddlog("e", "Invalid device context for driver reload");
+		}
+	} else {
+		vddlog("e", "Global device not available for reload");
 	}
 }
 
@@ -1297,11 +1373,49 @@ void HandleClient(HANDLE hPipe) {
 				lock_guard<mutex> lock(g_Mutex);
 				auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 				if (pContext && pContext->pContext) {
-					for (unsigned int i = 0; i < numVirtualDisplays; i++) {
-						pContext->pContext->DestroyMonitor(i);
+					vddlog("i", "Starting monitor destruction process");
+					
+					// Pre-destruction preparation
+					vddlog("d", "Preparing system for monitor destruction");
+					Sleep(50); // Allow any pending operations to complete
+					
+					try {
+						for (unsigned int i = 0; i < numVirtualDisplays; i++) {
+							vddlog("d", ("Destroying monitor " + std::to_string(i) + " of " + std::to_string(numVirtualDisplays)).c_str());
+							pContext->pContext->DestroyMonitor(i);
+							
+							// Wait between monitor destructions if multiple monitors
+							if (numVirtualDisplays > 1 && i < numVirtualDisplays - 1) {
+								vddlog("d", "Waiting between monitor destructions");
+								Sleep(100);
+							}
+						}
+						
+						// Post-destruction stabilization
+						vddlog("d", "Allowing system to stabilize after monitor destruction");
+						Sleep(100);
+						
+						vddlog("i", "All monitors destroyed successfully");
 					}
-					vddlog("i", "Monitor destroyed");
+					catch (const std::exception& e) {
+						stringstream errorStream;
+						errorStream << "Exception during monitor destruction: " << e.what();
+						vddlog("e", errorStream.str().c_str());
+						
+						// Additional recovery time after exception
+						Sleep(200);
+					}
+					catch (...) {
+						vddlog("e", "Unknown exception during monitor destruction");
+						
+						// Additional recovery time after unknown exception
+						Sleep(200);
+					}
+				} else {
+					vddlog("e", "Failed to get device context for monitor destruction");
 				}
+			} else {
+				vddlog("e", "Global device not initialized for monitor destruction");
 			}
 		}
 		else {
@@ -1408,31 +1522,34 @@ void StopNamedPipeServer() {
 	}
 }
 
+// 优先从环境变量读取配置路径，如果没有则回退到注册表读取
 bool initpath() {
+	// 先尝试从环境变量读取
+	wchar_t envPath[MAX_PATH] = { 0 };
+	DWORD envLen = GetEnvironmentVariableW(L"ZAKOVDDPATH", envPath, MAX_PATH);
+	if (envLen > 0 && envLen < MAX_PATH) {
+		confpath = envPath;
+		return true;
+	}
+
+	// 环境变量未设置，尝试从注册表读取
 	HKEY hKey;
-	wchar_t szPath[MAX_PATH];
+	wchar_t szPath[MAX_PATH] = { 0 };
 	DWORD dwBufferSize = sizeof(szPath);
 	LONG lResult;
-	//vddlog("i", "Reading reg: Computer\\HKEY_LOCAL_MACHINE\\SOFTWARE\\MikeTheTech\\VirtualDisplayDriver");           Remove this due to the fact, if reg key exists, this is called before reading
 	lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ZakoTech\\ZakoDisplayAdapter", 0, KEY_READ, &hKey);
 	if (lResult != ERROR_SUCCESS) {
-		ostringstream oss;
-		oss << "Failed to open registry key for path. Error code: " << lResult;
-		//vddlog("w", oss.str().c_str());  // These are okay to call though since they're only called if the reg doesnt exist
+		// 注册表不存在，返回false
 		return false;
 	}
 
 	lResult = RegQueryValueExW(hKey, L"VDDPATH", NULL, NULL, (LPBYTE)szPath, &dwBufferSize);
 	if (lResult != ERROR_SUCCESS) {
-		ostringstream oss;
-		oss << "Failed to open registry key for path. Error code: " << lResult;
-		//vddlog("w", oss.str().c_str()); Prevent these from being called since no longer checks before logging, only on startup whether it should
 		RegCloseKey(hKey);
 		return false;
 	}
 
 	confpath = szPath;
-
 	RegCloseKey(hKey);
 
 	return true;
@@ -1447,8 +1564,61 @@ EvtDriverUnload(
 )
 {
 	UNREFERENCED_PARAMETER(Driver);
+	
+	vddlog("i", "Starting driver unload process");
+	
+	// Clean up global device resources before stopping services
+	if (g_GlobalDevice != nullptr) {
+		vddlog("d", "Cleaning up global device resources");
+		
+		try {
+			lock_guard<mutex> lock(g_Mutex);
+			auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+			if (pContext && pContext->pContext) {
+				// Stop any active SwapChain processing
+				if (pContext->pContext->HasActiveSwapChain()) {
+					vddlog("d", "Stopping active SwapChain processing during unload");
+					pContext->pContext->UnassignSwapChain();
+					Sleep(50); // Brief wait for cleanup
+				}
+				
+				// Destroy any active monitors
+				for (unsigned int i = 0; i < numVirtualDisplays; i++) {
+					if (pContext->pContext->HasActiveMonitor()) {
+						vddlog("d", ("Destroying monitor " + std::to_string(i) + " during unload").c_str());
+						try {
+							pContext->pContext->DestroyMonitor(i);
+						}
+						catch (...) {
+							vddlog("w", ("Failed to cleanly destroy monitor " + std::to_string(i) + " during unload").c_str());
+						}
+						
+						if (i < numVirtualDisplays - 1) {
+							Sleep(25); // Short wait between destructions
+						}
+					}
+				}
+				
+				vddlog("d", "Global device resource cleanup completed");
+			}
+		}
+		catch (const std::exception& e) {
+			stringstream errorStream;
+			errorStream << "Exception during device cleanup in unload: " << e.what();
+			vddlog("e", errorStream.str().c_str());
+		}
+		catch (...) {
+			vddlog("e", "Unknown exception during device cleanup in unload");
+		}
+		
+		// Wait for system stabilization
+		Sleep(100);
+	}
+	
+	// Stop the named pipe server
 	StopNamedPipeServer();
-	vddlog("i", "Driver Unloaded");
+	
+	vddlog("i", "Driver unload completed");
 }
 
 _Use_decl_annotations_
@@ -1807,22 +1977,6 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 	// redirects IoDeviceControl requests to an internal queue. This sample does not need this.
 	// IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
 
-	loadSettings();
-	logStream.str("");
-	if (gpuname.empty() || gpuname == L"default") {
-		const wstring adaptername = confpath + L"\\adapter.txt";
-		Options.Adapter.load(adaptername.c_str());
-		logStream << "Attempting to Load GPU from adapter.txt";
-	}
-	else {
-		Options.Adapter.xmlprovide(gpuname);
-		logStream << "Loading GPU from vdd_settings.xml";
-	}
-	vddlog("i", logStream.str().c_str());
-	GetGpuInfo();
-
-
-
 	IddConfig.EvtIddCxAdapterInitFinished = VirtualDisplayDriverAdapterInitFinished;
 
 	IddConfig.EvtIddCxMonitorGetDefaultDescriptionModes = VirtualDisplayDriverMonitorGetDefaultModes;
@@ -1857,11 +2011,59 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 	WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectDeviceContextWrapper);
 	Attr.EvtCleanupCallback = [](WDFOBJECT Object)
 		{
+			vddlog("d", "Device cleanup callback triggered");
+			
 			// Automatically cleanup the context when the WDF object is about to be deleted
 			auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Object);
-			if (pContext)
+			if (pContext && pContext->pContext)
 			{
+				try {
+					// Perform comprehensive cleanup before destroying the context
+					vddlog("d", "Performing comprehensive device cleanup");
+					
+					// Stop any active SwapChain processing
+					if (pContext->pContext->HasActiveSwapChain()) {
+						vddlog("d", "Stopping active SwapChain during device cleanup");
+						pContext->pContext->UnassignSwapChain();
+						Sleep(50); // Allow cleanup to complete
+					}
+					
+					// Destroy any active monitors
+					if (pContext->pContext->HasActiveMonitor()) {
+						vddlog("d", "Destroying active monitor during device cleanup");
+						try {
+							// Note: We only try to destroy monitor 0 since DestroyMonitor handles single monitor
+							pContext->pContext->DestroyMonitor(0);
+						}
+						catch (...) {
+							vddlog("w", "Exception while destroying monitor during device cleanup");
+						}
+					}
+					
+					// Wait for stabilization
+					Sleep(50);
+					
+					vddlog("d", "Device-specific cleanup completed, calling context cleanup");
+				}
+				catch (const std::exception& e) {
+					stringstream errorStream;
+					errorStream << "Exception during device cleanup: " << e.what();
+					vddlog("e", errorStream.str().c_str());
+				}
+				catch (...) {
+					vddlog("e", "Unknown exception during device cleanup");
+				}
+				
+				// Always call the context cleanup
 				pContext->Cleanup();
+				vddlog("d", "Device cleanup callback completed");
+			}
+			else if (pContext) {
+				vddlog("w", "Device context wrapper found but context is null during cleanup");
+				pContext->Cleanup();
+			}
+			else {
+				vddlog("w", "No device context wrapper found during cleanup");
 			}
 		};
 
@@ -1910,7 +2112,7 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 
-	// 在设备创建成功后保存全局引用
+	// Save global reference after successful device creation
 	g_GlobalDevice = Device;
 
 	return Status;
@@ -2119,8 +2321,8 @@ SwapChainProcessor::~SwapChainProcessor()
 
 	if (m_hThread.Get())
 	{
-		// Wait for the thread to terminate
-		DWORD waitResult = WaitForSingleObject(m_hThread.Get(), INFINITE);
+		// Wait for the thread to terminate with a timeout to avoid hanging
+		DWORD waitResult = WaitForSingleObject(m_hThread.Get(), 5000); // 5 second timeout
 		switch (waitResult)
 		{
 		case WAIT_OBJECT_0:
@@ -2135,12 +2337,20 @@ SwapChainProcessor::~SwapChainProcessor()
 			break;
 		case WAIT_TIMEOUT:
 			logStream.str(""); 
-			logStream << "Thread wait timed out. This should not happen. GetLastError: " << GetLastError();
-			vddlog("e", logStream.str().c_str());
+			logStream << "Thread wait timed out after 5 seconds. Forcing termination.";
+			vddlog("w", logStream.str().c_str());
+			// Force terminate the thread if it doesn't respond
+			if (!TerminateThread(m_hThread.Get(), 1)) {
+				logStream.str("");
+				logStream << "Failed to terminate thread. GetLastError: " << GetLastError();
+				vddlog("e", logStream.str().c_str());
+			} else {
+				vddlog("w", "Thread forcefully terminated due to timeout.");
+			}
 			break;
 		default:
 			logStream.str(""); 
-			logStream << "Unexpected result from WaitForSingleObject. GetLastError: " << GetLastError();
+			logStream << "Unexpected result from WaitForSingleObject: " << waitResult << ". GetLastError: " << GetLastError();
 			vddlog("e", logStream.str().c_str());
 			break;
 		}
@@ -2197,23 +2407,37 @@ void SwapChainProcessor::Run()
 
 	// Always delete the swap-chain object when swap-chain processing loop terminates in order to kick the system to
 	// provide a new swap-chain if necessary.
-	/*
-	WdfObjectDelete((WDFOBJECT)m_hSwapChain);
-	m_hSwapChain = nullptr;   added error handling in so its not called to delete swap chain if its not needed.
-	*/
 	if (m_hSwapChain)
 	{
-		WdfObjectDelete((WDFOBJECT)m_hSwapChain);
-		logStream.str("");
-		logStream << "Swap-chain object deleted.";
-		vddlog("d", logStream.str().c_str());
-		m_hSwapChain = nullptr;
+		try {
+			// Attempt graceful cleanup first
+			vddlog("d", "Attempting graceful swap-chain cleanup");
+			
+			// Give the system time to complete any pending operations
+			Sleep(10);
+			
+			WdfObjectDelete((WDFOBJECT)m_hSwapChain);
+			logStream.str("");
+			logStream << "Swap-chain object deleted successfully.";
+			vddlog("d", logStream.str().c_str());
+			m_hSwapChain = nullptr;
+		}
+		catch (const std::exception& e) {
+			stringstream errorStream;
+			errorStream << "Exception while deleting swap-chain: " << e.what();
+			vddlog("e", errorStream.str().c_str());
+			m_hSwapChain = nullptr; // Mark as null to prevent further access
+		}
+		catch (...) {
+			vddlog("e", "Unknown exception while deleting swap-chain");
+			m_hSwapChain = nullptr; // Mark as null to prevent further access
+		}
 	}
 	else
 	{
 		logStream.str("");
 		logStream << "No valid swap-chain object to delete.";
-		vddlog("w", logStream.str().c_str());
+		vddlog("d", logStream.str().c_str());
 	}
 	/*
 	AvRevertMmThreadCharacteristics(AvTaskHandle);
@@ -2491,33 +2715,166 @@ vector<BYTE> loadEdid(const string& filePath) {
 int maincalc() {
 	vector<BYTE> edid = loadEdid(WStringToString(confpath) + "\\user_edid.bin");
 
+	// Validate EDID data
+	if (edid.empty()) {
+		vddlog("e", "EDID data is empty, adapter initialization may fail");
+		return -1;
+	}
+	
+	if (edid.size() < 128) {
+		stringstream ss;
+		ss << "EDID data too small (" << edid.size() << " bytes), expected at least 128 bytes";
+		vddlog("e", ss.str().c_str());
+		return -1;
+	}
+
 	if (!preventManufacturerSpoof) modifyEdid(edid);
 	BYTE checksum = calculateChecksum(edid);
 	edid[127] = checksum;
+	
 	// Setting this variable is depricated, hardcoded edid is either returned or custom in loading edid function
 	IndirectDeviceContext::s_KnownMonitorEdid = edid;
+	
+	stringstream ss;
+	ss << "EDID data loaded successfully (" << edid.size() << " bytes)";
+	vddlog("d", ss.str().c_str());
+	
 	return 0;
 }
 
 
 
 IndirectDeviceContext::IndirectDeviceContext(_In_ WDFDEVICE WdfDevice) :
-	m_WdfDevice(WdfDevice)
+	m_WdfDevice(WdfDevice), m_hMouseEvent(nullptr)
 {
 	m_Adapter = {};
+}
+
+// Helper function to wait with system state validation
+bool IndirectDeviceContext::WaitForSystemStabilization(int timeoutMs, const char* operation)
+{
+	stringstream logStream;
+	logStream << "Waiting for system stabilization during: " << operation;
+	vddlog("d", logStream.str().c_str());
+	
+	const int checkInterval = 25; // Check every 25ms
+	int elapsed = 0;
+	
+	while (elapsed < timeoutMs) {
+		Sleep(checkInterval);
+		elapsed += checkInterval;
+		
+		// Basic validation - check if our monitor handle is still valid
+		if (m_Monitor == nullptr) {
+			vddlog("d", "Monitor handle became null during wait - system may have cleaned up");
+			return true; // This might be expected in some cases
+		}
+		
+		// Check if we're in the middle of multiple operations
+		if (elapsed % 100 == 0) { // Log every 100ms
+			logStream.str("");
+			logStream << "Still waiting for stabilization... (" << elapsed << "ms/" << timeoutMs << "ms)";
+			vddlog("d", logStream.str().c_str());
+		}
+	}
+	
+	logStream.str("");
+	logStream << "System stabilization wait completed for: " << operation;
+	vddlog("d", logStream.str().c_str());
+	return true;
+}
+
+// Helper function to validate monitor state before critical operations
+bool IndirectDeviceContext::ValidateMonitorState(const char* operation)
+{
+	stringstream logStream;
+	logStream << "Validating monitor state for: " << operation;
+	vddlog("d", logStream.str().c_str());
+	
+	if (m_Monitor == nullptr) {
+		logStream.str("");
+		logStream << "Monitor is null during: " << operation;
+		vddlog("w", logStream.str().c_str());
+		return false;
+	}
+	
+	// Additional state checks could be added here
+	// For now, we just verify the handle is not null
+	
+	logStream.str("");
+	logStream << "Monitor state validation passed for: " << operation;
+	vddlog("d", logStream.str().c_str());
+	return true;
 }
 
 IndirectDeviceContext::~IndirectDeviceContext()
 {
 	stringstream logStream;
 
-	logStream << "Destroying IndirectDeviceContext. Resetting processing thread.";
+	logStream << "Destroying IndirectDeviceContext. Starting cleanup process.";
 	vddlog("d", logStream.str().c_str());
 
-	m_ProcessingThread.reset();
+	// First stop the SwapChain processing thread
+	if (m_ProcessingThread) {
+		try {
+			logStream.str("");
+			logStream << "Stopping SwapChain processing thread in destructor";
+			vddlog("d", logStream.str().c_str());
+			
+			m_ProcessingThread.reset();
+			
+			logStream.str("");
+			logStream << "SwapChain processing thread stopped successfully in destructor";
+			vddlog("d", logStream.str().c_str());
+		}
+		catch (const std::exception& e) {
+			stringstream errorStream;
+			errorStream << "Exception while stopping SwapChain in destructor: " << e.what();
+			vddlog("e", errorStream.str().c_str());
+		}
+		catch (...) {
+			vddlog("e", "Unknown exception while stopping SwapChain in destructor");
+		}
+	}
+
+	// Clean up hardware cursor event handle
+	if (m_hMouseEvent != nullptr) {
+		try {
+			vddlog("d", "Cleaning up hardware cursor event handle in destructor");
+			CloseHandle(m_hMouseEvent);
+			m_hMouseEvent = nullptr;
+			vddlog("d", "Hardware cursor event handle cleaned up successfully");
+		}
+		catch (const std::exception& e) {
+			stringstream errorStream;
+			errorStream << "Exception while cleaning mouse event in destructor: " << e.what();
+			vddlog("e", errorStream.str().c_str());
+		}
+		catch (...) {
+			vddlog("e", "Unknown exception while cleaning mouse event in destructor");
+		}
+	}
+
+	if (m_Monitor != nullptr) {
+		try {
+			vddlog("d", "Cleaning up monitor in destructor");
+			// Do not call IddCxMonitorDeparture, as this may not be safe in the destructor
+			WdfObjectDelete(m_Monitor);
+			m_Monitor = nullptr;
+			vddlog("d", "Monitor cleaned up successfully in destructor");
+		}
+		catch (const std::exception& e) {
+			stringstream errorStream;
+			errorStream << "Exception while cleaning monitor in destructor: " << e.what();
+			vddlog("e", errorStream.str().c_str());
+		}
+		catch (...) {
+			vddlog("e", "Unknown exception while cleaning monitor in destructor");
+		}
+	}
 
 	logStream.str("");
-	logStream << "Processing thread has been reset.";
+	logStream << "IndirectDeviceContext cleanup completed.";
 	vddlog("d", logStream.str().c_str());
 }
 
@@ -2525,8 +2882,41 @@ IndirectDeviceContext::~IndirectDeviceContext()
 
 void IndirectDeviceContext::InitAdapter()
 {
-	maincalc();
 	stringstream logStream;
+	
+	// Load settings and GPU configuration first
+	loadSettings();
+	logStream.str("");
+	if (gpuname.empty() || gpuname == L"default") {
+		const wstring adaptername = confpath + L"\\adapter.txt";
+		Options.Adapter.load(adaptername.c_str());
+		logStream << "Attempting to Load GPU from adapter.txt";
+	}
+	else {
+		Options.Adapter.xmlprovide(gpuname);
+		logStream << "Loading GPU from vdd_settings.xml";
+	}
+	vddlog("i", logStream.str().c_str());
+	GetGpuInfo();
+
+	// Validate EDID data before proceeding
+	int edidResult = maincalc();
+	if (edidResult != 0) {
+		vddlog("e", "EDID validation failed, adapter initialization will likely fail");
+		// Continue anyway, but log the warning
+	}
+
+	// Validate monitor modes
+	if (monitorModes.empty()) {
+		vddlog("w", "No monitor modes loaded, adding fallback 1920x1080@60Hz mode");
+		int vsync_num, vsync_den;
+		float_to_vsync(60.0f, vsync_num, vsync_den);
+		monitorModes.push_back(std::make_tuple(1920, 1080, vsync_num, vsync_den));
+	}
+	
+	stringstream modeLog;
+	modeLog << "Loaded " << monitorModes.size() << " monitor modes for adapter initialization";
+	vddlog("d", modeLog.str().c_str());
 
 	// ==============================
 	// TODO: Update the below diagnostic information in accordance with the target hardware. The strings and version
@@ -2535,6 +2925,7 @@ void IndirectDeviceContext::InitAdapter()
 	// This is also where static per-adapter capabilities are determined.
 	// ==============================
 
+	logStream.str("");
 	logStream << "Initializing adapter...";
 	vddlog("d", logStream.str().c_str());
 	logStream.str("");
@@ -2547,6 +2938,14 @@ void IndirectDeviceContext::InitAdapter()
 		logStream << "FP16 processing capability detected.";
 	}
 
+	// Validate and set monitor count with bounds checking
+	if (numVirtualDisplays == 0 || numVirtualDisplays > 16) {
+		logStream << "Invalid numVirtualDisplays value: " << numVirtualDisplays << ". Setting to 1.";
+		vddlog("w", logStream.str().c_str());
+		numVirtualDisplays = 1;
+		logStream.str("");
+	}
+
 	// Declare basic feature support for the adapter (required)
 	AdapterCaps.MaxMonitorsSupported = numVirtualDisplays;
 	AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
@@ -2554,9 +2953,9 @@ void IndirectDeviceContext::InitAdapter()
 	AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
 	// Declare your device strings for telemetry (required)
-	AdapterCaps.EndPointDiagnostics.pEndPointFriendlyName = L"VirtualDisplayDriver Device";
-	AdapterCaps.EndPointDiagnostics.pEndPointManufacturerName = L"MikeTheTech";
-	AdapterCaps.EndPointDiagnostics.pEndPointModelName = L"VirtualDisplayDriver Model";
+	AdapterCaps.EndPointDiagnostics.pEndPointFriendlyName = L"ZakoVdd Device";
+	AdapterCaps.EndPointDiagnostics.pEndPointManufacturerName = L"ZakoTech";
+	AdapterCaps.EndPointDiagnostics.pEndPointModelName = L"ZakoVdd Model";
 
 	// Declare your hardware and firmware versions (required)
 	IDDCX_ENDPOINT_VERSION Version = {};
@@ -2587,16 +2986,28 @@ void IndirectDeviceContext::InitAdapter()
 	AdapterInit.pCaps = &AdapterCaps;
 	AdapterInit.ObjectAttributes = &Attr;
 
+	// Validate required parameters before initialization
+	if (AdapterInit.WdfDevice == nullptr) {
+		vddlog("e", "WdfDevice is null, cannot initialize adapter");
+		return;
+	}
+
 	// Start the initialization of the adapter, which will trigger the AdapterFinishInit callback later
 	IDARG_OUT_ADAPTER_INIT AdapterInitOut;
 	NTSTATUS Status = IddCxAdapterInitAsync(&AdapterInit, &AdapterInitOut);
 
-	logStream << "Adapter Initialization Status: " << Status;
+	logStream << "Adapter Initialization Status: 0x" << std::hex << Status;
 	vddlog("d", logStream.str().c_str());
 	logStream.str("");
 
 	if (NT_SUCCESS(Status))
 	{
+		// Validate the output handle
+		if (AdapterInitOut.AdapterObject == nullptr) {
+			vddlog("e", "Adapter initialization returned null handle despite success status");
+			return;
+		}
+
 		// Store a reference to the WDF adapter handle
 		m_Adapter = AdapterInitOut.AdapterObject;
 		logStream << "Adapter handle stored successfully.";
@@ -2604,10 +3015,20 @@ void IndirectDeviceContext::InitAdapter()
 
 		// Store the device context object into the WDF object context
 		auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterInitOut.AdapterObject);
-		pContext->pContext = this;
+		if (pContext != nullptr) {
+			pContext->pContext = this;
+			vddlog("d", "Device context successfully linked to adapter");
+		} else {
+			vddlog("e", "Failed to get adapter context wrapper");
+		}
 	}
 	else {
-		logStream << "Failed to initialize adapter. Status: " << Status;
+		logStream << "Failed to initialize adapter. Status: 0x" << std::hex << Status;
+		vddlog("e", logStream.str().c_str());
+		
+		// Log additional diagnostic information
+		logStream.str("");
+		logStream << "Adapter initialization failed with numVirtualDisplays=" << numVirtualDisplays;
 		vddlog("e", logStream.str().c_str());
 	}
 }
@@ -2726,21 +3147,117 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index) {
 	logStream << "Destroying monitor (Index: " << index << ")";
 	vddlog("d", logStream.str().c_str());
 
-	NTSTATUS Status = IddCxMonitorDeparture(m_Monitor);
-	if (!NT_SUCCESS(Status)) {
+	try {
+		// Step 1: Stop SwapChain processing immediately
+		if (m_ProcessingThread) {
+			vddlog("d", "Stopping SwapChain processing thread before monitor destruction");
+			m_ProcessingThread.reset();
+			vddlog("d", "SwapChain processing thread stopped");
+		}
+
+		// Step 1.5: Clean up hardware cursor event handle
+		if (m_hMouseEvent != nullptr) {
+			vddlog("d", "Cleaning up hardware cursor event handle");
+			CloseHandle(m_hMouseEvent);
+			m_hMouseEvent = nullptr;
+			vddlog("d", "Hardware cursor event handle cleaned up");
+		}
+
+		// Step 2: Wait for all resources to stabilize with system validation
+		if (!WaitForSystemStabilization(300, "resource stabilization before monitor departure")) {
+			vddlog("w", "System stabilization timed out, continuing with departure");
+		}
+
+		// Step 3: Report monitor departure to the system with retry mechanism
+		NTSTATUS Status = STATUS_UNSUCCESSFUL;
+		if (!ValidateMonitorState("monitor departure reporting")) {
+			vddlog("e", "Monitor state validation failed, skipping departure reporting");
+		} else {
+			vddlog("d", "Reporting monitor departure to system");
+			int retryCount = 0;
+			const int maxRetries = 3;
+			
+			while (retryCount < maxRetries) {
+				// Validate state before each retry
+				if (!ValidateMonitorState("monitor departure retry")) {
+					vddlog("w", "Monitor state invalid during retry, aborting departure attempts");
+					break;
+				}
+				
+				Status = IddCxMonitorDeparture(m_Monitor);
+				if (NT_SUCCESS(Status)) {
+					vddlog("d", "Successfully reported monitor departure");
+					break;
+				} else {
+					retryCount++;
+					stringstream errorStream;
+					errorStream << "Failed to report monitor departure attempt " << retryCount 
+						<< "/" << maxRetries << ". Status: 0x" << hex << Status;
+					vddlog("w", errorStream.str().c_str());
+					
+					if (retryCount < maxRetries) {
+						vddlog("d", "Retrying monitor departure after short delay");
+						Sleep(100); // Wait before retry
+					}
+				}
+			}
+		}
+		
+		if (!NT_SUCCESS(Status)) {
+			vddlog("e", "All monitor departure attempts failed, continuing with cleanup");
+			// Continue cleanup even if failed to avoid resource leaks
+		}
+
+		// Step 4: Wait for system to process the departure with validation
+		if (!WaitForSystemStabilization(500, "system processing of monitor departure")) {
+			vddlog("w", "System departure processing timed out, continuing with cleanup");
+		}
+
+		// Step 5: Safely delete the monitor object
+		if (ValidateMonitorState("final monitor deletion")) {
+			vddlog("d", "Deleting monitor WDF object");
+			WdfObjectDelete(m_Monitor);
+			m_Monitor = nullptr;
+			vddlog("d", "Monitor WDF object deleted successfully");
+		} else {
+			vddlog("w", "Monitor already null, skipping WDF object deletion");
+		}
+
+		logStream.str("");
+		logStream << "Monitor object destroyed successfully (Index: " << index << ")";
+		vddlog("i", logStream.str().c_str());
+
+	} catch (const std::exception& e) {
 		stringstream errorStream;
-		errorStream << "Failed to report monitor departure. Status: 0x" << hex << Status;
+		errorStream << "Exception during monitor destruction (Index: " << index << "): " << e.what();
 		vddlog("e", errorStream.str().c_str());
-	} else {
-		vddlog("d", "Successfully reported monitor departure");
+		
+		// Force cleanup even after exception
+		if (m_Monitor != nullptr) {
+			try {
+				WdfObjectDelete(m_Monitor);
+				m_Monitor = nullptr;
+				vddlog("w", "Forced monitor cleanup after exception");
+			} catch (...) {
+				vddlog("e", "Failed to force cleanup monitor after exception");
+				m_Monitor = nullptr; // Set to null anyway to prevent further access
+			}
+		}
+	} catch (...) {
+		vddlog("e", "Unknown exception during monitor destruction");
+		
+		// Force cleanup even after unknown exception
+		if (m_Monitor != nullptr) {
+			try {
+				WdfObjectDelete(m_Monitor);
+				m_Monitor = nullptr;
+				vddlog("w", "Forced monitor cleanup after unknown exception");
+			} catch (...) {
+				vddlog("e", "Failed to force cleanup monitor after unknown exception");
+				m_Monitor = nullptr; // Set to null anyway to prevent further access
+			}
+		}
 	}
-
-	WdfObjectDelete(m_Monitor);
-	m_Monitor = nullptr;
-
-	logStream.str("");
-	logStream << "Monitor object destroyed (Index: " << index << ")";
-	vddlog("d", logStream.str().c_str());
 }
 
 void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent)
@@ -2765,14 +3282,21 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 		m_ProcessingThread.reset(new SwapChainProcessor(SwapChain, Device, NewFrameEvent));
 
 		if (hardwareCursor){
-			HANDLE mouseEvent = CreateEventA(
+			// Clean up any existing mouse event handle first
+			if (m_hMouseEvent != nullptr) {
+				CloseHandle(m_hMouseEvent);
+				m_hMouseEvent = nullptr;
+				vddlog("d", "Cleaned up existing mouse event handle");
+			}
+
+			m_hMouseEvent = CreateEventA(
 				nullptr, 
 				false,   
 				false,   
 				"VirtualDisplayDriverMouse"
 			);
 
-			if (!mouseEvent)
+			if (!m_hMouseEvent)
 			{
 				vddlog("e", "Failed to create mouse event. No hardware cursor supported!");
 				return;
@@ -2788,10 +3312,9 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 
 			//DirectXDevice->QueryMaxCursorSize(&cursorInfo.MaxX, &cursorInfo.MaxY);                 Experimental to get max cursor size - THIS IS NTO WORKING CODE
 
-
 			IDARG_IN_SETUP_HWCURSOR hwCursor = {};
 			hwCursor.CursorInfo = cursorInfo;
-			hwCursor.hNewCursorDataAvailable = mouseEvent;
+			hwCursor.hNewCursorDataAvailable = m_hMouseEvent;
 
 			NTSTATUS Status = IddCxMonitorSetupHardwareCursor(
 				Monitor,
@@ -2800,7 +3323,9 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 
 			if (FAILED(Status))
 			{
-				CloseHandle(mouseEvent); 
+				CloseHandle(m_hMouseEvent); 
+				m_hMouseEvent = nullptr;
+				vddlog("e", "Failed to setup hardware cursor");
 				return;
 			}
 
@@ -2818,8 +3343,45 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 void IndirectDeviceContext::UnassignSwapChain()
 {
 	// Stop processing the last swap-chain
-	vddlog("i", "Unasigning Swapchain. Processing will be stopped.");
-	m_ProcessingThread.reset();
+	vddlog("i", "Unassigning Swapchain. Processing will be stopped.");
+	
+	if (m_ProcessingThread) {
+		try {
+			vddlog("d", "Stopping SwapChain processing thread");
+			
+			// Store a reference to ensure thread cleanup completes
+			auto processingThread = std::move(m_ProcessingThread);
+			
+			// Give the thread time to clean up gracefully
+			vddlog("d", "Waiting for SwapChain thread to complete cleanup");
+			Sleep(50);
+			
+			// Now reset the thread (this will trigger the destructor)
+			processingThread.reset();
+			
+			vddlog("d", "SwapChain processing thread stopped successfully");
+			
+			// Additional wait to ensure all cleanup is complete
+			Sleep(25);
+			
+		}
+		catch (const std::exception& e) {
+			stringstream errorStream;
+			errorStream << "Exception while stopping SwapChain processing thread: " << e.what();
+			vddlog("e", errorStream.str().c_str());
+		}
+		catch (...) {
+			vddlog("e", "Unknown exception while stopping SwapChain processing thread");
+		}
+	} else {
+		vddlog("d", "No SwapChain processing thread to stop");
+	}
+	
+	// Ensure m_ProcessingThread is definitely null
+	if (m_ProcessingThread) {
+		vddlog("w", "Forcing m_ProcessingThread to null after cleanup");
+		m_ProcessingThread.reset();
+	}
 }
 
 #pragma endregion
@@ -2877,6 +3439,9 @@ NTSTATUS VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITOR
 	stringstream logStream;
 	logStream << "Parsing monitor description. Input buffer count: " << pInArgs->MonitorModeBufferInputCount;
 	vddlog("d", logStream.str().c_str());
+
+	// Clear previous monitor modes to prevent accumulation on reload
+	s_KnownMonitorModes2.clear();
 
 	for (int i = 0; i < monitorModes.size(); i++) {
 		s_KnownMonitorModes2.push_back(dispinfo(std::get<0>(monitorModes[i]), std::get<1>(monitorModes[i]), std::get<2>(monitorModes[i]), std::get<3>(monitorModes[i])));
@@ -3166,6 +3731,9 @@ NTSTATUS VirtualDisplayDriverEvtIddCxParseMonitorDescription2(
 			<< ", RefreshRate: " << std::get<2>(mode);
 	}
 	vddlog("d", logStream.str().c_str());
+
+	// Clear previous monitor modes to prevent accumulation on reload
+	s_KnownMonitorModes2.clear();
 
 	for (int i = 0; i < monitorModes.size(); i++) {
 		s_KnownMonitorModes2.push_back(dispinfo(std::get<0>(monitorModes[i]), std::get<1>(monitorModes[i]), std::get<2>(monitorModes[i]), std::get<3>(monitorModes[i])));

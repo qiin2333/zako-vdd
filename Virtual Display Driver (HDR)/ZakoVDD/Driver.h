@@ -14,8 +14,15 @@
 
 #include <memory>
 #include <vector>
+#include <tuple>
+#include <string>
 
 #include "Trace.h"
+
+// Forward declarations for global variables
+extern UINT numVirtualDisplays;
+extern std::wstring gpuname;
+extern std::vector<std::tuple<int, int, int, int>> monitorModes;
 
 namespace Microsoft
 {
@@ -87,17 +94,25 @@ namespace Microsoft
             void CreateMonitor(unsigned int index);
             void DestroyMonitor(unsigned int index);
 
-            void AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
+            void AssignSwapChain(IDDCX_MONITOR &Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
             void UnassignSwapChain();
 
-        protected:
+            // Helper methods for driver reload
+            bool HasActiveSwapChain() const { return m_ProcessingThread != nullptr; }
+            bool HasActiveMonitor() const { return m_Monitor != nullptr; }
 
+        private:
+            bool WaitForSystemStabilization(int timeoutMs, const char *operation);
+            bool ValidateMonitorState(const char *operation);
+
+        protected:
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
             IDDCX_MONITOR m_Monitor;
             IDDCX_MONITOR m_Monitor2;
 
             std::unique_ptr<SwapChainProcessor> m_ProcessingThread;
+            HANDLE m_hMouseEvent; // Hardware cursor event handle
 
         public:
             static const DISPLAYCONFIG_VIDEO_SIGNAL_INFO s_KnownMonitorModes[];

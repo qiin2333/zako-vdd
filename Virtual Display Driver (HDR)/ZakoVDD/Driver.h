@@ -91,7 +91,7 @@ namespace Microsoft
             void InitAdapter();
             void FinishInit();
 
-            void CreateMonitor(unsigned int index);
+            void CreateMonitor(unsigned int index, const GUID* pClientGuid = nullptr, float maxNits = 1000.0f, float minNits = 0.0001f, float maxFALL = 0.0f, float widthCm = 0.0f, float heightCm = 0.0f);
             void DestroyMonitor(unsigned int index);
 
             void AssignSwapChain(IDDCX_MONITOR &Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);

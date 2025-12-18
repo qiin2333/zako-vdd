@@ -13,12 +13,12 @@ Environment:
 --*/
 
 #include "Driver.h"
-//#include "Driver.tmh"
-#include<fstream>
-#include<sstream>
-#include<string>
-#include<tuple>
-#include<vector>
+// #include "Driver.tmh"
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <tuple>
+#include <vector>
 #include <AdapterOption.h>
 #include <xmllite.h>
 #include <shlwapi.h>
@@ -26,6 +26,7 @@ Environment:
 #include <iostream>
 #include <cstdlib>
 #include <windows.h>
+#include <objbase.h>
 #include <cstdio>
 #include <sddl.h>
 #include <mutex>
@@ -36,10 +37,6 @@ Environment:
 #include <cwchar>
 #include <map>
 #include <set>
-
-
-
-
 
 #define PIPE_NAME L"\\\\.\\pipe\\ZakoVDDPipe"
 
@@ -56,7 +53,7 @@ using namespace std;
 using namespace Microsoft::IndirectDisp;
 using namespace Microsoft::WRL;
 
-void vddlog(const char* type, const char* message);
+void vddlog(const char *type, const char *message);
 
 extern "C" DRIVER_INITIALIZE DriverEntry;
 
@@ -86,16 +83,18 @@ struct
 	AdapterOption Adapter;
 } Options;
 vector<tuple<int, int, int, int>> monitorModes;
-vector< DISPLAYCONFIG_VIDEO_SIGNAL_INFO> s_KnownMonitorModes2;
+vector<DISPLAYCONFIG_VIDEO_SIGNAL_INFO> s_KnownMonitorModes2;
 UINT numVirtualDisplays = 1;
 wstring gpuname = L"";
-wstring confpath = []() {
-    wchar_t sysDrive[MAX_PATH];
-    DWORD len = GetEnvironmentVariableW(L"SystemDrive", sysDrive, MAX_PATH);
-    if (len == 0 || len > MAX_PATH) {
-        return wstring(L"C:\\VirtualDisplayDriver");
-    }
-    return wstring(sysDrive) + L"\\VirtualDisplayDriver";
+wstring confpath = []()
+{
+	wchar_t sysDrive[MAX_PATH];
+	DWORD len = GetEnvironmentVariableW(L"SystemDrive", sysDrive, MAX_PATH);
+	if (len == 0 || len > MAX_PATH)
+	{
+		return wstring(L"C:\\VirtualDisplayDriver");
+	}
+	return wstring(sysDrive) + L"\\VirtualDisplayDriver";
 }();
 bool logsEnabled = false;
 bool debugLogs = false;
@@ -159,6 +158,35 @@ const char* XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level) {
 
 
 vector<unsigned char> Microsoft::IndirectDisp::IndirectDeviceContext::s_KnownMonitorEdid; //Changed to support static vector
+
+// Custom comparator for GUID to use in map
+struct GuidComparator {
+	bool operator()(const GUID& lhs, const GUID& rhs) const {
+		if (lhs.Data1 != rhs.Data1) return lhs.Data1 < rhs.Data1;
+		if (lhs.Data2 != rhs.Data2) return lhs.Data2 < rhs.Data2;
+		if (lhs.Data3 != rhs.Data3) return lhs.Data3 < rhs.Data3;
+		for (int i = 0; i < 8; i++) {
+			if (lhs.Data4[i] != rhs.Data4[i]) return lhs.Data4[i] < rhs.Data4[i];
+		}
+		return false; // Equal
+	}
+};
+
+// Static map to store EDID copies for each client GUID to ensure data persistence
+// Key: GUID, Value: EDID data
+static map<GUID, vector<BYTE>, GuidComparator> s_ClientGuidEdidMap;
+static mutex s_EdidMapMutex;
+
+// Structure to store HDR luminance settings per monitor
+struct MonitorHdrSettings {
+	float maxNits;  // Maximum luminance in nits (Max CLL - Content Light Level)
+	float minNits;  // Minimum luminance in nits
+	float maxFALL;  // Maximum Frame-Average Light Level in nits
+};
+
+// Static map to store HDR settings for each monitor (by IDDCX_MONITOR handle)
+static map<IDDCX_MONITOR, MonitorHdrSettings> s_MonitorHdrSettingsMap;
+static mutex s_HdrSettingsMutex;
 
 struct IndirectDeviceContextWrapper
 {
@@ -1287,31 +1315,139 @@ void HandleClient(HANDLE hPipe) {
             vddlog("p", "Heartbeat Ping");
         };
 
-        auto handleCreateMonitor = [](HANDLE, wchar_t*) {
-            if (g_GlobalDevice != nullptr) {
-                lock_guard<mutex> lock(g_Mutex);
-                auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
-                if (pContext && pContext->pContext) {
-                    vddlog("i", "Starting monitor creation");
-
-                    if (numVirtualDisplays == 0) {
-                        vddlog("e", "Invalid display count: 0");
-                        return;
-                    }
-
-                    for (unsigned int i = 0; i < numVirtualDisplays; i++) {
-                        pContext->pContext->CreateMonitor(i);
-                    }
-                } else {
-                    vddlog("e", "Failed to get device context for monitor creation");
-                    if (!pContext) {
-                        vddlog("e", "Context wrapper is null");
-                    } else if (!pContext->pContext) {
-                        vddlog("e", "Device context is null");
-                    }
-                }
-            } else {
+        auto handleCreateMonitor = [](HANDLE, wchar_t* param) {
+            if (g_GlobalDevice == nullptr) {
                 vddlog("e", "Global device not initialized");
+                return;
+            }
+
+            lock_guard<mutex> lock(g_Mutex);
+            auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+            if (!pContext || !pContext->pContext) {
+                vddlog("e", "Failed to get device context for monitor creation");
+                return;
+            }
+
+            if (numVirtualDisplays == 0) {
+                vddlog("e", "Invalid display count: 0");
+                return;
+            }
+
+            vddlog("i", "Starting monitor creation");
+
+            // Parse GUID and HDR luminance settings from parameter
+            // Format: "{GUID}:[maxNits,minNits,maxFALL][widthCm,heightCm]" or multiple space-separated entries
+            struct MonitorParams {
+                GUID guid;
+                bool hasGuid = false;
+                float maxNits = 1000.0f;
+                float minNits = 0.0001f;
+                float maxFALL = 1000.0f;
+                float widthCm = 0.0f;   // 0 means use EDID default
+                float heightCm = 0.0f;  // 0 means use EDID default
+            };
+            vector<MonitorParams> monitorParams;
+
+            if (param && wcslen(param) > 0) {
+                wstringstream wss(param);
+                wstring token;
+
+                while (wss >> token) {
+                    MonitorParams mp;
+                    size_t colonPos = token.find(L':');
+                    wstring guidStr = (colonPos != wstring::npos) ? token.substr(0, colonPos) : token;
+                    
+                    // Parse settings after colon: [maxNits,minNits,maxFALL][widthCm,heightCm]
+                    if (colonPos != wstring::npos) {
+                        wstring settingsStr = token.substr(colonPos + 1);
+                        
+                        // Find all bracket pairs
+                        size_t pos = 0;
+                        int bracketIndex = 0;
+                        
+                        while (pos < settingsStr.length()) {
+                            size_t openBracket = settingsStr.find(L'[', pos);
+                            if (openBracket == wstring::npos) break;
+                            
+                            size_t closeBracket = settingsStr.find(L']', openBracket);
+                            if (closeBracket == wstring::npos) break;
+                            
+                            wstring innerStr = settingsStr.substr(openBracket + 1, closeBracket - openBracket - 1);
+                            wstringstream valueStream(innerStr);
+                            wstring val;
+                            vector<float> values;
+                            
+                            while (getline(valueStream, val, L',')) {
+                                try {
+                                    values.push_back(std::stof(val));
+                                } catch (...) {
+                                    break;
+                                }
+                            }
+                            
+                            if (bracketIndex == 0) {
+                                // First bracket: [maxNits,minNits,maxFALL]
+                                if (values.size() >= 2) {
+                                    mp.maxNits = values[0];
+                                    mp.minNits = values[1];
+                                    mp.maxFALL = (values.size() >= 3) ? values[2] : values[0];
+                                    
+                                    stringstream ss;
+                                    ss << "Parsed luminance - MaxNits: " << mp.maxNits 
+                                       << ", MinNits: " << mp.minNits << ", MaxFALL: " << mp.maxFALL;
+                                    vddlog("d", ss.str().c_str());
+                                }
+                            } else if (bracketIndex == 1) {
+                                // Second bracket: [widthCm,heightCm]
+                                if (values.size() >= 2) {
+                                    mp.widthCm = values[0];
+                                    mp.heightCm = values[1];
+                                    
+                                    stringstream ss;
+                                    ss << "Parsed dimensions - Width: " << mp.widthCm 
+                                       << " cm, Height: " << mp.heightCm << " cm";
+                                    vddlog("d", ss.str().c_str());
+                                }
+                            }
+                            
+                            bracketIndex++;
+                            pos = closeBracket + 1;
+                        }
+                    }
+
+                    // Parse GUID
+                    if (!guidStr.empty()) {
+                        wstring guidWithBraces = guidStr;
+                        if (guidWithBraces.front() != L'{') guidWithBraces = L"{" + guidWithBraces;
+                        if (guidWithBraces.back() != L'}') guidWithBraces += L"}";
+
+                        if (SUCCEEDED(CLSIDFromString(guidWithBraces.c_str(), &mp.guid))) {
+                            mp.hasGuid = true;
+                            vddlog("d", ("Parsed client GUID: " + WStringToString(guidWithBraces)).c_str());
+                        } else {
+                            vddlog("w", ("Failed to parse GUID: " + WStringToString(guidStr)).c_str());
+                        }
+                    }
+
+                    monitorParams.push_back(mp);
+                }
+            }
+
+            for (unsigned int i = 0; i < numVirtualDisplays; i++) {
+                const GUID* pGuid = nullptr;
+                float maxNits = 1000.0f, minNits = 0.0001f, maxFALL = 1000.0f;
+                float widthCm = 0.0f, heightCm = 0.0f;
+
+                if (i < monitorParams.size()) {
+                    const auto& mp = monitorParams[i];
+                    if (mp.hasGuid) pGuid = &mp.guid;
+                    maxNits = mp.maxNits;
+                    minNits = mp.minNits;
+                    maxFALL = mp.maxFALL;
+                    widthCm = mp.widthCm;
+                    heightCm = mp.heightCm;
+                }
+                pContext->pContext->CreateMonitor(i, pGuid, maxNits, minNits, maxFALL, widthCm, heightCm);
             }
         };
 
@@ -1391,7 +1527,14 @@ void HandleClient(HANDLE hPipe) {
 
         for (const auto& cmd : commands) {
             if (cmd.name && wcsncmp(buffer, cmd.name, cmd.length) == 0) {
-                cmd.action(hPipe, buffer + cmd.length + 1);
+                // Parse parameter: skip command name and optional space
+                wchar_t* param = buffer + cmd.length;
+                // Skip space if present
+                if (*param == L' ') {
+                    param++;
+                }
+                // If param points to null terminator, it means no parameter was provided
+                cmd.action(hPipe, param);
                 break;
             }
         }
@@ -2609,6 +2752,21 @@ void modifyEdid(vector<BYTE>& edid) {
 	edid[11] = 0x13;
 }
 
+// Modify EDID serial number based on client GUID to ensure consistency
+void modifyEdidSerialNumber(vector<BYTE>& edid, const GUID& clientGuid) {
+	if (edid.size() < 16) {
+		return;
+	}
+
+	// EDID serial number is at bytes 12-15 (32-bit value)
+	// Use GUID's Data1 (first 32 bits) to generate consistent serial number
+	// This ensures the same GUID always produces the same serial number
+	edid[12] = (BYTE)(clientGuid.Data1 & 0xFF);
+	edid[13] = (BYTE)((clientGuid.Data1 >> 8) & 0xFF);
+	edid[14] = (BYTE)((clientGuid.Data1 >> 16) & 0xFF);
+	edid[15] = (BYTE)((clientGuid.Data1 >> 24) & 0xFF);
+}
+
 
 
 BYTE calculateChecksum(const std::vector<BYTE>& edid) {
@@ -2625,8 +2783,140 @@ BYTE calculateChecksum(const std::vector<BYTE>& edid) {
 	// Anything after the checksum bytes arent part of the checksum - a flaw with edid managment, not with us
 }
 
+// Update physical size in EDID
+// EDID bytes 21-22 contain physical dimensions in centimeters
+// Byte 21: Horizontal screen size (cm)
+// Byte 22: Vertical screen size (cm)
+// If widthCm or heightCm is 0, the corresponding dimension is not updated
+void updateEdidPhysicalSize(vector<BYTE>& edid, float widthCm, float heightCm) {
+	if (edid.size() < 23) {
+		vddlog("w", "EDID too small to update physical size");
+		return;
+	}
+	
+	if (widthCm > 0) {
+		// Clamp to valid range (1-255 cm)
+		int width = static_cast<int>(widthCm);
+		if (width < 1) width = 1;
+		if (width > 255) width = 255;
+		edid[21] = static_cast<BYTE>(width);
+		
+		stringstream ss;
+		ss << "Set EDID horizontal size: " << width << " cm";
+		vddlog("d", ss.str().c_str());
+	}
+	
+	if (heightCm > 0) {
+		// Clamp to valid range (1-255 cm)
+		int height = static_cast<int>(heightCm);
+		if (height < 1) height = 1;
+		if (height > 255) height = 255;
+		edid[22] = static_cast<BYTE>(height);
+		
+		stringstream ss;
+		ss << "Set EDID vertical size: " << height << " cm";
+		vddlog("d", ss.str().c_str());
+	}
+}
+
 void updateCeaExtensionCount(vector<BYTE>& edid, int count) {
 	edid[126] = static_cast<BYTE>(count);
+}
+
+// Calculate checksum for CEA extension block (bytes 128-255)
+BYTE calculateCeaChecksum(const vector<BYTE>& edid) {
+	if (edid.size() < 256) return 0;
+	int sum = 0;
+	for (int i = 128; i < 255; ++i) {
+		sum += edid[i];
+	}
+	sum %= 256;
+	if (sum != 0) {
+		sum = 256 - sum;
+	}
+	return static_cast<BYTE>(sum);
+}
+
+// Update HDR Static Metadata Data Block in EDID CEA extension
+// The HDR Static Metadata Data Block format (CEA-861.3):
+// - Tag code: 0x07 (Extended Tag) with Extended Tag Code 0x06 (HDR Static Metadata)
+// - Byte 0: (Tag << 5) | Length = (0x07 << 5) | 0x06 = 0xE6
+// - Byte 1: Extended Tag Code = 0x06
+// - Byte 2: Electro-Optical Transfer Functions (EOTF) supported
+// - Byte 3: Static Metadata Descriptors supported
+// - Byte 4: Desired Content Max Luminance (cv = 50 * 2^(L/32)) - MaxCLL
+// - Byte 5: Desired Content Max Frame-average Luminance (cv = 50 * 2^(L/32)) - MaxFALL
+// - Byte 6: Desired Content Min Luminance (cv = MinLum / MaxLum * 255 * 255 / 100)
+// 
+// Parameters:
+// - maxNits: Maximum Content Light Level (MaxCLL) in nits
+// - minNits: Minimum luminance in nits
+// - maxFALL: Maximum Frame-Average Light Level in nits (if 0, will be calculated as maxNits * 0.8)
+void updateEdidHdrMetadata(vector<BYTE>& edid, float maxNits, float minNits, float maxFALL) {
+	if (edid.size() < 256) {
+		vddlog("w", "EDID too small to update HDR metadata");
+		return;
+	}
+	
+	// If maxFALL is not specified (0), calculate it as ~80% of maxNits
+	if (maxFALL <= 0) {
+		maxFALL = maxNits * 0.8f;
+	}
+	
+	// CEA extension starts at byte 128, data blocks start at byte 132
+	const int ceaStart = 128;
+	int dtdOffset = edid[ceaStart + 2];
+	if (dtdOffset == 0) dtdOffset = 4;
+	
+	const int endPos = ceaStart + dtdOffset;
+	
+	for (int pos = ceaStart + 4; pos < endPos && pos < 255; ) {
+		const BYTE header = edid[pos];
+		const int tag = (header >> 5) & 0x07;
+		const int length = header & 0x1F;
+		
+		// Check for Extended Tag (0x07) with HDR Static Metadata (0x06)
+		if (tag == 0x07 && length >= 1 && (pos + 1) < 256 && edid[pos + 1] == 0x06) {
+			vddlog("d", ("Found HDR Static Metadata block at position " + to_string(pos)).c_str());
+			
+			// Helper lambda to calculate luminance code value: cv = 32 * log2(nits / 50)
+			// Use ceiling to ensure we meet or exceed the requested luminance
+			auto calcLumCv = [](float nits) -> BYTE {
+				float cv = 32.0f * log2f(nits / 50.0f);
+				return static_cast<BYTE>(ceilf(max(0.0f, min(255.0f, cv))));
+			};
+			
+			// Byte 4: Max Luminance (MaxCLL)
+			if (length >= 4 && (pos + 4) < 256) {
+				edid[pos + 4] = calcLumCv(maxNits);
+				float actualNits = 50.0f * powf(2.0f, edid[pos + 4] / 32.0f);
+				vddlog("d", ("Set MaxCLL cv=" + to_string((int)edid[pos + 4]) + " (req " + to_string(maxNits) + ", actual " + to_string(actualNits) + " nits)").c_str());
+			}
+			
+			// Byte 5: Max Frame-Average Luminance (MaxFALL)
+			if (length >= 5 && (pos + 5) < 256) {
+				edid[pos + 5] = calcLumCv(maxFALL);
+				float actualNits = 50.0f * powf(2.0f, edid[pos + 5] / 32.0f);
+				vddlog("d", ("Set MaxFALL cv=" + to_string((int)edid[pos + 5]) + " (req " + to_string(maxFALL) + ", actual " + to_string(actualNits) + " nits)").c_str());
+			}
+			
+			// Byte 6: Min Luminance cv = (MinLum * 255 * 255) / (MaxLum * 100)
+			if (length >= 6 && (pos + 6) < 256) {
+				float minCv = (minNits * 255.0f * 255.0f) / (maxNits * 100.0f);
+				edid[pos + 6] = static_cast<BYTE>(roundf(max(0.0f, min(255.0f, minCv))));
+				float actualNits = (edid[pos + 6] * maxNits * 100.0f) / (255.0f * 255.0f);
+				vddlog("d", ("Set MinLum cv=" + to_string((int)edid[pos + 6]) + " (req " + to_string(minNits) + ", actual " + to_string(actualNits) + " nits)").c_str());
+			}
+			
+			edid[255] = calculateCeaChecksum(edid);
+			vddlog("d", "Updated CEA extension checksum");
+			return;
+		}
+		
+		pos += length + 1;
+	}
+	
+	vddlog("w", "HDR Static Metadata block not found in EDID");
 }
 
 vector<BYTE> loadEdid(const string& filePath) {
@@ -3008,10 +3298,20 @@ void IndirectDeviceContext::FinishInit()
 	vddlog("i", "Applied Adapter configs.");
 }
 
-void IndirectDeviceContext::CreateMonitor(unsigned int index) {
+void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm) {
 	wstring logMessage = L"Creating Monitor: " + to_wstring(index + 1);
 	string narrowLogMessage = WStringToString(logMessage);
 	vddlog("i", narrowLogMessage.c_str());
+	
+	// Log HDR luminance settings and physical size
+	{
+		stringstream ss;
+		ss << "Monitor " << (index + 1) << " HDR settings - MaxNits: " << maxNits << ", MaxFALL: " << maxFALL << ", MinNits: " << minNits;
+		if (widthCm > 0 && heightCm > 0) {
+			ss << ", Physical size: " << widthCm << " x " << heightCm << " cm";
+		}
+		vddlog("d", ss.str().c_str());
+	}
 
 	// ==============================
 	// TODO: In a real driver, the EDID should be retrieved dynamically from a connected physical monitor. The EDID
@@ -3024,6 +3324,71 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index) {
 	WDF_OBJECT_ATTRIBUTES Attr;
 	WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectDeviceContextWrapper);
 
+	// Get or create EDID for this client GUID
+	// Use static storage to ensure EDID data persists for the lifetime of the monitor
+	vector<BYTE>* pMonitorEdid = nullptr;
+	if (pClientGuid != nullptr) {
+		lock_guard<mutex> lock(s_EdidMapMutex);
+		auto it = s_ClientGuidEdidMap.find(*pClientGuid);
+		if (it != s_ClientGuidEdidMap.end()) {
+			// Use existing EDID for this GUID
+			pMonitorEdid = &it->second;
+			stringstream ss;
+			ss << "Using existing EDID for client GUID (monitor " << (index + 1) << ")";
+			vddlog("d", ss.str().c_str());
+			
+			// Update HDR metadata in EDID with new luminance values
+			updateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
+			
+			// Update physical size in EDID if provided
+			if (widthCm > 0 || heightCm > 0) {
+				updateEdidPhysicalSize(*pMonitorEdid, widthCm, heightCm);
+			}
+			
+			// Recalculate checksum after modifying EDID
+			BYTE checksum = calculateChecksum(*pMonitorEdid);
+			(*pMonitorEdid)[127] = checksum;
+		} else {
+			// Create new EDID copy and modify serial number based on client GUID
+			// Same GUID will always produce the same serial number
+			s_ClientGuidEdidMap[*pClientGuid] = s_KnownMonitorEdid;
+			pMonitorEdid = &s_ClientGuidEdidMap[*pClientGuid];
+			modifyEdidSerialNumber(*pMonitorEdid, *pClientGuid);
+			
+			// Update HDR metadata in EDID with luminance values
+			updateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
+			
+			// Update physical size in EDID if provided
+			if (widthCm > 0 || heightCm > 0) {
+				updateEdidPhysicalSize(*pMonitorEdid, widthCm, heightCm);
+			}
+			
+			// Recalculate checksum after modifying EDID
+			BYTE checksum = calculateChecksum(*pMonitorEdid);
+			(*pMonitorEdid)[127] = checksum;
+			
+			stringstream ss;
+			ss << "Created new EDID with serial number based on client GUID for monitor " << (index + 1);
+			vddlog("d", ss.str().c_str());
+		}
+	} else {
+		// No client GUID, create a temporary copy to update HDR metadata
+		// Note: For monitors without GUID, we update the shared EDID
+		// This might affect other monitors using the same EDID
+		updateEdidHdrMetadata(s_KnownMonitorEdid, maxNits, minNits, maxFALL);
+		
+		// Update physical size in EDID if provided
+		if (widthCm > 0 || heightCm > 0) {
+			updateEdidPhysicalSize(s_KnownMonitorEdid, widthCm, heightCm);
+		}
+		
+		// Recalculate checksum after modifying EDID
+		BYTE checksum = calculateChecksum(s_KnownMonitorEdid);
+		s_KnownMonitorEdid[127] = checksum;
+		
+		pMonitorEdid = &s_KnownMonitorEdid;
+	}
+
 	IDDCX_MONITOR_INFO MonitorInfo = {};
 	MonitorInfo.Size = sizeof(MonitorInfo);
 	MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
@@ -3031,19 +3396,20 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index) {
 	MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
 	MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
 	//MonitorInfo.MonitorDescription.DataSize = sizeof(s_KnownMonitorEdid);        can no longer use size of as converted to vector
-	if (s_KnownMonitorEdid.size() > UINT_MAX)
+	if (pMonitorEdid->size() > UINT_MAX)
 	{
 		vddlog("e", "Edid size passes UINT_Max, escape to prevent loading borked display");
 	}
 	else
 	{
-		MonitorInfo.MonitorDescription.DataSize = static_cast<UINT>(s_KnownMonitorEdid.size());
+		MonitorInfo.MonitorDescription.DataSize = static_cast<UINT>(pMonitorEdid->size());
 	}
 	//MonitorInfo.MonitorDescription.pData = const_cast<BYTE*>(s_KnownMonitorEdid);
 	// Changed from using const_cast to data() to safely access the EDID data.
 	// This improves type safety and code readability, as it eliminates the need for casting 
 	// and ensures we are directly working with the underlying container of known monitor EDID data.
-	MonitorInfo.MonitorDescription.pData = IndirectDeviceContext::s_KnownMonitorEdid.data();
+	// Use the monitor-specific EDID (either shared or client-specific)
+	MonitorInfo.MonitorDescription.pData = pMonitorEdid->data();
 
 
 
@@ -3058,9 +3424,16 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index) {
 	// unique monitor or to use "this" device's container ID for a permanent/integrated monitor.
 	// ==============================
 
-	// Create a container ID
-	CoCreateGuid(&MonitorInfo.MonitorContainerId);
-	vddlog("d", "Created container ID");
+	// Use client-provided GUID as container ID if available, otherwise generate a new one
+	if (pClientGuid != nullptr) {
+		MonitorInfo.MonitorContainerId = *pClientGuid;
+		stringstream ss;
+		ss << "Using client-provided GUID as container ID for monitor " << (index + 1);
+		vddlog("d", ss.str().c_str());
+	} else {
+		CoCreateGuid(&MonitorInfo.MonitorContainerId);
+		vddlog("d", "Created container ID");
+	}
 
 	IDARG_IN_MONITORCREATE MonitorCreate = {};
 	MonitorCreate.ObjectAttributes = &Attr;
@@ -3077,6 +3450,19 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index) {
 		if (m_Monitor == nullptr) {
     		vddlog("e", "Invalid monitor handle");
     		return;
+		}
+
+		// Store HDR luminance settings for this monitor
+		{
+			lock_guard<mutex> lock(s_HdrSettingsMutex);
+			MonitorHdrSettings hdrSettings;
+			hdrSettings.maxNits = maxNits;
+			hdrSettings.minNits = minNits;
+			s_MonitorHdrSettingsMap[m_Monitor] = hdrSettings;
+			
+			stringstream ss;
+			ss << "Stored HDR settings for monitor " << (index + 1) << " - MaxNits: " << maxNits << ", MinNits: " << minNits;
+			vddlog("d", ss.str().c_str());
 		}
 
 		// Associate the monitor with this device context
@@ -3116,6 +3502,16 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index) {
 	vddlog("d", logStream.str().c_str());
 
 	try {
+		// Clean up HDR settings for this monitor
+		{
+			lock_guard<mutex> lock(s_HdrSettingsMutex);
+			auto it = s_MonitorHdrSettingsMap.find(m_Monitor);
+			if (it != s_MonitorHdrSettingsMap.end()) {
+				s_MonitorHdrSettingsMap.erase(it);
+				vddlog("d", "Cleaned up HDR settings for monitor");
+			}
+		}
+
 		// Step 1: Stop SwapChain processing immediately
 		if (m_ProcessingThread) {
 			vddlog("d", "Stopping SwapChain processing thread before monitor destruction");
@@ -3666,7 +4062,36 @@ NTSTATUS VirtualDisplayDriverEvtIddCxMonitorSetDefaultHdrMetadata(
 	logStream << "Setting default HDR metadata for monitor object: " << MonitorObject;
 	vddlog("d", logStream.str().c_str());
 
-	UNREFERENCED_PARAMETER(pInArgs);
+	// Get the HDR luminance settings for this monitor
+	float maxNits = 1000.0f;  // Default max luminance
+	float minNits = 0.0001f;  // Default min luminance
+	
+	{
+		lock_guard<mutex> lock(s_HdrSettingsMutex);
+		auto it = s_MonitorHdrSettingsMap.find(MonitorObject);
+		if (it != s_MonitorHdrSettingsMap.end()) {
+			maxNits = it->second.maxNits;
+			minNits = it->second.minNits;
+			logStream.str("");
+			logStream << "Retrieved HDR settings - MaxNits: " << maxNits << ", MinNits: " << minNits;
+			vddlog("d", logStream.str().c_str());
+		} else {
+			vddlog("d", "Using default HDR luminance settings (monitor not found in settings map)");
+		}
+	}
+
+	// Log the incoming metadata type
+	if (pInArgs) {
+		logStream.str("");
+		logStream << "HDR Metadata Type: " << static_cast<int>(pInArgs->Type);
+		vddlog("d", logStream.str().c_str());
+		
+		// Log current luminance settings being applied
+		logStream.str("");
+		logStream << "Applying HDR10 metadata - MaxMasteringLuminance: " << maxNits 
+		          << " nits, MinMasteringLuminance: " << (minNits * 10000.0f) << " (normalized)";
+		vddlog("d", logStream.str().c_str());
+	}
 
 	vddlog("d", "Default HDR metadata set successfully.");
 

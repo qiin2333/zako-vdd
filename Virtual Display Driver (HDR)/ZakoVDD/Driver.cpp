@@ -14,6 +14,7 @@ Environment:
 
 #include "Driver.h"
 // #include "Driver.tmh"
+#include "DefaultEdid.h"
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -98,6 +99,11 @@ wstring confpath = []()
 }();
 bool logsEnabled = false;
 bool debugLogs = false;
+
+// Cached log file handle for performance optimization
+static FILE *s_cachedLogFile = nullptr;
+static wstring s_cachedLogDate;
+static mutex s_logFileMutex;
 bool HDRPlus = false;
 bool SDR10 = false;
 bool customEdid = false;
@@ -106,14 +112,13 @@ bool preventManufacturerSpoof = false;
 bool edidCeaOverride = false;
 bool sendLogsThroughPipe = true;
 
-//Mouse settings
+// Mouse settings
 bool alphaCursorSupport = true;
 int CursorMaxX = 128;
 int CursorMaxY = 128;
 IDDCX_XOR_CURSOR_SUPPORT XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 
-
-//Rest
+// Rest
 IDDCX_BITS_PER_COMPONENT SDRCOLOUR = IDDCX_BITS_PER_COMPONENT_8;
 IDDCX_BITS_PER_COMPONENT HDRCOLOUR = IDDCX_BITS_PER_COMPONENT_10;
 
@@ -127,22 +132,24 @@ std::map<std::wstring, std::pair<std::wstring, std::wstring>> SettingsQueryMap =
 	{L"PreventMonitorSpoof", {L"PREVENTMONITORSPOOF", L"PreventSpoof"}},
 	{L"EdidCeaOverride", {L"EDIDCEAOVERRIDE", L"EdidCeaOverride"}},
 	{L"SendLogsThroughPipe", {L"SENDLOGSTHROUGHPIPE", L"SendLogsThroughPipe"}},
-	//Cursor Begin
+	// Cursor Begin
 	{L"HardwareCursorEnabled", {L"HARDWARECURSOR", L"HardwareCursor"}},
 	{L"AlphaCursorSupport", {L"ALPHACURSORSUPPORT", L"AlphaCursorSupport"}},
 	{L"CursorMaxX", {L"CURSORMAXX", L"CursorMaxX"}},
 	{L"CursorMaxY", {L"CURSORMAXY", L"CursorMaxY"}},
 	{L"XorCursorSupportLevel", {L"XORCURSORSUPPORTLEVEL", L"XorCursorSupportLevel"}},
-	///Cursor End
-	//Colour Begin
+	/// Cursor End
+	// Colour Begin
 	{L"HDRPlusEnabled", {L"HDRPLUS", L"HDRPlus"}},
 	{L"SDR10Enabled", {L"SDR10BIT", L"SDR10bit"}},
 	{L"ColourFormat", {L"COLOURFORMAT", L"ColourFormat"}},
-	//Colour End
+	// Colour End
 };
 
-const char* XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level) {
-	switch (level) {
+const char *XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level)
+{
+	switch (level)
+	{
 	case IDDCX_XOR_CURSOR_SUPPORT_UNINITIALIZED:
 		return "IDDCX_XOR_CURSOR_SUPPORT_UNINITIALIZED";
 	case IDDCX_XOR_CURSOR_SUPPORT_NONE:
@@ -156,17 +163,23 @@ const char* XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level) {
 	}
 }
 
-
-vector<unsigned char> Microsoft::IndirectDisp::IndirectDeviceContext::s_KnownMonitorEdid; //Changed to support static vector
+vector<unsigned char> Microsoft::IndirectDisp::IndirectDeviceContext::s_KnownMonitorEdid; // Changed to support static vector
 
 // Custom comparator for GUID to use in map
-struct GuidComparator {
-	bool operator()(const GUID& lhs, const GUID& rhs) const {
-		if (lhs.Data1 != rhs.Data1) return lhs.Data1 < rhs.Data1;
-		if (lhs.Data2 != rhs.Data2) return lhs.Data2 < rhs.Data2;
-		if (lhs.Data3 != rhs.Data3) return lhs.Data3 < rhs.Data3;
-		for (int i = 0; i < 8; i++) {
-			if (lhs.Data4[i] != rhs.Data4[i]) return lhs.Data4[i] < rhs.Data4[i];
+struct GuidComparator
+{
+	bool operator()(const GUID &lhs, const GUID &rhs) const
+	{
+		if (lhs.Data1 != rhs.Data1)
+			return lhs.Data1 < rhs.Data1;
+		if (lhs.Data2 != rhs.Data2)
+			return lhs.Data2 < rhs.Data2;
+		if (lhs.Data3 != rhs.Data3)
+			return lhs.Data3 < rhs.Data3;
+		for (int i = 0; i < 8; i++)
+		{
+			if (lhs.Data4[i] != rhs.Data4[i])
+				return lhs.Data4[i] < rhs.Data4[i];
 		}
 		return false; // Equal
 	}
@@ -178,10 +191,11 @@ static map<GUID, vector<BYTE>, GuidComparator> s_ClientGuidEdidMap;
 static mutex s_EdidMapMutex;
 
 // Structure to store HDR luminance settings per monitor
-struct MonitorHdrSettings {
-	float maxNits;  // Maximum luminance in nits (Max CLL - Content Light Level)
-	float minNits;  // Minimum luminance in nits
-	float maxFALL;  // Maximum Frame-Average Light Level in nits
+struct MonitorHdrSettings
+{
+	float maxNits; // Maximum luminance in nits (Max CLL - Content Light Level)
+	float minNits; // Minimum luminance in nits
+	float maxFALL; // Maximum Frame-Average Light Level in nits
 };
 
 // Static map to store HDR settings for each monitor (by IDDCX_MONITOR handle)
@@ -190,7 +204,7 @@ static mutex s_HdrSettingsMutex;
 
 struct IndirectDeviceContextWrapper
 {
-	IndirectDeviceContext* pContext;
+	IndirectDeviceContext *pContext;
 
 	void Cleanup()
 	{
@@ -198,10 +212,13 @@ struct IndirectDeviceContextWrapper
 		pContext = nullptr;
 	}
 };
-void LogQueries(const char* severity, const std::wstring& xmlName) {
-	if (xmlName.find(L"logging") == std::wstring::npos) { 
+void LogQueries(const char *severity, const std::wstring &xmlName)
+{
+	if (xmlName.find(L"logging") == std::wstring::npos)
+	{
 		int size_needed = WideCharToMultiByte(CP_UTF8, 0, xmlName.c_str(), (int)xmlName.size(), NULL, 0, NULL, NULL);
-		if (size_needed > 0) {
+		if (size_needed > 0)
+		{
 			std::string strMessage(size_needed, 0);
 			WideCharToMultiByte(CP_UTF8, 0, xmlName.c_str(), (int)xmlName.size(), &strMessage[0], size_needed, NULL, NULL);
 			vddlog(severity, strMessage.c_str());
@@ -209,8 +226,10 @@ void LogQueries(const char* severity, const std::wstring& xmlName) {
 	}
 }
 
-string WStringToString(const wstring& wstr) { //basically just a function for converting strings since codecvt is depricated in c++ 17
-	if (wstr.empty()) return "";
+string WStringToString(const wstring &wstr)
+{ // basically just a function for converting strings since codecvt is depricated in c++ 17
+	if (wstr.empty())
+		return "";
 
 	int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
 	string str(size_needed, 0);
@@ -218,9 +237,11 @@ string WStringToString(const wstring& wstr) { //basically just a function for co
 	return str;
 }
 
-bool EnabledQuery(const std::wstring& settingKey) {
+bool EnabledQuery(const std::wstring &settingKey)
+{
 	auto it = SettingsQueryMap.find(settingKey);
-	if (it == SettingsQueryMap.end()) {
+	if (it == SettingsQueryMap.end())
+	{
 		vddlog("e", "requested data not found in xml, consider updating xml!");
 		return false;
 	}
@@ -234,31 +255,39 @@ bool EnabledQuery(const std::wstring& settingKey) {
 	DWORD dwBufferSize = sizeof(dwValue);
 	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ZakoTech\\ZakoDisplayAdapter", 0, KEY_READ, &hKey);
 
-	if (lResult == ERROR_SUCCESS) {
+	if (lResult == ERROR_SUCCESS)
+	{
 		lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)&dwValue, &dwBufferSize);
-		if (lResult == ERROR_SUCCESS) {
+		if (lResult == ERROR_SUCCESS)
+		{
 			RegCloseKey(hKey);
-			if (dwValue == 1) {
+			if (dwValue == 1)
+			{
 				LogQueries("d", xmlName + L" - is enabled (value = 1).");
 				return true;
 			}
-			else if (dwValue == 0) {
+			else if (dwValue == 0)
+			{
 				goto check_xml;
 			}
 		}
-		else {
+		else
+		{
 			LogQueries("d", xmlName + L" - Failed to retrieve value from registry. Attempting to read as string.");
 			wchar_t path[MAX_PATH];
 			dwBufferSize = sizeof(path);
 			lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)path, &dwBufferSize);
-			if (lResult == ERROR_SUCCESS) {
+			if (lResult == ERROR_SUCCESS)
+			{
 				std::wstring logValue(path);
 				RegCloseKey(hKey);
-				if (logValue == L"true" || logValue == L"1") {
+				if (logValue == L"true" || logValue == L"1")
+				{
 					LogQueries("d", xmlName + L" - is enabled (string value).");
 					return true;
 				}
-				else if (logValue == L"false" || logValue == L"0") {
+				else if (logValue == L"false" || logValue == L"0")
+				{
 					goto check_xml;
 				}
 			}
@@ -270,35 +299,42 @@ bool EnabledQuery(const std::wstring& settingKey) {
 check_xml:
 	CComPtr<IStream> pFileStream;
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READ, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to create file stream for XML settings.");
 		return false;
 	}
 
 	CComPtr<IXmlReader> pReader;
-	hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlReader(__uuidof(IXmlReader), (void **)&pReader, nullptr);
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to create XML reader.");
 		return false;
 	}
 
 	hr = pReader->SetInput(pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to set input for XML reader.");
 		return false;
 	}
 
 	XmlNodeType nodeType;
-	const wchar_t* pwszLocalName;
+	const wchar_t *pwszLocalName;
 	bool xmlLoggingValue = false;
 
-	while (S_OK == pReader->Read(&nodeType)) {
-		if (nodeType == XmlNodeType_Element) {
+	while (S_OK == pReader->Read(&nodeType))
+	{
+		if (nodeType == XmlNodeType_Element)
+		{
 			pReader->GetLocalName(&pwszLocalName, nullptr);
-			if (wcscmp(pwszLocalName, xmlName.c_str()) == 0) {
+			if (wcscmp(pwszLocalName, xmlName.c_str()) == 0)
+			{
 				pReader->Read(&nodeType);
-				if (nodeType == XmlNodeType_Text) {
-					const wchar_t* pwszValue;
+				if (nodeType == XmlNodeType_Text)
+				{
+					const wchar_t *pwszValue;
 					pReader->GetValue(&pwszValue, nullptr);
 					xmlLoggingValue = (wcscmp(pwszValue, L"true") == 0);
 					LogQueries("i", xmlName + (xmlLoggingValue ? L" is enabled." : L" is disabled."));
@@ -311,9 +347,11 @@ check_xml:
 	return xmlLoggingValue;
 }
 
-int GetIntegerSetting(const std::wstring& settingKey) {
+int GetIntegerSetting(const std::wstring &settingKey)
+{
 	auto it = SettingsQueryMap.find(settingKey);
-	if (it == SettingsQueryMap.end()) {
+	if (it == SettingsQueryMap.end())
+	{
 		vddlog("e", "requested data not found in xml, consider updating xml!");
 		return -1;
 	}
@@ -327,26 +365,32 @@ int GetIntegerSetting(const std::wstring& settingKey) {
 	DWORD dwBufferSize = sizeof(dwValue);
 	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver", 0, KEY_READ, &hKey);
 
-	if (lResult == ERROR_SUCCESS) {
+	if (lResult == ERROR_SUCCESS)
+	{
 		lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)&dwValue, &dwBufferSize);
-		if (lResult == ERROR_SUCCESS) {
+		if (lResult == ERROR_SUCCESS)
+		{
 			RegCloseKey(hKey);
 			LogQueries("d", xmlName + L" - Retrieved integer value: " + std::to_wstring(dwValue));
 			return static_cast<int>(dwValue);
 		}
-		else {
+		else
+		{
 			LogQueries("d", xmlName + L" - Failed to retrieve integer value from registry. Attempting to read as string.");
 			wchar_t path[MAX_PATH];
 			dwBufferSize = sizeof(path);
 			lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)path, &dwBufferSize);
 			RegCloseKey(hKey);
-			if (lResult == ERROR_SUCCESS) {
-				try {
+			if (lResult == ERROR_SUCCESS)
+			{
+				try
+				{
 					int logValue = std::stoi(path);
 					LogQueries("d", xmlName + L" - Retrieved string value: " + std::to_wstring(logValue));
 					return logValue;
 				}
-				catch (const std::exception&) {
+				catch (const std::exception &)
+				{
 					LogQueries("d", xmlName + L" - Failed to convert registry string value to integer.");
 				}
 			}
@@ -355,41 +399,50 @@ int GetIntegerSetting(const std::wstring& settingKey) {
 
 	CComPtr<IStream> pFileStream;
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READ, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to create file stream for XML settings.");
 		return -1;
 	}
 
 	CComPtr<IXmlReader> pReader;
-	hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlReader(__uuidof(IXmlReader), (void **)&pReader, nullptr);
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to create XML reader.");
 		return -1;
 	}
 
 	hr = pReader->SetInput(pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to set input for XML reader.");
 		return -1;
 	}
 
 	XmlNodeType nodeType;
-	const wchar_t* pwszLocalName;
+	const wchar_t *pwszLocalName;
 	int xmlLoggingValue = -1;
 
-	while (S_OK == pReader->Read(&nodeType)) {
-		if (nodeType == XmlNodeType_Element) {
+	while (S_OK == pReader->Read(&nodeType))
+	{
+		if (nodeType == XmlNodeType_Element)
+		{
 			pReader->GetLocalName(&pwszLocalName, nullptr);
-			if (wcscmp(pwszLocalName, xmlName.c_str()) == 0) {
+			if (wcscmp(pwszLocalName, xmlName.c_str()) == 0)
+			{
 				pReader->Read(&nodeType);
-				if (nodeType == XmlNodeType_Text) {
-					const wchar_t* pwszValue;
+				if (nodeType == XmlNodeType_Text)
+				{
+					const wchar_t *pwszValue;
 					pReader->GetValue(&pwszValue, nullptr);
-					try {
+					try
+					{
 						xmlLoggingValue = std::stoi(pwszValue);
 						LogQueries("i", xmlName + L" - Retrieved from XML: " + std::to_wstring(xmlLoggingValue));
 					}
-					catch (const std::exception&) {
+					catch (const std::exception &)
+					{
 						LogQueries("d", xmlName + L" - Failed to convert XML string value to integer.");
 					}
 					break;
@@ -401,11 +454,13 @@ int GetIntegerSetting(const std::wstring& settingKey) {
 	return xmlLoggingValue;
 }
 
-std::wstring GetStringSetting(const std::wstring& settingKey) {
+std::wstring GetStringSetting(const std::wstring &settingKey)
+{
 	auto it = SettingsQueryMap.find(settingKey);
-	if (it == SettingsQueryMap.end()) {
+	if (it == SettingsQueryMap.end())
+	{
 		vddlog("e", "requested data not found in xml, consider updating xml!");
-		return L""; 
+		return L"";
 	}
 
 	std::wstring regName = it->second.first;
@@ -417,50 +472,60 @@ std::wstring GetStringSetting(const std::wstring& settingKey) {
 	wchar_t buffer[MAX_PATH];
 
 	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver", 0, KEY_READ, &hKey);
-	if (lResult == ERROR_SUCCESS) {
+	if (lResult == ERROR_SUCCESS)
+	{
 		lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)buffer, &dwBufferSize);
 		RegCloseKey(hKey);
 
-		if (lResult == ERROR_SUCCESS) {
+		if (lResult == ERROR_SUCCESS)
+		{
 			LogQueries("d", xmlName + L" - Retrieved string value from registry: " + buffer);
-			return std::wstring(buffer);  
+			return std::wstring(buffer);
 		}
-		else {
+		else
+		{
 			LogQueries("d", xmlName + L" - Failed to retrieve string value from registry. Attempting to read as XML.");
 		}
 	}
 
 	CComPtr<IStream> pFileStream;
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READ, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to create file stream for XML settings.");
-		return L""; 
+		return L"";
 	}
 
 	CComPtr<IXmlReader> pReader;
-	hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlReader(__uuidof(IXmlReader), (void **)&pReader, nullptr);
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to create XML reader.");
-		return L""; 
+		return L"";
 	}
 
 	hr = pReader->SetInput(pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		LogQueries("d", xmlName + L" - Failed to set input for XML reader.");
-		return L"";  
+		return L"";
 	}
 
 	XmlNodeType nodeType;
-	const wchar_t* pwszLocalName;
-	std::wstring xmlLoggingValue = L"";  
+	const wchar_t *pwszLocalName;
+	std::wstring xmlLoggingValue = L"";
 
-	while (S_OK == pReader->Read(&nodeType)) {
-		if (nodeType == XmlNodeType_Element) {
+	while (S_OK == pReader->Read(&nodeType))
+	{
+		if (nodeType == XmlNodeType_Element)
+		{
 			pReader->GetLocalName(&pwszLocalName, nullptr);
-			if (wcscmp(pwszLocalName, xmlName.c_str()) == 0) {
+			if (wcscmp(pwszLocalName, xmlName.c_str()) == 0)
+			{
 				pReader->Read(&nodeType);
-				if (nodeType == XmlNodeType_Text) {
-					const wchar_t* pwszValue;
+				if (nodeType == XmlNodeType_Text)
+				{
+					const wchar_t *pwszValue;
 					pReader->GetValue(&pwszValue, nullptr);
 					xmlLoggingValue = pwszValue;
 					LogQueries("i", xmlName + L" - Retrieved from XML: " + xmlLoggingValue);
@@ -470,12 +535,13 @@ std::wstring GetStringSetting(const std::wstring& settingKey) {
 		}
 	}
 
-	return xmlLoggingValue;  
+	return xmlLoggingValue;
 }
 
-
-int gcd(int a, int b) {
-	while (b != 0) {
+int gcd(int a, int b)
+{
+	while (b != 0)
+	{
 		int temp = b;
 		b = a % b;
 		a = temp;
@@ -483,7 +549,8 @@ int gcd(int a, int b) {
 	return a;
 }
 
-void float_to_vsync(float refresh_rate, int& num, int& den) {
+void float_to_vsync(float refresh_rate, int &num, int &den)
+{
 	den = 10000;
 
 	num = static_cast<int>(round(refresh_rate * den));
@@ -493,42 +560,36 @@ void float_to_vsync(float refresh_rate, int& num, int& den) {
 	den /= divisor;
 }
 
-void SendToPipe(const std::string& logMessage) {
-	if (g_pipeHandle != INVALID_HANDLE_VALUE) {
+void SendToPipe(const std::string &logMessage)
+{
+	if (g_pipeHandle != INVALID_HANDLE_VALUE)
+	{
 		DWORD bytesWritten;
 		DWORD logMessageSize = static_cast<DWORD>(logMessage.size());
 		WriteFile(g_pipeHandle, logMessage.c_str(), logMessageSize, &bytesWritten, NULL);
 	}
 }
 
-void vddlog(const char* type, const char* message) {
-	FILE* logFile;
-	wstring logsDir = confpath + L"\\Logs";
-
-	auto now = chrono::system_clock::now();
-	auto in_time_t = chrono::system_clock::to_time_t(now);
-	tm tm_buf;
-	localtime_s(&tm_buf, &in_time_t);
-	wchar_t date_str[11]; 
-	wcsftime(date_str, sizeof(date_str) / sizeof(wchar_t), L"%Y-%m-%d", &tm_buf);
-
-	wstring logPath = logsDir + L"\\log_" + date_str + L".txt";
-
-	if (logsEnabled) {
-		if (!CreateDirectoryW(logsDir.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-			//Just any errors here
-		}
-	}
-	else {
+void vddlog(const char *type, const char *message)
+{
+	// Early return if logging is disabled - check before any string operations
+	if (!logsEnabled)
+	{
+		// Clean up log directory if logging was just disabled
+		wstring logsDir = confpath + L"\\Logs";
 		WIN32_FIND_DATAW findFileData;
 		HANDLE hFind = FindFirstFileW((logsDir + L"\\*").c_str(), &findFileData);
 
-		if (hFind != INVALID_HANDLE_VALUE) {
-			do {
+		if (hFind != INVALID_HANDLE_VALUE)
+		{
+			do
+			{
 				const wstring fileOrDir = findFileData.cFileName;
-				if (fileOrDir != L"." && fileOrDir != L"..") {
+				if (fileOrDir != L"." && fileOrDir != L"..")
+				{
 					wstring filePath = logsDir + L"\\" + fileOrDir;
-					if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+					if (!(findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+					{
 						DeleteFileW(filePath.c_str());
 					}
 				}
@@ -537,82 +598,136 @@ void vddlog(const char* type, const char* message) {
 		}
 
 		RemoveDirectoryW(logsDir.c_str());
-		return;  
+
+		// Close cached file handle if it exists
+		lock_guard<mutex> lock(s_logFileMutex);
+		if (s_cachedLogFile != nullptr)
+		{
+			fclose(s_cachedLogFile);
+			s_cachedLogFile = nullptr;
+			s_cachedLogDate.clear();
+		}
+		return;
 	}
 
-	string narrow_logPath = WStringToString(logPath);
-	const char* mode = "a";
-	errno_t err = fopen_s(&logFile, narrow_logPath.c_str(), mode);
-	if (err == 0 && logFile != nullptr) {
-		stringstream ss;
-		ss << put_time(&tm_buf, "%Y-%m-%d %X");
+	// Get current date string
+	auto now = chrono::system_clock::now();
+	auto in_time_t = chrono::system_clock::to_time_t(now);
+	tm tm_buf;
+	localtime_s(&tm_buf, &in_time_t);
+	wchar_t date_str[11];
+	wcsftime(date_str, sizeof(date_str) / sizeof(wchar_t), L"%Y-%m-%d", &tm_buf);
+	wstring currentDate = date_str;
 
-		string logType;
-		switch (type[0]) {
-		case 'e':
-			logType = "ERROR";
-			break; 
-		case 'i':
-			logType = "INFO";
-			break;
-		case 'p':
-			logType = "PIPE";
-			break;
-		case 'd':
-			logType = "DEBUG";
-			break;
-		case 'w':
-			logType = "WARNING";
-			break;
-		case 't':
-			logType = "TESTING";
-			break;
-		case 'c':
-			logType = "COMPANION";
-			break;
-		default:
-			logType = "UNKNOWN";
-			break;
+	// Determine log type early for early exit optimization
+	string logType;
+	switch (type[0])
+	{
+	case 'e':
+		logType = "ERROR";
+		break;
+	case 'i':
+		logType = "INFO";
+		break;
+	case 'p':
+		logType = "PIPE";
+		break;
+	case 'd':
+		logType = "DEBUG";
+		break;
+	case 'w':
+		logType = "WARNING";
+		break;
+	case 't':
+		logType = "TESTING";
+		break;
+	case 'c':
+		logType = "COMPANION";
+		break;
+	default:
+		logType = "UNKNOWN";
+		break;
+	}
+
+	// Early exit if debug logging is disabled and this is a debug message
+	if (logType == "DEBUG" && !debugLogs)
+	{
+		return;
+	}
+
+	lock_guard<mutex> lock(s_logFileMutex);
+
+	// Check if we need to open a new file (date changed or file not open)
+	FILE *logFile = s_cachedLogFile;
+	if (logFile == nullptr || s_cachedLogDate != currentDate)
+	{
+		// Close old file if date changed
+		if (logFile != nullptr)
+		{
+			fclose(logFile);
+			s_cachedLogFile = nullptr;
 		}
 
-		bool shouldLog = true;
-		if (logType == "DEBUG" && !debugLogs) {
-			shouldLog = false;
-		}
-		if (shouldLog) {
-			fprintf(logFile, "[%s] [%s] %s\n", ss.str().c_str(), logType.c_str(), message);
+		// Create log directory if needed
+		wstring logsDir = confpath + L"\\Logs";
+		if (!CreateDirectoryW(logsDir.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+		{
+			// Just ignore errors here
 		}
 
-		fclose(logFile);
-
-		if (sendLogsThroughPipe && g_pipeHandle != INVALID_HANDLE_VALUE) {
-			string logMessage = ss.str() + " [" + logType + "] " + message + "\n";
-			DWORD bytesWritten;
-			DWORD logMessageSize = static_cast<DWORD>(logMessage.size());
-			WriteFile(g_pipeHandle, logMessage.c_str(), logMessageSize, &bytesWritten, NULL);
+		// Open new log file
+		wstring logPath = logsDir + L"\\log_" + currentDate + L".txt";
+		string narrow_logPath = WStringToString(logPath);
+		errno_t err = fopen_s(&logFile, narrow_logPath.c_str(), "a");
+		if (err != 0 || logFile == nullptr)
+		{
+			return; // Failed to open log file
 		}
+
+		// Cache the file handle and date
+		s_cachedLogFile = logFile;
+		s_cachedLogDate = currentDate;
+	}
+
+	// Format timestamp
+	stringstream ss;
+	ss << put_time(&tm_buf, "%Y-%m-%d %X");
+
+	// Write to log file
+	fprintf(logFile, "[%s] [%s] %s\n", ss.str().c_str(), logType.c_str(), message);
+	fflush(logFile); // Ensure data is written immediately
+
+	// Send through pipe if enabled
+	if (sendLogsThroughPipe && g_pipeHandle != INVALID_HANDLE_VALUE)
+	{
+		string logMessage = ss.str() + " [" + logType + "] " + message + "\n";
+		DWORD bytesWritten;
+		DWORD logMessageSize = static_cast<DWORD>(logMessage.size());
+		WriteFile(g_pipeHandle, logMessage.c_str(), logMessageSize, &bytesWritten, NULL);
 	}
 }
 
-
-
-void LogIddCxVersion() {
+void LogIddCxVersion()
+{
 	IDARG_OUT_GETVERSION outArgs;
 	NTSTATUS status = IddCxGetVersion(&outArgs);
 
-	if (NT_SUCCESS(status)) {
+	if (NT_SUCCESS(status))
+	{
 		char versionStr[16];
 		sprintf_s(versionStr, "0x%lx", outArgs.IddCxVersion);
 		string logMessage = "IDDCX Version: " + string(versionStr);
 		vddlog("i", logMessage.c_str());
 	}
-	else {
+	else
+	{
 		vddlog("i", "Failed to get IDDCX version");
 	}
 	vddlog("d", "Testing Debug Log");
 }
 
-void InitializeD3DDeviceAndLogGPU() {
+void InitializeD3DDeviceAndLogGPU()
+{
 	ComPtr<ID3D11Device> d3dDevice;
 	ComPtr<ID3D11DeviceContext> d3dContext;
 	HRESULT hr = D3D11CreateDevice(
@@ -627,28 +742,32 @@ void InitializeD3DDeviceAndLogGPU() {
 		nullptr,
 		&d3dContext);
 
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "Retrieving D3D Device GPU: Failed to create D3D11 device");
 		return;
 	}
 
 	ComPtr<IDXGIDevice> dxgiDevice;
 	hr = d3dDevice.As(&dxgiDevice);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "Retrieving D3D Device GPU: Failed to get DXGI device");
 		return;
 	}
 
 	ComPtr<IDXGIAdapter> dxgiAdapter;
 	hr = dxgiDevice->GetAdapter(&dxgiAdapter);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "Retrieving D3D Device GPU: Failed to get DXGI adapter");
 		return;
 	}
 
 	DXGI_ADAPTER_DESC desc;
 	hr = dxgiAdapter->GetDesc(&desc);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "Retrieving D3D Device GPU: Failed to get GPU description");
 		return;
 	}
@@ -658,10 +777,12 @@ void InitializeD3DDeviceAndLogGPU() {
 
 	wstring wdesc(desc.Description);
 	string utf8_desc;
-	try {
+	try
+	{
 		utf8_desc = WStringToString(wdesc);
 	}
-	catch (const exception& e) {
+	catch (const exception &e)
+	{
 		vddlog("e", ("Retrieving D3D Device GPU: Conversion error: " + string(e.what())).c_str());
 		return;
 	}
@@ -669,7 +790,6 @@ void InitializeD3DDeviceAndLogGPU() {
 	string logtext = "Retrieving D3D Device GPU: " + utf8_desc;
 	vddlog("i", logtext.c_str());
 }
-
 
 // This macro creates the methods for accessing an IndirectDeviceContextWrapper as a context for a WDF object
 WDF_DECLARE_CONTEXT_TYPE(IndirectDeviceContextWrapper);
@@ -686,24 +806,27 @@ extern "C" BOOL WINAPI DllMain(
 	return TRUE;
 }
 
-
-bool UpdateXmlToggleSetting(bool toggle, const wchar_t* variable) {
+bool UpdateXmlToggleSetting(bool toggle, const wchar_t *variable)
+{
 	const wstring settingsname = confpath + L"\\vdd_settings.xml";
 	CComPtr<IStream> pFileStream;
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READWRITE, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: XML file could not be opened.");
 		return false;
 	}
 
 	CComPtr<IXmlReader> pReader;
-	hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlReader(__uuidof(IXmlReader), (void **)&pReader, nullptr);
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create XML reader.");
 		return false;
 	}
 	hr = pReader->SetInput(pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to set XML reader input.");
 		return false;
 	}
@@ -711,35 +834,41 @@ bool UpdateXmlToggleSetting(bool toggle, const wchar_t* variable) {
 	CComPtr<IStream> pOutFileStream;
 	wstring tempFileName = settingsname + L".temp";
 	hr = SHCreateStreamOnFileEx(tempFileName.c_str(), STGM_CREATE | STGM_WRITE, FILE_ATTRIBUTE_NORMAL, TRUE, nullptr, &pOutFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create output file stream.");
 		return false;
 	}
 
 	CComPtr<IXmlWriter> pWriter;
-	hr = CreateXmlWriter(__uuidof(IXmlWriter), (void**)&pWriter, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlWriter(__uuidof(IXmlWriter), (void **)&pWriter, nullptr);
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create XML writer.");
 		return false;
 	}
 	hr = pWriter->SetOutput(pOutFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to set XML writer output.");
 		return false;
 	}
 	hr = pWriter->WriteStartDocument(XmlStandalone_Omit);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to write start of the document.");
 		return false;
 	}
 
 	XmlNodeType nodeType;
-	const wchar_t* pwszLocalName;
-	const wchar_t* pwszValue;
+	const wchar_t *pwszLocalName;
+	const wchar_t *pwszValue;
 	bool variableElementFound = false;
 
-	while (S_OK == pReader->Read(&nodeType)) {
-		switch (nodeType) {
+	while (S_OK == pReader->Read(&nodeType))
+	{
+		switch (nodeType)
+		{
 		case XmlNodeType_Element:
 			pReader->GetLocalName(&pwszLocalName, nullptr);
 			pWriter->WriteStartElement(nullptr, pwszLocalName, nullptr);
@@ -752,11 +881,13 @@ bool UpdateXmlToggleSetting(bool toggle, const wchar_t* variable) {
 
 		case XmlNodeType_Text:
 			pReader->GetValue(&pwszValue, nullptr);
-			if (variableElementFound) {
+			if (variableElementFound)
+			{
 				pWriter->WriteString(toggle ? L"true" : L"false");
 				variableElementFound = false;
 			}
-			else {
+			else
+			{
 				pWriter->WriteString(pwszValue);
 			}
 			break;
@@ -772,22 +903,26 @@ bool UpdateXmlToggleSetting(bool toggle, const wchar_t* variable) {
 			break;
 		}
 
-		if (nodeType == XmlNodeType_Element) {
+		if (nodeType == XmlNodeType_Element)
+		{
 			pReader->GetLocalName(&pwszLocalName, nullptr);
-			if (wcscmp(pwszLocalName, variable) == 0) {
+			if (wcscmp(pwszLocalName, variable) == 0)
+			{
 				variableElementFound = true;
 			}
 		}
 	}
 
-	if (variableElementFound) {
+	if (variableElementFound)
+	{
 		pWriter->WriteStartElement(nullptr, variable, nullptr);
 		pWriter->WriteString(toggle ? L"true" : L"false");
 		pWriter->WriteEndElement();
 	}
 
 	hr = pWriter->WriteEndDocument();
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		return false;
 	}
 
@@ -796,30 +931,34 @@ bool UpdateXmlToggleSetting(bool toggle, const wchar_t* variable) {
 	pWriter.Release();
 	pReader.Release();
 
-	if (!MoveFileExW(tempFileName.c_str(), settingsname.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+	if (!MoveFileExW(tempFileName.c_str(), settingsname.c_str(), MOVEFILE_REPLACE_EXISTING))
+	{
 		return false;
 	}
 	return true;
 }
 
-
-bool UpdateXmlGpuSetting(const wchar_t* gpuName) {
+bool UpdateXmlGpuSetting(const wchar_t *gpuName)
+{
 	const std::wstring settingsname = confpath + L"\\vdd_settings.xml";
 	CComPtr<IStream> pFileStream;
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READWRITE, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: XML file could not be opened.");
 		return false;
 	}
 
 	CComPtr<IXmlReader> pReader;
-	hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlReader(__uuidof(IXmlReader), (void **)&pReader, nullptr);
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create XML reader.");
 		return false;
 	}
 	hr = pReader->SetInput(pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to set XML reader input.");
 		return false;
 	}
@@ -827,35 +966,41 @@ bool UpdateXmlGpuSetting(const wchar_t* gpuName) {
 	CComPtr<IStream> pOutFileStream;
 	std::wstring tempFileName = settingsname + L".temp";
 	hr = SHCreateStreamOnFileEx(tempFileName.c_str(), STGM_CREATE | STGM_WRITE, FILE_ATTRIBUTE_NORMAL, TRUE, nullptr, &pOutFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create output file stream.");
 		return false;
 	}
 
 	CComPtr<IXmlWriter> pWriter;
-	hr = CreateXmlWriter(__uuidof(IXmlWriter), (void**)&pWriter, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlWriter(__uuidof(IXmlWriter), (void **)&pWriter, nullptr);
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create XML writer.");
 		return false;
 	}
 	hr = pWriter->SetOutput(pOutFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to set XML writer output.");
 		return false;
 	}
 	hr = pWriter->WriteStartDocument(XmlStandalone_Omit);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to write start of the document.");
 		return false;
 	}
 
 	XmlNodeType nodeType;
-	const wchar_t* pwszLocalName;
-	const wchar_t* pwszValue;
+	const wchar_t *pwszLocalName;
+	const wchar_t *pwszValue;
 	bool gpuElementFound = false;
 
-	while (S_OK == pReader->Read(&nodeType)) {
-		switch (nodeType) {
+	while (S_OK == pReader->Read(&nodeType))
+	{
+		switch (nodeType)
+		{
 		case XmlNodeType_Element:
 			pReader->GetLocalName(&pwszLocalName, nullptr);
 			pWriter->WriteStartElement(nullptr, pwszLocalName, nullptr);
@@ -868,11 +1013,13 @@ bool UpdateXmlGpuSetting(const wchar_t* gpuName) {
 
 		case XmlNodeType_Text:
 			pReader->GetValue(&pwszValue, nullptr);
-			if (gpuElementFound) {
-				pWriter->WriteString(gpuName); 
+			if (gpuElementFound)
+			{
+				pWriter->WriteString(gpuName);
 				gpuElementFound = false;
 			}
-			else {
+			else
+			{
 				pWriter->WriteString(pwszValue);
 			}
 			break;
@@ -888,15 +1035,18 @@ bool UpdateXmlGpuSetting(const wchar_t* gpuName) {
 			break;
 		}
 
-		if (nodeType == XmlNodeType_Element) {
+		if (nodeType == XmlNodeType_Element)
+		{
 			pReader->GetLocalName(&pwszLocalName, nullptr);
-			if (wcscmp(pwszLocalName, L"gpu") == 0) {
+			if (wcscmp(pwszLocalName, L"gpu") == 0)
+			{
 				gpuElementFound = true;
 			}
 		}
 	}
 	hr = pWriter->WriteEndDocument();
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		return false;
 	}
 
@@ -905,29 +1055,34 @@ bool UpdateXmlGpuSetting(const wchar_t* gpuName) {
 	pWriter.Release();
 	pReader.Release();
 
-	if (!MoveFileExW(tempFileName.c_str(), settingsname.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+	if (!MoveFileExW(tempFileName.c_str(), settingsname.c_str(), MOVEFILE_REPLACE_EXISTING))
+	{
 		return false;
 	}
 	return true;
 }
 
-bool UpdateXmlDisplayCountSetting(int displayCount) {
+bool UpdateXmlDisplayCountSetting(int displayCount)
+{
 	const std::wstring settingsname = confpath + L"\\vdd_settings.xml";
 	CComPtr<IStream> pFileStream;
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READWRITE, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: XML file could not be opened.");
 		return false;
 	}
 
 	CComPtr<IXmlReader> pReader;
-	hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlReader(__uuidof(IXmlReader), (void **)&pReader, nullptr);
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create XML reader.");
 		return false;
 	}
 	hr = pReader->SetInput(pFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to set XML reader input.");
 		return false;
 	}
@@ -935,35 +1090,41 @@ bool UpdateXmlDisplayCountSetting(int displayCount) {
 	CComPtr<IStream> pOutFileStream;
 	std::wstring tempFileName = settingsname + L".temp";
 	hr = SHCreateStreamOnFileEx(tempFileName.c_str(), STGM_CREATE | STGM_WRITE, FILE_ATTRIBUTE_NORMAL, TRUE, nullptr, &pOutFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create output file stream.");
 		return false;
 	}
 
 	CComPtr<IXmlWriter> pWriter;
-	hr = CreateXmlWriter(__uuidof(IXmlWriter), (void**)&pWriter, nullptr);
-	if (FAILED(hr)) {
+	hr = CreateXmlWriter(__uuidof(IXmlWriter), (void **)&pWriter, nullptr);
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to create XML writer.");
 		return false;
 	}
 	hr = pWriter->SetOutput(pOutFileStream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to set XML writer output.");
 		return false;
 	}
 	hr = pWriter->WriteStartDocument(XmlStandalone_Omit);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		vddlog("e", "UpdatingXML: Failed to write start of the document.");
 		return false;
 	}
 
 	XmlNodeType nodeType;
-	const wchar_t* pwszLocalName;
-	const wchar_t* pwszValue;
+	const wchar_t *pwszLocalName;
+	const wchar_t *pwszValue;
 	bool displayCountElementFound = false;
 
-	while (S_OK == pReader->Read(&nodeType)) {
-		switch (nodeType) {
+	while (S_OK == pReader->Read(&nodeType))
+	{
+		switch (nodeType)
+		{
 		case XmlNodeType_Element:
 			pReader->GetLocalName(&pwszLocalName, nullptr);
 			pWriter->WriteStartElement(nullptr, pwszLocalName, nullptr);
@@ -976,11 +1137,13 @@ bool UpdateXmlDisplayCountSetting(int displayCount) {
 
 		case XmlNodeType_Text:
 			pReader->GetValue(&pwszValue, nullptr);
-			if (displayCountElementFound) {
+			if (displayCountElementFound)
+			{
 				pWriter->WriteString(std::to_wstring(displayCount).c_str());
-				displayCountElementFound = false; 
+				displayCountElementFound = false;
 			}
-			else {
+			else
+			{
 				pWriter->WriteString(pwszValue);
 			}
 			break;
@@ -996,16 +1159,19 @@ bool UpdateXmlDisplayCountSetting(int displayCount) {
 			break;
 		}
 
-		if (nodeType == XmlNodeType_Element) {
+		if (nodeType == XmlNodeType_Element)
+		{
 			pReader->GetLocalName(&pwszLocalName, nullptr);
-			if (wcscmp(pwszLocalName, L"count") == 0) {
-				displayCountElementFound = true; 
+			if (wcscmp(pwszLocalName, L"count") == 0)
+			{
+				displayCountElementFound = true;
 			}
 		}
 	}
 
 	hr = pWriter->WriteEndDocument();
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		return false;
 	}
 
@@ -1014,71 +1180,82 @@ bool UpdateXmlDisplayCountSetting(int displayCount) {
 	pWriter.Release();
 	pReader.Release();
 
-	if (!MoveFileExW(tempFileName.c_str(), settingsname.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+	if (!MoveFileExW(tempFileName.c_str(), settingsname.c_str(), MOVEFILE_REPLACE_EXISTING))
+	{
 		return false;
 	}
 	return true;
 }
 
+LUID getSetAdapterLuid()
+{
+	AdapterOption &adapterOption = Options.Adapter;
 
-LUID getSetAdapterLuid() {
-	AdapterOption& adapterOption = Options.Adapter;
-
-	if (!adapterOption.hasTargetAdapter) {
-		vddlog("e","No Gpu Found/Selected");
+	if (!adapterOption.hasTargetAdapter)
+	{
+		vddlog("e", "No Gpu Found/Selected");
 	}
 
 	return adapterOption.adapterLuid;
 }
 
-
 void GetGpuInfo()
 {
-	AdapterOption& adapterOption = Options.Adapter;
+	AdapterOption &adapterOption = Options.Adapter;
 
-	if (!adapterOption.hasTargetAdapter) {
+	if (!adapterOption.hasTargetAdapter)
+	{
 		vddlog("e", "No GPU found or set.");
 		return;
 	}
 
-	try {
+	try
+	{
 		string utf8_desc = WStringToString(adapterOption.target_name);
 		LUID luid = getSetAdapterLuid();
 		string logtext = "ASSIGNED GPU: " + utf8_desc +
-			" (LUID: " + std::to_string(luid.LowPart) + "-" + std::to_string(luid.HighPart) + ")";
+						 " (LUID: " + std::to_string(luid.LowPart) + "-" + std::to_string(luid.HighPart) + ")";
 		vddlog("i", logtext.c_str());
 	}
-	catch (const exception& e) {
+	catch (const exception &e)
+	{
 		vddlog("e", ("Error: " + string(e.what())).c_str());
 	}
 }
 
-void logAvailableGPUs() {
+void logAvailableGPUs()
+{
 	vector<GPUInfo> gpus;
 	ComPtr<IDXGIFactory1> factory;
-	if (!SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+	if (!SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+	{
 		return;
 	}
-	for (UINT i = 0;; i++) {
+	for (UINT i = 0;; i++)
+	{
 		ComPtr<IDXGIAdapter> adapter;
-		if (!SUCCEEDED(factory->EnumAdapters(i, &adapter))) {
+		if (!SUCCEEDED(factory->EnumAdapters(i, &adapter)))
+		{
 			break;
 		}
 		DXGI_ADAPTER_DESC desc;
-		if (!SUCCEEDED(adapter->GetDesc(&desc))) {
+		if (!SUCCEEDED(adapter->GetDesc(&desc)))
+		{
 			continue;
 		}
-		GPUInfo info{ desc.Description, adapter, desc };
+		GPUInfo info{desc.Description, adapter, desc};
 		gpus.push_back(info);
 	}
-	for (const auto& gpu : gpus) {
+	for (const auto &gpu : gpus)
+	{
 		wstring logMessage = L"GPU Name: ";
 		logMessage += gpu.desc.Description;
 		wstring memorySize = L" Memory: ";
 		memorySize += std::to_wstring(gpu.desc.DedicatedVideoMemory / (1024 * 1024)) + L" MB";
 		wstring logText = logMessage + memorySize;
 		int bufferSize = WideCharToMultiByte(CP_UTF8, 0, logText.c_str(), -1, nullptr, 0, nullptr, nullptr);
-		if (bufferSize > 0) {
+		if (bufferSize > 0)
+		{
 			std::string logTextA(bufferSize - 1, '\0');
 			WideCharToMultiByte(CP_UTF8, 0, logText.c_str(), -1, &logTextA[0], bufferSize, nullptr, nullptr);
 			vddlog("c", logTextA.c_str());
@@ -1086,482 +1263,577 @@ void logAvailableGPUs() {
 	}
 }
 
-void ReloadDriver(HANDLE hPipe) {
+void ReloadDriver(HANDLE hPipe)
+{
 	UNREFERENCED_PARAMETER(hPipe);
-	
+
 	vddlog("i", "Starting driver reload process");
-	
-	if (g_GlobalDevice != nullptr) {
+
+	if (g_GlobalDevice != nullptr)
+	{
 		lock_guard<mutex> lock(g_Mutex);
-		auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
-		if (pContext && pContext->pContext) {
-			try {
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+		if (pContext && pContext->pContext)
+		{
+			try
+			{
 				// Step 1: Save current numVirtualDisplays before configuration reload
 				UINT oldNumVirtualDisplays = numVirtualDisplays;
 				vddlog("d", ("Saving current monitor count for cleanup: " + std::to_string(oldNumVirtualDisplays)).c_str());
-				
+
 				// Step 2: Clean up existing monitors first
 				vddlog("d", "Cleaning up existing monitors before reload");
-				
+
 				// Stop any active SwapChain processing
-				if (pContext->pContext->HasActiveSwapChain()) {
+				if (pContext->pContext->HasActiveSwapChain())
+				{
 					vddlog("d", "Stopping active SwapChain processing before reload");
 					pContext->pContext->UnassignSwapChain();
-					
+
 					// Additional wait to ensure cleanup completes
 					Sleep(100);
 				}
-				
+
 				// Destroy existing monitors using the OLD monitor count
-				for (unsigned int i = 0; i < oldNumVirtualDisplays; i++) {
-					if (pContext->pContext->HasActiveMonitor()) {
+				for (unsigned int i = 0; i < oldNumVirtualDisplays; i++)
+				{
+					if (pContext->pContext->HasActiveMonitor())
+					{
 						vddlog("d", ("Destroying existing monitor " + std::to_string(i) + " before reload").c_str());
 						pContext->pContext->DestroyMonitor(i);
-						
+
 						// Wait between monitor destructions
-						if (i < oldNumVirtualDisplays - 1) {
+						if (i < oldNumVirtualDisplays - 1)
+						{
 							Sleep(50);
 						}
 					}
 				}
-				
+
 				// Step 3: Wait for system stabilization after cleanup
 				vddlog("d", "Waiting for system stabilization after cleanup");
 				Sleep(200);
-				
+
 				// Step 4: Reinitialize the adapter (this will reload XML configuration)
 				vddlog("d", "Reinitializing adapter with new configuration");
 				pContext->pContext->InitAdapter();
-				
+
 				// Step 5: Post-initialization stabilization
 				vddlog("d", "Waiting for adapter initialization to stabilize");
 				Sleep(100);
-				
-				vddlog("i", ("Driver reload completed successfully. Monitor count changed from " 
-					+ std::to_string(oldNumVirtualDisplays) + " to " + std::to_string(numVirtualDisplays)).c_str());
+
+				vddlog("i", ("Driver reload completed successfully. Monitor count changed from " + std::to_string(oldNumVirtualDisplays) + " to " + std::to_string(numVirtualDisplays)).c_str());
 			}
-			catch (const std::exception& e) {
+			catch (const std::exception &e)
+			{
 				stringstream errorStream;
 				errorStream << "Exception during driver reload: " << e.what();
 				vddlog("e", errorStream.str().c_str());
-				
+
 				// Try to continue with initialization anyway
-				try {
+				try
+				{
 					pContext->pContext->InitAdapter();
 					vddlog("w", "Adapter reinitialized after exception");
 				}
-				catch (...) {
+				catch (...)
+				{
 					vddlog("e", "Failed to reinitialize adapter after exception");
 				}
 			}
-			catch (...) {
+			catch (...)
+			{
 				vddlog("e", "Unknown exception during driver reload");
-				
+
 				// Try to continue with initialization anyway
-				try {
+				try
+				{
 					pContext->pContext->InitAdapter();
 					vddlog("w", "Adapter reinitialized after unknown exception");
 				}
-				catch (...) {
+				catch (...)
+				{
 					vddlog("e", "Failed to reinitialize adapter after unknown exception");
 				}
 			}
-		} else {
+		}
+		else
+		{
 			vddlog("e", "Invalid device context for driver reload");
 		}
-	} else {
+	}
+	else
+	{
 		vddlog("e", "Global device not available for reload");
 	}
 }
 
-void toggleSettingImpl(HANDLE hPipe, wchar_t* param, const wchar_t* settingName, const char* enableMsg, const char* disableMsg) {
-    if (wcsncmp(param, L"true", 4) == 0) {
-        UpdateXmlToggleSetting(true, settingName);
-        vddlog("c", enableMsg);
-        ReloadDriver(hPipe);
-    } else if (wcsncmp(param, L"false", 5) == 0) {
-        UpdateXmlToggleSetting(false, settingName);
-        vddlog("c", disableMsg);
-        ReloadDriver(hPipe);
-    }
+void toggleSettingImpl(HANDLE hPipe, wchar_t *param, const wchar_t *settingName, const char *enableMsg, const char *disableMsg)
+{
+	if (wcsncmp(param, L"true", 4) == 0)
+	{
+		UpdateXmlToggleSetting(true, settingName);
+		vddlog("c", enableMsg);
+		ReloadDriver(hPipe);
+	}
+	else if (wcsncmp(param, L"false", 5) == 0)
+	{
+		UpdateXmlToggleSetting(false, settingName);
+		vddlog("c", disableMsg);
+		ReloadDriver(hPipe);
+	}
 }
 
-void HandleClient(HANDLE hPipe) {
-    g_pipeHandle = hPipe;
-    vddlog("p", "Client Handling Enabled");
-    wchar_t buffer[128];
-    DWORD bytesRead;
-    BOOL result = ReadFile(hPipe, buffer, sizeof(buffer) - sizeof(wchar_t), &bytesRead, NULL);
-    if (result && bytesRead != 0) {
-        buffer[bytesRead / sizeof(wchar_t)] = L'\0';
-        wstring bufferwstr(buffer);
-        string bufferstr = WStringToString(bufferwstr);
-        vddlog("p", bufferstr.c_str());
+void HandleClient(HANDLE hPipe)
+{
+	g_pipeHandle = hPipe;
+	vddlog("p", "Client Handling Enabled");
+	wchar_t buffer[128];
+	DWORD bytesRead;
+	BOOL result = ReadFile(hPipe, buffer, sizeof(buffer) - sizeof(wchar_t), &bytesRead, NULL);
+	if (result && bytesRead != 0)
+	{
+		buffer[bytesRead / sizeof(wchar_t)] = L'\0';
+		wstring bufferwstr(buffer);
+		string bufferstr = WStringToString(bufferwstr);
+		vddlog("p", bufferstr.c_str());
 
-        struct Command {
-            const wchar_t* name;
-            size_t length;
-            void (*action)(HANDLE, wchar_t*);
-        };
+		struct Command
+		{
+			const wchar_t *name;
+			size_t length;
+			void (*action)(HANDLE, wchar_t *);
+		};
 
-        auto handleReloadDriver = [](HANDLE hPipe, wchar_t*) {
-            vddlog("c", "Reloading the driver");
-            ReloadDriver(hPipe);
-        };
+		auto handleReloadDriver = [](HANDLE hPipe, wchar_t *)
+		{
+			vddlog("c", "Reloading the driver");
+			ReloadDriver(hPipe);
+		};
 
-        auto handleLogDebug = [](HANDLE hPipe, wchar_t* param) {
-            toggleSettingImpl(hPipe, param, L"debuglogging", "Pipe debugging enabled", "Debugging disabled");
-        };
+		auto handleLogDebug = [](HANDLE hPipe, wchar_t *param)
+		{
+			toggleSettingImpl(hPipe, param, L"debuglogging", "Pipe debugging enabled", "Debugging disabled");
+		};
 
-        auto handleLogging = [](HANDLE hPipe, wchar_t* param) {
-            toggleSettingImpl(hPipe, param, L"logging", "Logging Enabled", "Logging disabled");
-        };
+		auto handleLogging = [](HANDLE hPipe, wchar_t *param)
+		{
+			toggleSettingImpl(hPipe, param, L"logging", "Logging Enabled", "Logging disabled");
+		};
 
-        auto handleHDRPlus = [](HANDLE hPipe, wchar_t* param) {
-            toggleSettingImpl(hPipe, param, L"HDRPlus", "HDR+ Enabled", "HDR+ Disabled");
-        };
+		auto handleHDRPlus = [](HANDLE hPipe, wchar_t *param)
+		{
+			toggleSettingImpl(hPipe, param, L"HDRPlus", "HDR+ Enabled", "HDR+ Disabled");
+		};
 
-        auto handleSDR10 = [](HANDLE hPipe, wchar_t* param) {
-            toggleSettingImpl(hPipe, param, L"SDR10bit", "SDR 10 Bit Enabled", "SDR 10 Bit Disabled");
-        };
+		auto handleSDR10 = [](HANDLE hPipe, wchar_t *param)
+		{
+			toggleSettingImpl(hPipe, param, L"SDR10bit", "SDR 10 Bit Enabled", "SDR 10 Bit Disabled");
+		};
 
-        auto handleCustomEdid = [](HANDLE hPipe, wchar_t* param) {
-            toggleSettingImpl(hPipe, param, L"CustomEdid", "Custom Edid Enabled", "Custom Edid Disabled");
-        };
+		auto handleCustomEdid = [](HANDLE hPipe, wchar_t *param)
+		{
+			toggleSettingImpl(hPipe, param, L"CustomEdid", "Custom Edid Enabled", "Custom Edid Disabled");
+		};
 
-        auto handlePreventSpoof = [](HANDLE hPipe, wchar_t* param) {
-            toggleSettingImpl(hPipe, param, L"PreventSpoof", "Prevent Spoof Enabled", "Prevent Spoof Disabled");
-        };
+		auto handlePreventSpoof = [](HANDLE hPipe, wchar_t *param)
+		{
+			toggleSettingImpl(hPipe, param, L"PreventSpoof", "Prevent Spoof Enabled", "Prevent Spoof Disabled");
+		};
 
-        auto handleCeaOverride = [](HANDLE hPipe, wchar_t* param) {
-            toggleSettingImpl(hPipe, param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
-        };
+		auto handleCeaOverride = [](HANDLE hPipe, wchar_t *param)
+		{
+			toggleSettingImpl(hPipe, param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
+		};
 
-        auto handleHardwareCursor = [](HANDLE hPipe, wchar_t* param) {
-            toggleSettingImpl(hPipe, param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
-        };
+		auto handleHardwareCursor = [](HANDLE hPipe, wchar_t *param)
+		{
+			toggleSettingImpl(hPipe, param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
+		};
 
-        auto handleD3DDeviceGPU = [](HANDLE, wchar_t*) {
-            vddlog("c", "Retrieving D3D GPU (This information may be inaccurate without reloading the driver first)");
-            InitializeD3DDeviceAndLogGPU();
-            vddlog("c", "Retrieved D3D GPU");
-        };
+		auto handleD3DDeviceGPU = [](HANDLE, wchar_t *)
+		{
+			vddlog("c", "Retrieving D3D GPU (This information may be inaccurate without reloading the driver first)");
+			InitializeD3DDeviceAndLogGPU();
+			vddlog("c", "Retrieved D3D GPU");
+		};
 
-        auto handleIddCxVersion = [](HANDLE, wchar_t*) {
-            vddlog("c", "Logging iddcx version");
-            LogIddCxVersion();
-        };
+		auto handleIddCxVersion = [](HANDLE, wchar_t *)
+		{
+			vddlog("c", "Logging iddcx version");
+			LogIddCxVersion();
+		};
 
-        auto handleGetAssignedGPU = [](HANDLE, wchar_t*) {
-            vddlog("c", "Retrieving Assigned GPU");
-            GetGpuInfo();
-            vddlog("c", "Retrieved Assigned GPU");
-        };
+		auto handleGetAssignedGPU = [](HANDLE, wchar_t *)
+		{
+			vddlog("c", "Retrieving Assigned GPU");
+			GetGpuInfo();
+			vddlog("c", "Retrieved Assigned GPU");
+		};
 
-        auto handleGetAllGPUs = [](HANDLE, wchar_t*) {
-            vddlog("c", "Logging all GPUs");
-            vddlog("i", "Any GPUs which show twice but you only have one, will most likely be the GPU the driver is attached to");
-            logAvailableGPUs();
-            vddlog("c", "Logged all GPUs");
-        };
+		auto handleGetAllGPUs = [](HANDLE, wchar_t *)
+		{
+			vddlog("c", "Logging all GPUs");
+			vddlog("i", "Any GPUs which show twice but you only have one, will most likely be the GPU the driver is attached to");
+			logAvailableGPUs();
+			vddlog("c", "Logged all GPUs");
+		};
 
-        auto handleSetGPU = [](HANDLE hPipe, wchar_t* param) {
-            std::wstring gpuName = param;
-            gpuName = gpuName.substr(1, gpuName.size() - 2);
+		auto handleSetGPU = [](HANDLE hPipe, wchar_t *param)
+		{
+			std::wstring gpuName = param;
+			gpuName = gpuName.substr(1, gpuName.size() - 2);
 
-            std::string gpuNameNarrow = WStringToString(gpuName);
+			std::string gpuNameNarrow = WStringToString(gpuName);
 
-            vddlog("c", ("Setting GPU to: " + gpuNameNarrow).c_str());
-            if (UpdateXmlGpuSetting(gpuName.c_str())) {
-                vddlog("c", "Gpu Changed, Restarting Driver");
-            } else {
-                vddlog("e", "Failed to update GPU setting in XML. Restarting anyway");
-            }
-            ReloadDriver(hPipe);
-        };
+			vddlog("c", ("Setting GPU to: " + gpuNameNarrow).c_str());
+			if (UpdateXmlGpuSetting(gpuName.c_str()))
+			{
+				vddlog("c", "Gpu Changed, Restarting Driver");
+			}
+			else
+			{
+				vddlog("e", "Failed to update GPU setting in XML. Restarting anyway");
+			}
+			ReloadDriver(hPipe);
+		};
 
-        auto handleSetDisplayCount = [](HANDLE hPipe, wchar_t* param) {
-            vddlog("i", "Setting Display Count");
+		auto handleSetDisplayCount = [](HANDLE hPipe, wchar_t *param)
+		{
+			vddlog("i", "Setting Display Count");
 
-            int newDisplayCount = 1;
-            swscanf_s(param, L"%d", &newDisplayCount);
+			int newDisplayCount = 1;
+			swscanf_s(param, L"%d", &newDisplayCount);
 
-            std::wstring displayLog = L"Setting display count  to " + std::to_wstring(newDisplayCount);
-            vddlog("c", WStringToString(displayLog).c_str());
+			std::wstring displayLog = L"Setting display count  to " + std::to_wstring(newDisplayCount);
+			vddlog("c", WStringToString(displayLog).c_str());
 
-            if (UpdateXmlDisplayCountSetting(newDisplayCount)) {
-                vddlog("c", "Display Count Changed, Restarting Driver");
-            } else {
-                vddlog("e", "Failed to update display count setting in XML. Restarting anyway");
-            }
-            ReloadDriver(hPipe);
-        };
+			if (UpdateXmlDisplayCountSetting(newDisplayCount))
+			{
+				vddlog("c", "Display Count Changed, Restarting Driver");
+			}
+			else
+			{
+				vddlog("e", "Failed to update display count setting in XML. Restarting anyway");
+			}
+			ReloadDriver(hPipe);
+		};
 
-        auto handleGetSettings = [](HANDLE hPipe, wchar_t*) {
-            bool debugEnabled = EnabledQuery(L"DebugLoggingEnabled");
-            bool loggingEnabled = EnabledQuery(L"LoggingEnabled");
+		auto handleGetSettings = [](HANDLE hPipe, wchar_t *)
+		{
+			bool debugEnabled = EnabledQuery(L"DebugLoggingEnabled");
+			bool loggingEnabled = EnabledQuery(L"LoggingEnabled");
 
-            wstring settingsResponse = L"SETTINGS ";
-            settingsResponse += debugEnabled ? L"DEBUG=true " : L"DEBUG=false ";
-            settingsResponse += loggingEnabled ? L"LOG=true" : L"LOG=false";
+			wstring settingsResponse = L"SETTINGS ";
+			settingsResponse += debugEnabled ? L"DEBUG=true " : L"DEBUG=false ";
+			settingsResponse += loggingEnabled ? L"LOG=true" : L"LOG=false";
 
-            DWORD bytesWritten;
-            DWORD bytesToWrite = static_cast<DWORD>((settingsResponse.length() + 1) * sizeof(wchar_t));
-            WriteFile(hPipe, settingsResponse.c_str(), bytesToWrite, &bytesWritten, NULL);
-        };
+			DWORD bytesWritten;
+			DWORD bytesToWrite = static_cast<DWORD>((settingsResponse.length() + 1) * sizeof(wchar_t));
+			WriteFile(hPipe, settingsResponse.c_str(), bytesToWrite, &bytesWritten, NULL);
+		};
 
-        auto handlePing = [](HANDLE, wchar_t*) {
-            SendToPipe("PONG");
-            vddlog("p", "Heartbeat Ping");
-        };
+		auto handlePing = [](HANDLE, wchar_t *)
+		{
+			SendToPipe("PONG");
+			vddlog("p", "Heartbeat Ping");
+		};
 
-        auto handleCreateMonitor = [](HANDLE, wchar_t* param) {
-            if (g_GlobalDevice == nullptr) {
-                vddlog("e", "Global device not initialized");
-                return;
-            }
+		auto handleCreateMonitor = [](HANDLE, wchar_t *param)
+		{
+			if (g_GlobalDevice == nullptr)
+			{
+				vddlog("e", "Global device not initialized");
+				return;
+			}
 
-            lock_guard<mutex> lock(g_Mutex);
-            auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
-            if (!pContext || !pContext->pContext) {
-                vddlog("e", "Failed to get device context for monitor creation");
-                return;
-            }
+			lock_guard<mutex> lock(g_Mutex);
+			auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+			if (!pContext || !pContext->pContext)
+			{
+				vddlog("e", "Failed to get device context for monitor creation");
+				return;
+			}
 
-            if (numVirtualDisplays == 0) {
-                vddlog("e", "Invalid display count: 0");
-                return;
-            }
+			if (numVirtualDisplays == 0)
+			{
+				vddlog("e", "Invalid display count: 0");
+				return;
+			}
 
-            vddlog("i", "Starting monitor creation");
+			vddlog("i", "Starting monitor creation");
 
-            // Parse GUID and HDR luminance settings from parameter
-            // Format: "{GUID}:[maxNits,minNits,maxFALL][widthCm,heightCm]" or multiple space-separated entries
-            struct MonitorParams {
-                GUID guid;
-                bool hasGuid = false;
-                float maxNits = 1000.0f;
-                float minNits = 0.0001f;
-                float maxFALL = 1000.0f;
-                float widthCm = 0.0f;   // 0 means use EDID default
-                float heightCm = 0.0f;  // 0 means use EDID default
-            };
-            vector<MonitorParams> monitorParams;
+			// Parse GUID and HDR luminance settings from parameter
+			// Format: "{GUID}:[maxNits,minNits,maxFALL][widthCm,heightCm]" or multiple space-separated entries
+			struct MonitorParams
+			{
+				GUID guid;
+				bool hasGuid = false;
+				float maxNits = 1000.0f;
+				float minNits = 0.0001f;
+				float maxFALL = 1000.0f;
+				float widthCm = 0.0f;  // 0 means use EDID default
+				float heightCm = 0.0f; // 0 means use EDID default
+			};
+			vector<MonitorParams> monitorParams;
 
-            if (param && wcslen(param) > 0) {
-                wstringstream wss(param);
-                wstring token;
+			if (param && wcslen(param) > 0)
+			{
+				wstringstream wss(param);
+				wstring token;
 
-                while (wss >> token) {
-                    MonitorParams mp;
-                    size_t colonPos = token.find(L':');
-                    wstring guidStr = (colonPos != wstring::npos) ? token.substr(0, colonPos) : token;
-                    
-                    // Parse settings after colon: [maxNits,minNits,maxFALL][widthCm,heightCm]
-                    if (colonPos != wstring::npos) {
-                        wstring settingsStr = token.substr(colonPos + 1);
-                        
-                        // Find all bracket pairs
-                        size_t pos = 0;
-                        int bracketIndex = 0;
-                        
-                        while (pos < settingsStr.length()) {
-                            size_t openBracket = settingsStr.find(L'[', pos);
-                            if (openBracket == wstring::npos) break;
-                            
-                            size_t closeBracket = settingsStr.find(L']', openBracket);
-                            if (closeBracket == wstring::npos) break;
-                            
-                            wstring innerStr = settingsStr.substr(openBracket + 1, closeBracket - openBracket - 1);
-                            wstringstream valueStream(innerStr);
-                            wstring val;
-                            vector<float> values;
-                            
-                            while (getline(valueStream, val, L',')) {
-                                try {
-                                    values.push_back(std::stof(val));
-                                } catch (...) {
-                                    break;
-                                }
-                            }
-                            
-                            if (bracketIndex == 0) {
-                                // First bracket: [maxNits,minNits,maxFALL]
-                                if (values.size() >= 2) {
-                                    mp.maxNits = values[0];
-                                    mp.minNits = values[1];
-                                    mp.maxFALL = (values.size() >= 3) ? values[2] : values[0];
-                                    
-                                    stringstream ss;
-                                    ss << "Parsed luminance - MaxNits: " << mp.maxNits 
-                                       << ", MinNits: " << mp.minNits << ", MaxFALL: " << mp.maxFALL;
-                                    vddlog("d", ss.str().c_str());
-                                }
-                            } else if (bracketIndex == 1) {
-                                // Second bracket: [widthCm,heightCm]
-                                if (values.size() >= 2) {
-                                    mp.widthCm = values[0];
-                                    mp.heightCm = values[1];
-                                    
-                                    stringstream ss;
-                                    ss << "Parsed dimensions - Width: " << mp.widthCm 
-                                       << " cm, Height: " << mp.heightCm << " cm";
-                                    vddlog("d", ss.str().c_str());
-                                }
-                            }
-                            
-                            bracketIndex++;
-                            pos = closeBracket + 1;
-                        }
-                    }
+				while (wss >> token)
+				{
+					MonitorParams mp;
+					size_t colonPos = token.find(L':');
+					wstring guidStr = (colonPos != wstring::npos) ? token.substr(0, colonPos) : token;
 
-                    // Parse GUID
-                    if (!guidStr.empty()) {
-                        wstring guidWithBraces = guidStr;
-                        if (guidWithBraces.front() != L'{') guidWithBraces = L"{" + guidWithBraces;
-                        if (guidWithBraces.back() != L'}') guidWithBraces += L"}";
+					// Parse settings after colon: [maxNits,minNits,maxFALL][widthCm,heightCm]
+					if (colonPos != wstring::npos)
+					{
+						wstring settingsStr = token.substr(colonPos + 1);
 
-                        if (SUCCEEDED(CLSIDFromString(guidWithBraces.c_str(), &mp.guid))) {
-                            mp.hasGuid = true;
-                            vddlog("d", ("Parsed client GUID: " + WStringToString(guidWithBraces)).c_str());
-                        } else {
-                            vddlog("w", ("Failed to parse GUID: " + WStringToString(guidStr)).c_str());
-                        }
-                    }
+						// Find all bracket pairs
+						size_t pos = 0;
+						int bracketIndex = 0;
 
-                    monitorParams.push_back(mp);
-                }
-            }
+						while (pos < settingsStr.length())
+						{
+							size_t openBracket = settingsStr.find(L'[', pos);
+							if (openBracket == wstring::npos)
+								break;
 
-            for (unsigned int i = 0; i < numVirtualDisplays; i++) {
-                const GUID* pGuid = nullptr;
-                float maxNits = 1000.0f, minNits = 0.0001f, maxFALL = 1000.0f;
-                float widthCm = 0.0f, heightCm = 0.0f;
+							size_t closeBracket = settingsStr.find(L']', openBracket);
+							if (closeBracket == wstring::npos)
+								break;
 
-                if (i < monitorParams.size()) {
-                    const auto& mp = monitorParams[i];
-                    if (mp.hasGuid) pGuid = &mp.guid;
-                    maxNits = mp.maxNits;
-                    minNits = mp.minNits;
-                    maxFALL = mp.maxFALL;
-                    widthCm = mp.widthCm;
-                    heightCm = mp.heightCm;
-                }
-                pContext->pContext->CreateMonitor(i, pGuid, maxNits, minNits, maxFALL, widthCm, heightCm);
-            }
-        };
+							wstring innerStr = settingsStr.substr(openBracket + 1, closeBracket - openBracket - 1);
+							wstringstream valueStream(innerStr);
+							wstring val;
+							vector<float> values;
 
-        auto handleDestroyMonitor = [](HANDLE, wchar_t*) {
-            if (g_GlobalDevice != nullptr) {
-                lock_guard<mutex> lock(g_Mutex);
-                auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
-                if (pContext && pContext->pContext) {
-                    vddlog("i", "Starting monitor destruction process");
+							while (getline(valueStream, val, L','))
+							{
+								try
+								{
+									values.push_back(std::stof(val));
+								}
+								catch (...)
+								{
+									break;
+								}
+							}
 
-                    vddlog("d", "Preparing system for monitor destruction");
-                    Sleep(50);
+							if (bracketIndex == 0)
+							{
+								// First bracket: [maxNits,minNits,maxFALL]
+								if (values.size() >= 2)
+								{
+									mp.maxNits = values[0];
+									mp.minNits = values[1];
+									mp.maxFALL = (values.size() >= 3) ? values[2] : values[0];
 
-                    try {
-                        for (unsigned int i = 0; i < numVirtualDisplays; i++) {
-                            vddlog("d", ("Destroying monitor " + std::to_string(i) + " of " + std::to_string(numVirtualDisplays)).c_str());
-                            pContext->pContext->DestroyMonitor(i);
+									stringstream ss;
+									ss << "Parsed luminance - MaxNits: " << mp.maxNits
+									   << ", MinNits: " << mp.minNits << ", MaxFALL: " << mp.maxFALL;
+									vddlog("d", ss.str().c_str());
+								}
+							}
+							else if (bracketIndex == 1)
+							{
+								// Second bracket: [widthCm,heightCm]
+								if (values.size() >= 2)
+								{
+									mp.widthCm = values[0];
+									mp.heightCm = values[1];
 
-                            if (numVirtualDisplays > 1 && i < numVirtualDisplays - 1) {
-                                vddlog("d", "Waiting between monitor destructions");
-                                Sleep(100);
-                            }
-                        }
+									stringstream ss;
+									ss << "Parsed dimensions - Width: " << mp.widthCm
+									   << " cm, Height: " << mp.heightCm << " cm";
+									vddlog("d", ss.str().c_str());
+								}
+							}
 
-                        vddlog("d", "Allowing system to stabilize after monitor destruction");
-                        Sleep(100);
+							bracketIndex++;
+							pos = closeBracket + 1;
+						}
+					}
 
-                        vddlog("i", "All monitors destroyed successfully");
-                    } catch (const std::exception& e) {
-                        stringstream errorStream;
-                        errorStream << "Exception during monitor destruction: " << e.what();
-                        vddlog("e", errorStream.str().c_str());
+					// Parse GUID
+					if (!guidStr.empty())
+					{
+						wstring guidWithBraces = guidStr;
+						if (guidWithBraces.front() != L'{')
+							guidWithBraces = L"{" + guidWithBraces;
+						if (guidWithBraces.back() != L'}')
+							guidWithBraces += L"}";
 
-                        Sleep(200);
-                    } catch (...) {
-                        vddlog("e", "Unknown exception during monitor destruction");
+						if (SUCCEEDED(CLSIDFromString(guidWithBraces.c_str(), &mp.guid)))
+						{
+							mp.hasGuid = true;
+							vddlog("d", ("Parsed client GUID: " + WStringToString(guidWithBraces)).c_str());
+						}
+						else
+						{
+							vddlog("w", ("Failed to parse GUID: " + WStringToString(guidStr)).c_str());
+						}
+					}
 
-                        Sleep(200);
-                    }
-                } else {
-                    vddlog("e", "Failed to get device context for monitor destruction");
-                }
-            } else {
-                vddlog("e", "Global device not initialized for monitor destruction");
-            }
-        };
+					monitorParams.push_back(mp);
+				}
+			}
 
-        auto handleUnknownCommand = [](HANDLE, wchar_t* buffer) {
-            vddlog("e", "Unknown command");
+			for (unsigned int i = 0; i < numVirtualDisplays; i++)
+			{
+				const GUID *pGuid = nullptr;
+				float maxNits = 1000.0f, minNits = 0.0001f, maxFALL = 1000.0f;
+				float widthCm = 0.0f, heightCm = 0.0f;
 
-            std::string narrowString = WStringToString(buffer);
-            vddlog("e", narrowString.c_str());
-        };
+				if (i < monitorParams.size())
+				{
+					const auto &mp = monitorParams[i];
+					if (mp.hasGuid)
+						pGuid = &mp.guid;
+					maxNits = mp.maxNits;
+					minNits = mp.minNits;
+					maxFALL = mp.maxFALL;
+					widthCm = mp.widthCm;
+					heightCm = mp.heightCm;
+				}
+				pContext->pContext->CreateMonitor(i, pGuid, maxNits, minNits, maxFALL, widthCm, heightCm);
+			}
+		};
 
-        Command commands[] = {
-            {L"RELOAD_DRIVER", 13, handleReloadDriver},
-            {L"LOG_DEBUG", 9, handleLogDebug},
-            {L"LOGGING", 7, handleLogging},
-            {L"HDRPLUS", 7, handleHDRPlus},
-            {L"SDR10", 5, handleSDR10},
-            {L"CUSTOMEDID", 10, handleCustomEdid},
-            {L"PREVENTSPOOF", 12, handlePreventSpoof},
-            {L"CEAOVERRIDE", 11, handleCeaOverride},
-            {L"HARDWARECURSOR", 14, handleHardwareCursor},
-            {L"D3DDEVICEGPU", 12, handleD3DDeviceGPU},
-            {L"IDDCXVERSION", 12, handleIddCxVersion},
-            {L"GETASSIGNEDGPU", 14, handleGetAssignedGPU},
-            {L"GETALLGPUS", 10, handleGetAllGPUs},
-            {L"SETGPU", 6, handleSetGPU},
-            {L"SETDISPLAYCOUNT", 15, handleSetDisplayCount},
-            {L"GETSETTINGS", 11, handleGetSettings},
-            {L"PING", 4, handlePing},
-            {L"CREATEMONITOR", 13, handleCreateMonitor},
-            {L"DESTROYMONITOR", 14, handleDestroyMonitor},
-            {nullptr, 0, handleUnknownCommand}
-        };
+		auto handleDestroyMonitor = [](HANDLE, wchar_t *)
+		{
+			if (g_GlobalDevice != nullptr)
+			{
+				lock_guard<mutex> lock(g_Mutex);
+				auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+				if (pContext && pContext->pContext)
+				{
+					vddlog("i", "Starting monitor destruction process");
 
-        for (const auto& cmd : commands) {
-            if (cmd.name && wcsncmp(buffer, cmd.name, cmd.length) == 0) {
-                // Parse parameter: skip command name and optional space
-                wchar_t* param = buffer + cmd.length;
-                // Skip space if present
-                if (*param == L' ') {
-                    param++;
-                }
-                // If param points to null terminator, it means no parameter was provided
-                cmd.action(hPipe, param);
-                break;
-            }
-        }
-    }
-    DisconnectNamedPipe(hPipe);
-    CloseHandle(hPipe);
-    g_pipeHandle = INVALID_HANDLE_VALUE;
+					vddlog("d", "Preparing system for monitor destruction");
+					Sleep(50);
+
+					try
+					{
+						for (unsigned int i = 0; i < numVirtualDisplays; i++)
+						{
+							vddlog("d", ("Destroying monitor " + std::to_string(i) + " of " + std::to_string(numVirtualDisplays)).c_str());
+							pContext->pContext->DestroyMonitor(i);
+
+							if (numVirtualDisplays > 1 && i < numVirtualDisplays - 1)
+							{
+								vddlog("d", "Waiting between monitor destructions");
+								Sleep(100);
+							}
+						}
+
+						vddlog("d", "Allowing system to stabilize after monitor destruction");
+						Sleep(100);
+
+						vddlog("i", "All monitors destroyed successfully");
+					}
+					catch (const std::exception &e)
+					{
+						stringstream errorStream;
+						errorStream << "Exception during monitor destruction: " << e.what();
+						vddlog("e", errorStream.str().c_str());
+
+						Sleep(200);
+					}
+					catch (...)
+					{
+						vddlog("e", "Unknown exception during monitor destruction");
+
+						Sleep(200);
+					}
+				}
+				else
+				{
+					vddlog("e", "Failed to get device context for monitor destruction");
+				}
+			}
+			else
+			{
+				vddlog("e", "Global device not initialized for monitor destruction");
+			}
+		};
+
+		auto handleUnknownCommand = [](HANDLE, wchar_t *buffer)
+		{
+			vddlog("e", "Unknown command");
+
+			std::string narrowString = WStringToString(buffer);
+			vddlog("e", narrowString.c_str());
+		};
+
+		Command commands[] = {
+			{L"RELOAD_DRIVER", 13, handleReloadDriver},
+			{L"LOG_DEBUG", 9, handleLogDebug},
+			{L"LOGGING", 7, handleLogging},
+			{L"HDRPLUS", 7, handleHDRPlus},
+			{L"SDR10", 5, handleSDR10},
+			{L"CUSTOMEDID", 10, handleCustomEdid},
+			{L"PREVENTSPOOF", 12, handlePreventSpoof},
+			{L"CEAOVERRIDE", 11, handleCeaOverride},
+			{L"HARDWARECURSOR", 14, handleHardwareCursor},
+			{L"D3DDEVICEGPU", 12, handleD3DDeviceGPU},
+			{L"IDDCXVERSION", 12, handleIddCxVersion},
+			{L"GETASSIGNEDGPU", 14, handleGetAssignedGPU},
+			{L"GETALLGPUS", 10, handleGetAllGPUs},
+			{L"SETGPU", 6, handleSetGPU},
+			{L"SETDISPLAYCOUNT", 15, handleSetDisplayCount},
+			{L"GETSETTINGS", 11, handleGetSettings},
+			{L"PING", 4, handlePing},
+			{L"CREATEMONITOR", 13, handleCreateMonitor},
+			{L"DESTROYMONITOR", 14, handleDestroyMonitor},
+			{nullptr, 0, handleUnknownCommand}};
+
+		for (const auto &cmd : commands)
+		{
+			if (cmd.name && wcsncmp(buffer, cmd.name, cmd.length) == 0)
+			{
+				// Parse parameter: skip command name and optional space
+				wchar_t *param = buffer + cmd.length;
+				// Skip space if present
+				if (*param == L' ')
+				{
+					param++;
+				}
+				// If param points to null terminator, it means no parameter was provided
+				cmd.action(hPipe, param);
+				break;
+			}
+		}
+	}
+	DisconnectNamedPipe(hPipe);
+	CloseHandle(hPipe);
+	g_pipeHandle = INVALID_HANDLE_VALUE;
 }
 
-
-DWORD WINAPI NamedPipeServer(LPVOID lpParam) {
+DWORD WINAPI NamedPipeServer(LPVOID lpParam)
+{
 	UNREFERENCED_PARAMETER(lpParam);
 
 	SECURITY_ATTRIBUTES sa;
 	sa.nLength = sizeof(SECURITY_ATTRIBUTES);
 	sa.bInheritHandle = FALSE;
-	const wchar_t* sddl = L"D:(A;;GA;;;WD)";
+	const wchar_t *sddl = L"D:(A;;GA;;;WD)";
 	vddlog("d", "Starting pipe with parameters: D:(A;;GA;;;WD)");
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-		sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL)) {
+			sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
+	{
 		DWORD ErrorCode = GetLastError();
-		const char* errorMessage = to_string(ErrorCode).c_str();
+		const char *errorMessage = to_string(ErrorCode).c_str();
 		vddlog("e", errorMessage);
 		return 1;
 	}
 	HANDLE hPipe;
-	while (g_Running) {
+	while (g_Running)
+	{
 		hPipe = CreateNamedPipeW(
 			PIPE_NAME,
 			PIPE_ACCESS_DUPLEX,
@@ -1571,20 +1843,23 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam) {
 			0,
 			&sa);
 
-		if (hPipe == INVALID_HANDLE_VALUE) {
+		if (hPipe == INVALID_HANDLE_VALUE)
+		{
 			DWORD ErrorCode = GetLastError();
-			const char* errorMessage = to_string(ErrorCode).c_str();
+			const char *errorMessage = to_string(ErrorCode).c_str();
 			vddlog("e", errorMessage);
 			LocalFree(sa.lpSecurityDescriptor);
 			return 1;
 		}
 
 		BOOL connected = ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-		if (connected) {
+		if (connected)
+		{
 			vddlog("p", "Client Connected");
 			HandleClient(hPipe);
 		}
-		else {
+		else
+		{
 			CloseHandle(hPipe);
 		}
 	}
@@ -1592,26 +1867,31 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam) {
 	return 0;
 }
 
-void StartNamedPipeServer() {
+void StartNamedPipeServer()
+{
 	vddlog("p", "Starting Pipe");
 	hPipeThread = CreateThread(NULL, 0, NamedPipeServer, NULL, 0, NULL);
-	if (hPipeThread == NULL) {
+	if (hPipeThread == NULL)
+	{
 		DWORD ErrorCode = GetLastError();
-		const char* errorMessage = to_string(ErrorCode).c_str();
+		const char *errorMessage = to_string(ErrorCode).c_str();
 		vddlog("e", errorMessage);
 	}
-	else {
+	else
+	{
 		vddlog("p", "Pipe created");
 	}
 }
 
-void StopNamedPipeServer() {
+void StopNamedPipeServer()
+{
 	vddlog("p", "Stopping Pipe");
 	{
 		lock_guard<mutex> lock(g_Mutex);
 		g_Running = false;
 	}
-	if (hPipeThread) {
+	if (hPipeThread)
+	{
 		HANDLE hPipe = CreateFileW(
 			PIPE_NAME,
 			GENERIC_READ | GENERIC_WRITE,
@@ -1621,7 +1901,8 @@ void StopNamedPipeServer() {
 			0,
 			NULL);
 
-		if (hPipe != INVALID_HANDLE_VALUE) {
+		if (hPipe != INVALID_HANDLE_VALUE)
+		{
 			DisconnectNamedPipe(hPipe);
 			CloseHandle(hPipe);
 		}
@@ -1634,28 +1915,32 @@ void StopNamedPipeServer() {
 }
 
 // 优先从环境变量读取配置路径，如果没有则回退到注册表读取
-bool initpath() {
+bool initpath()
+{
 	// 先尝试从环境变量读取
-	wchar_t envPath[MAX_PATH] = { 0 };
+	wchar_t envPath[MAX_PATH] = {0};
 	DWORD envLen = GetEnvironmentVariableW(L"ZAKOVDDPATH", envPath, MAX_PATH);
-	if (envLen > 0 && envLen < MAX_PATH) {
+	if (envLen > 0 && envLen < MAX_PATH)
+	{
 		confpath = envPath;
 		return true;
 	}
 
 	// 环境变量未设置，尝试从注册表读取
 	HKEY hKey;
-	wchar_t szPath[MAX_PATH] = { 0 };
+	wchar_t szPath[MAX_PATH] = {0};
 	DWORD dwBufferSize = sizeof(szPath);
 	LONG lResult;
 	lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ZakoTech\\ZakoDisplayAdapter", 0, KEY_READ, &hKey);
-	if (lResult != ERROR_SUCCESS) {
+	if (lResult != ERROR_SUCCESS)
+	{
 		// 注册表不存在，返回false
 		return false;
 	}
 
 	lResult = RegQueryValueExW(hKey, L"VDDPATH", NULL, NULL, (LPBYTE)szPath, &dwBufferSize);
-	if (lResult != ERROR_SUCCESS) {
+	if (lResult != ERROR_SUCCESS)
+	{
 		RegCloseKey(hKey);
 		return false;
 	}
@@ -1666,77 +1951,83 @@ bool initpath() {
 	return true;
 }
 
-
 extern "C" EVT_WDF_DRIVER_UNLOAD EvtDriverUnload;
 
-VOID
-EvtDriverUnload(
-	_In_ WDFDRIVER Driver
-)
+VOID EvtDriverUnload(
+	_In_ WDFDRIVER Driver)
 {
 	UNREFERENCED_PARAMETER(Driver);
-	
+
 	vddlog("i", "Starting driver unload process");
-	
+
 	// Clean up global device resources before stopping services
-	if (g_GlobalDevice != nullptr) {
+	if (g_GlobalDevice != nullptr)
+	{
 		vddlog("d", "Cleaning up global device resources");
-		
-		try {
+
+		try
+		{
 			lock_guard<mutex> lock(g_Mutex);
-			auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
-			if (pContext && pContext->pContext) {
+			auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+			if (pContext && pContext->pContext)
+			{
 				// Stop any active SwapChain processing
-				if (pContext->pContext->HasActiveSwapChain()) {
+				if (pContext->pContext->HasActiveSwapChain())
+				{
 					vddlog("d", "Stopping active SwapChain processing during unload");
 					pContext->pContext->UnassignSwapChain();
 					Sleep(50); // Brief wait for cleanup
 				}
-				
+
 				// Destroy any active monitors
-				for (unsigned int i = 0; i < numVirtualDisplays; i++) {
-					if (pContext->pContext->HasActiveMonitor()) {
+				for (unsigned int i = 0; i < numVirtualDisplays; i++)
+				{
+					if (pContext->pContext->HasActiveMonitor())
+					{
 						vddlog("d", ("Destroying monitor " + std::to_string(i) + " during unload").c_str());
-						try {
+						try
+						{
 							pContext->pContext->DestroyMonitor(i);
 						}
-						catch (...) {
+						catch (...)
+						{
 							vddlog("w", ("Failed to cleanly destroy monitor " + std::to_string(i) + " during unload").c_str());
 						}
-						
-						if (i < numVirtualDisplays - 1) {
+
+						if (i < numVirtualDisplays - 1)
+						{
 							Sleep(25); // Short wait between destructions
 						}
 					}
 				}
-				
+
 				vddlog("d", "Global device resource cleanup completed");
 			}
 		}
-		catch (const std::exception& e) {
+		catch (const std::exception &e)
+		{
 			stringstream errorStream;
 			errorStream << "Exception during device cleanup in unload: " << e.what();
 			vddlog("e", errorStream.str().c_str());
 		}
-		catch (...) {
+		catch (...)
+		{
 			vddlog("e", "Unknown exception during device cleanup in unload");
 		}
-		
+
 		// Wait for system stabilization
 		Sleep(100);
 	}
-	
+
 	// Stop the named pipe server
 	StopNamedPipeServer();
-	
+
 	vddlog("i", "Driver unload completed");
 }
 
-_Use_decl_annotations_
-extern "C" NTSTATUS DriverEntry(
-	PDRIVER_OBJECT  pDriverObject,
-	PUNICODE_STRING pRegistryPath
-)
+_Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
+	PDRIVER_OBJECT pDriverObject,
+	PUNICODE_STRING pRegistryPath)
 {
 	WDF_DRIVER_CONFIG Config;
 	NTSTATUS Status;
@@ -1756,15 +2047,14 @@ extern "C" NTSTATUS DriverEntry(
 	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
 	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
 
-
-	//colour
+	// colour
 	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
 	SDR10 = EnabledQuery(L"SDR10Enabled");
 	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
 	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
 	ColourFormat = GetStringSetting(L"ColourFormat");
 
-	//Cursor
+	// Cursor
 	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
 	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport");
 	CursorMaxX = GetIntegerSetting(L"CursorMaxX");
@@ -1773,19 +2063,19 @@ extern "C" NTSTATUS DriverEntry(
 	int xorCursorSupportLevelInt = GetIntegerSetting(L"XorCursorSupportLevel");
 	std::string xorCursorSupportLevelName;
 
-	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3) {
+	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3)
+	{
 		vddlog("w", "Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
 		XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 	}
-	else {
+	else
+	{
 		XorCursorSupportLevel = static_cast<IDDCX_XOR_CURSOR_SUPPORT>(xorCursorSupportLevelInt);
 	}
 
 	xorCursorSupportLevelName = XorCursorSupportLevelToString(XorCursorSupportLevel);
 
 	vddlog("i", ("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
-
-
 
 	vddlog("i", "Driver Starting");
 	string utf8_confpath = WStringToString(confpath);
@@ -1804,43 +2094,48 @@ extern "C" NTSTATUS DriverEntry(
 	return Status;
 }
 
-vector<string> split(string& input, char delimiter)
+vector<string> split(string &input, char delimiter)
 {
 	istringstream stream(input);
 	string field;
 	vector<string> result;
-	while (getline(stream, field, delimiter)) {
+	while (getline(stream, field, delimiter))
+	{
 		result.push_back(field);
 	}
 	return result;
 }
 
-
-void loadSettings() {
+void loadSettings()
+{
 	const wstring settingsname = confpath + L"\\vdd_settings.xml";
-	const wstring& filename = settingsname;
-	if (PathFileExistsW(filename.c_str())) {
+	const wstring &filename = settingsname;
+	if (PathFileExistsW(filename.c_str()))
+	{
 		CComPtr<IStream> pStream;
 		CComPtr<IXmlReader> pReader;
 		HRESULT hr = SHCreateStreamOnFileW(filename.c_str(), STGM_READ, &pStream);
-		if (FAILED(hr)) {
+		if (FAILED(hr))
+		{
 			vddlog("e", "Loading Settings: Failed to create file stream.");
-			return; 
+			return;
 		}
-		hr = CreateXmlReader(__uuidof(IXmlReader), (void**)&pReader, NULL);
-		if (FAILED(hr)) {
+		hr = CreateXmlReader(__uuidof(IXmlReader), (void **)&pReader, NULL);
+		if (FAILED(hr))
+		{
 			vddlog("e", "Loading Settings: Failed to create XmlReader.");
 			return;
 		}
 		hr = pReader->SetInput(pStream);
-		if (FAILED(hr)) {
+		if (FAILED(hr))
+		{
 			vddlog("e", "Loading Settings: Failed to set input stream.");
 			return;
 		}
 
 		XmlNodeType nodeType;
-		const WCHAR* pwszLocalName;
-		const WCHAR* pwszValue;
+		const WCHAR *pwszLocalName;
+		const WCHAR *pwszValue;
 		UINT cwchLocalName;
 		UINT cwchValue;
 		wstring currentElement;
@@ -1851,46 +2146,59 @@ void loadSettings() {
 		set<tuple<int, int>> resolutions;
 		vector<int> globalRefreshRates;
 
-		while (S_OK == (hr = pReader->Read(&nodeType))) {
-			switch (nodeType) {
+		while (S_OK == (hr = pReader->Read(&nodeType)))
+		{
+			switch (nodeType)
+			{
 			case XmlNodeType_Element:
 				hr = pReader->GetLocalName(&pwszLocalName, &cwchLocalName);
-				if (FAILED(hr)) {
+				if (FAILED(hr))
+				{
 					return;
 				}
 				currentElement = wstring(pwszLocalName, cwchLocalName);
 				break;
 			case XmlNodeType_Text:
 				hr = pReader->GetValue(&pwszValue, &cwchValue);
-				if (FAILED(hr)) {
+				if (FAILED(hr))
+				{
 					return;
 				}
-				if (currentElement == L"count") {
+				if (currentElement == L"count")
+				{
 					monitorcount = stoi(wstring(pwszValue, cwchValue));
-					if (monitorcount == 0) {
+					if (monitorcount == 0)
+					{
 						monitorcount = 1;
 						vddlog("i", "Loading singular monitor (Monitor Count is not valid)");
 					}
 				}
-				else if (currentElement == L"friendlyname") {
+				else if (currentElement == L"friendlyname")
+				{
 					gpuFriendlyName = wstring(pwszValue, cwchValue);
 				}
-				else if (currentElement == L"width") {
+				else if (currentElement == L"width")
+				{
 					width = wstring(pwszValue, cwchValue);
-					if (width.empty()) {
+					if (width.empty())
+					{
 						width = L"800";
 					}
 				}
-				else if (currentElement == L"height") {
+				else if (currentElement == L"height")
+				{
 					height = wstring(pwszValue, cwchValue);
-					if (height.empty()) {
+					if (height.empty())
+					{
 						height = L"600";
 					}
 					resolutions.insert(make_tuple(stoi(width), stoi(height)));
 				}
-				else if (currentElement == L"refresh_rate") {
+				else if (currentElement == L"refresh_rate")
+				{
 					refreshRate = wstring(pwszValue, cwchValue);
-					if (refreshRate.empty()) {
+					if (refreshRate.empty())
+					{
 						refreshRate = L"30";
 					}
 					int vsync_num, vsync_den;
@@ -1901,7 +2209,8 @@ void loadSettings() {
 					ss << "Added: " << stoi(width) << "x" << stoi(height) << " @ " << vsync_num << "/" << vsync_den << "Hz";
 					vddlog("d", ss.str().c_str());
 				}
-				else if (currentElement == L"g_refresh_rate") {
+				else if (currentElement == L"g_refresh_rate")
+				{
 					globalRefreshRates.push_back(stoi(wstring(pwszValue, cwchValue)));
 				}
 				break;
@@ -1910,8 +2219,8 @@ void loadSettings() {
 
 		/*
 		* This is for res testing, stores each resolution then iterates through each global adding a res for each one
-		* 
-		
+		*
+
 		for (const auto& resTuple : resolutions) {
 			stringstream ss;
 			ss << get<0>(resTuple) << "x" << get<1>(resTuple);
@@ -1925,8 +2234,10 @@ void loadSettings() {
 		}
 		*/
 
-		for (int globalRate : globalRefreshRates) {
-			for (const auto& resTuple : resolutions) {
+		for (int globalRate : globalRefreshRates)
+		{
+			for (const auto &resTuple : resolutions)
+			{
 				int global_width = get<0>(resTuple);
 				int global_height = get<1>(resTuple);
 
@@ -1938,7 +2249,7 @@ void loadSettings() {
 
 		/*
 		* logging all resolutions after added global
-		* 
+		*
 		for (const auto& tup : res) {
 			stringstream ss;
 			ss << "("
@@ -1948,48 +2259,53 @@ void loadSettings() {
 				<< get<3>(tup) << ")";
 			vddlog("t", ss.str().c_str());
 		}
-		
-		*/
 
+		*/
 
 		numVirtualDisplays = monitorcount;
 		gpuname = gpuFriendlyName;
 		monitorModes = res;
-		vddlog("i","Using vdd_settings.xml");
+		vddlog("i", "Using vdd_settings.xml");
 		return;
 	}
 	const wstring optionsname = confpath + L"\\option.txt";
 	ifstream ifs(optionsname);
-	if (ifs.is_open()) {
-    string line;
-    if (getline(ifs, line) && !line.empty()) {
-        numVirtualDisplays = stoi(line);
-        vector<tuple<int, int, int, int>> res; 
+	if (ifs.is_open())
+	{
+		string line;
+		if (getline(ifs, line) && !line.empty())
+		{
+			numVirtualDisplays = stoi(line);
+			vector<tuple<int, int, int, int>> res;
 
-        while (getline(ifs, line)) {
-            vector<string> strvec = split(line, ',');
-            if (strvec.size() == 3 && strvec[0].substr(0, 1) != "#") {
-                int vsync_num, vsync_den;
-                float_to_vsync(stof(strvec[2]), vsync_num, vsync_den); 
-                res.push_back({ stoi(strvec[0]), stoi(strvec[1]), vsync_num, vsync_den });
-            }
-        }
+			while (getline(ifs, line))
+			{
+				vector<string> strvec = split(line, ',');
+				if (strvec.size() == 3 && strvec[0].substr(0, 1) != "#")
+				{
+					int vsync_num, vsync_den;
+					float_to_vsync(stof(strvec[2]), vsync_num, vsync_den);
+					res.push_back({stoi(strvec[0]), stoi(strvec[1]), vsync_num, vsync_den});
+				}
+			}
 
-        vddlog("i", "Using option.txt");
-        monitorModes = res;
-        for (const auto& mode : res) {
-            int width, height, vsync_num, vsync_den;
-            tie(width, height, vsync_num, vsync_den) = mode;
-            stringstream ss;
-            ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
-            vddlog("d", ss.str().c_str());
-        }
-		return;
-    } else {
-        vddlog("w", "option.txt is empty or the first line is invalid. Enabling Fallback");
-    }
-}
-
+			vddlog("i", "Using option.txt");
+			monitorModes = res;
+			for (const auto &mode : res)
+			{
+				int width, height, vsync_num, vsync_den;
+				tie(width, height, vsync_num, vsync_den) = mode;
+				stringstream ss;
+				ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
+				vddlog("d", ss.str().c_str());
+			}
+			return;
+		}
+		else
+		{
+			vddlog("w", "option.txt is empty or the first line is invalid. Enabling Fallback");
+		}
+	}
 
 	numVirtualDisplays = 1;
 	vector<tuple<int, int, int, int>> res;
@@ -2029,12 +2345,12 @@ void loadSettings() {
 		{3840, 2160, 90.0f},
 		{3840, 2160, 120.0f},
 		{3840, 2160, 144.0f},
-		{3840, 2160, 165.0f}
-	};
+		{3840, 2160, 165.0f}};
 
 	vddlog("i", "Loading Fallback - no settings found");
 
-	for (const auto& mode : fallbackRes) {
+	for (const auto &mode : fallbackRes)
+	{
 		int width, height;
 		float refreshRate;
 		tie(width, height, refreshRate) = mode;
@@ -2045,18 +2361,17 @@ void loadSettings() {
 		stringstream ss;
 		res.push_back(make_tuple(width, height, vsync_num, vsync_den));
 
-
 		ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
 		vddlog("d", ss.str().c_str());
 	}
 
 	monitorModes = res;
 	return;
-
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
+	NTSTATUS
+	VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
 {
 	NTSTATUS Status = STATUS_SUCCESS;
 	WDF_PNPPOWER_EVENT_CALLBACKS PnpPowerCallbacks;
@@ -2065,7 +2380,7 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 	UNREFERENCED_PARAMETER(Driver);
 
 	logStream << "Initializing device:"
-		<< "\n  DeviceInit Pointer: " << static_cast<void*>(pDeviceInit);
+			  << "\n  DeviceInit Pointer: " << static_cast<void *>(pDeviceInit);
 	vddlog("d", logStream.str().c_str());
 
 	// Register for power callbacks - in this sample only power-on is needed
@@ -2078,10 +2393,10 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 
 	logStream.str("");
 	logStream << "Configuring IDD_CX client:"
-		<< "\n  EvtIddCxAdapterInitFinished: " << (IddConfig.EvtIddCxAdapterInitFinished ? "Set" : "Not Set")
-		<< "\n  EvtIddCxMonitorGetDefaultDescriptionModes: " << (IddConfig.EvtIddCxMonitorGetDefaultDescriptionModes ? "Set" : "Not Set")
-		<< "\n  EvtIddCxMonitorAssignSwapChain: " << (IddConfig.EvtIddCxMonitorAssignSwapChain ? "Set" : "Not Set")
-		<< "\n  EvtIddCxMonitorUnassignSwapChain: " << (IddConfig.EvtIddCxMonitorUnassignSwapChain ? "Set" : "Not Set");
+			  << "\n  EvtIddCxAdapterInitFinished: " << (IddConfig.EvtIddCxAdapterInitFinished ? "Set" : "Not Set")
+			  << "\n  EvtIddCxMonitorGetDefaultDescriptionModes: " << (IddConfig.EvtIddCxMonitorGetDefaultDescriptionModes ? "Set" : "Not Set")
+			  << "\n  EvtIddCxMonitorAssignSwapChain: " << (IddConfig.EvtIddCxMonitorAssignSwapChain ? "Set" : "Not Set")
+			  << "\n  EvtIddCxMonitorUnassignSwapChain: " << (IddConfig.EvtIddCxMonitorUnassignSwapChain ? "Set" : "Not Set");
 	vddlog("d", logStream.str().c_str());
 
 	// If the driver wishes to handle custom IoDeviceControl requests, it's necessary to use this callback since IddCx
@@ -2103,7 +2418,8 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 		IddConfig.EvtIddCxAdapterCommitModes2 = VirtualDisplayDriverEvtIddCxAdapterCommitModes2;
 		IddConfig.EvtIddCxMonitorSetGammaRamp = VirtualDisplayDriverEvtIddCxMonitorSetGammaRamp;
 	}
-	else {
+	else
+	{
 		IddConfig.EvtIddCxParseMonitorDescription = VirtualDisplayDriverParseMonitorDescription;
 		IddConfig.EvtIddCxMonitorQueryTargetModes = VirtualDisplayDriverMonitorQueryModes;
 		IddConfig.EvtIddCxAdapterCommitModes = VirtualDisplayDriverAdapterCommitModes;
@@ -2121,64 +2437,73 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 	WDF_OBJECT_ATTRIBUTES Attr;
 	WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectDeviceContextWrapper);
 	Attr.EvtCleanupCallback = [](WDFOBJECT Object)
-		{
-			vddlog("d", "Device cleanup callback triggered");
-			
-			// Automatically cleanup the context when the WDF object is about to be deleted
-			auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Object);
-			if (pContext && pContext->pContext)
-			{
-				try {
-					// Perform comprehensive cleanup before destroying the context
-					vddlog("d", "Performing comprehensive device cleanup");
-					
-					// Stop any active SwapChain processing
-					if (pContext->pContext->HasActiveSwapChain()) {
-						vddlog("d", "Stopping active SwapChain during device cleanup");
-						pContext->pContext->UnassignSwapChain();
-						Sleep(50); // Allow cleanup to complete
-					}
-					
-					// Destroy any active monitors
-					if (pContext->pContext->HasActiveMonitor()) {
-						vddlog("d", "Destroying active monitor during device cleanup");
-						try {
-							// Note: We only try to destroy monitor 0 since DestroyMonitor handles single monitor
-							pContext->pContext->DestroyMonitor(0);
-						}
-						catch (...) {
-							vddlog("w", "Exception while destroying monitor during device cleanup");
-						}
-					}
-					
-					// Wait for stabilization
-					Sleep(50);
-					
-					vddlog("d", "Device-specific cleanup completed, calling context cleanup");
-				}
-				catch (const std::exception& e) {
-					stringstream errorStream;
-					errorStream << "Exception during device cleanup: " << e.what();
-					vddlog("e", errorStream.str().c_str());
-				}
-				catch (...) {
-					vddlog("e", "Unknown exception during device cleanup");
-				}
-				
-				// Always call the context cleanup
-				pContext->Cleanup();
-				vddlog("d", "Device cleanup callback completed");
-			}
-			else if (pContext) {
-				vddlog("w", "Device context wrapper found but context is null during cleanup");
-				pContext->Cleanup();
-			}
-			else {
-				vddlog("w", "No device context wrapper found during cleanup");
-			}
-		};
+	{
+		vddlog("d", "Device cleanup callback triggered");
 
-	logStream.str(""); 
+		// Automatically cleanup the context when the WDF object is about to be deleted
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Object);
+		if (pContext && pContext->pContext)
+		{
+			try
+			{
+				// Perform comprehensive cleanup before destroying the context
+				vddlog("d", "Performing comprehensive device cleanup");
+
+				// Stop any active SwapChain processing
+				if (pContext->pContext->HasActiveSwapChain())
+				{
+					vddlog("d", "Stopping active SwapChain during device cleanup");
+					pContext->pContext->UnassignSwapChain();
+					Sleep(50); // Allow cleanup to complete
+				}
+
+				// Destroy any active monitors
+				if (pContext->pContext->HasActiveMonitor())
+				{
+					vddlog("d", "Destroying active monitor during device cleanup");
+					try
+					{
+						// Note: We only try to destroy monitor 0 since DestroyMonitor handles single monitor
+						pContext->pContext->DestroyMonitor(0);
+					}
+					catch (...)
+					{
+						vddlog("w", "Exception while destroying monitor during device cleanup");
+					}
+				}
+
+				// Wait for stabilization
+				Sleep(50);
+
+				vddlog("d", "Device-specific cleanup completed, calling context cleanup");
+			}
+			catch (const std::exception &e)
+			{
+				stringstream errorStream;
+				errorStream << "Exception during device cleanup: " << e.what();
+				vddlog("e", errorStream.str().c_str());
+			}
+			catch (...)
+			{
+				vddlog("e", "Unknown exception during device cleanup");
+			}
+
+			// Always call the context cleanup
+			pContext->Cleanup();
+			vddlog("d", "Device cleanup callback completed");
+		}
+		else if (pContext)
+		{
+			vddlog("w", "Device context wrapper found but context is null during cleanup");
+			pContext->Cleanup();
+		}
+		else
+		{
+			vddlog("w", "No device context wrapper found during cleanup");
+		}
+	};
+
+	logStream.str("");
 	logStream << "Creating device with WdfDeviceCreate:";
 	vddlog("d", logStream.str().c_str());
 
@@ -2186,7 +2511,7 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 	Status = WdfDeviceCreate(&pDeviceInit, &Attr, &Device);
 	if (!NT_SUCCESS(Status))
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "WdfDeviceCreate failed with status: " << Status;
 		vddlog("e", logStream.str().c_str());
 		return Status;
@@ -2195,7 +2520,7 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 	Status = IddCxDeviceInitialize(Device);
 	if (!NT_SUCCESS(Status))
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "IddCxDeviceInitialize failed with status: " << Status;
 		vddlog("e", logStream.str().c_str());
 		return Status;
@@ -2205,19 +2530,20 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 	/*
 	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	pContext->pContext = new IndirectDeviceContext(Device);
-	*/ // code to return uncase the device context wrapper isnt found (Most likely insufficient resources)
+	*/
+	// code to return uncase the device context wrapper isnt found (Most likely insufficient resources)
 
-	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	if (pContext)
 	{
 		pContext->pContext = new IndirectDeviceContext(Device);
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Device context initialized and attached to WDF device.";
 		vddlog("d", logStream.str().c_str());
 	}
 	else
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Failed to get device context wrapper.";
 		vddlog("e", logStream.str().c_str());
 		return STATUS_INSUFFICIENT_RESOURCES;
@@ -2230,16 +2556,17 @@ NTSTATUS VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDevice
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
+	NTSTATUS
+	VirtualDisplayDriverDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
 {
-	//UNREFERENCED_PARAMETER(PreviousState);
+	// UNREFERENCED_PARAMETER(PreviousState);
 
 	stringstream logStream;
 
 	// Log the entry into D0 state
 	logStream << "Entering D0 power state:"
-		<< "\n  Device Handle: " << static_cast<void*>(Device)
-		<< "\n  Previous State: " << PreviousState;
+			  << "\n  Device Handle: " << static_cast<void *>(Device)
+			  << "\n  Previous State: " << PreviousState;
 	vddlog("d", logStream.str().c_str());
 
 	// This function is called by WDF to start the device in the fully-on power state.
@@ -2247,29 +2574,28 @@ NTSTATUS VirtualDisplayDriverDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_ST
 	/*
 	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	pContext->pContext->InitAdapter();
-	*/ //Added error handling incase fails to get device context
+	*/
+	// Added error handling incase fails to get device context
 
-	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	if (pContext && pContext->pContext)
 	{
 		logStream.str("");
 		logStream << "Initializing adapter...";
 		vddlog("d", logStream.str().c_str());
 
-
 		pContext->pContext->InitAdapter();
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "InitAdapter called successfully.";
 		vddlog("d", logStream.str().c_str());
 	}
 	else
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Failed to get device context.";
 		vddlog("e", logStream.str().c_str());
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
-
 
 	return STATUS_SUCCESS;
 }
@@ -2298,12 +2624,12 @@ HRESULT Direct3DDevice::Init()
 	hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&DxgiFactory));
 	if (FAILED(hr))
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Failed to create DXGI factory. HRESULT: " << hr;
 		vddlog("e", logStream.str().c_str());
 		return hr;
 	}
-	logStream.str(""); 
+	logStream.str("");
 	logStream << "DXGI factory created successfully.";
 	vddlog("d", logStream.str().c_str());
 
@@ -2311,7 +2637,7 @@ HRESULT Direct3DDevice::Init()
 	hr = DxgiFactory->EnumAdapterByLuid(AdapterLuid, IID_PPV_ARGS(&Adapter));
 	if (FAILED(hr))
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Failed to enumerate adapter by LUID. HRESULT: " << hr;
 		vddlog("e", logStream.str().c_str());
 		return hr;
@@ -2322,7 +2648,6 @@ HRESULT Direct3DDevice::Init()
 	logStream.str("");
 	logStream << "Adapter found: " << desc.Description << " (Vendor ID: " << desc.VendorId << ", Device ID: " << desc.DeviceId << ")";
 	vddlog("i", logStream.str().c_str());
-
 
 #if 0 // Test code
 	{
@@ -2337,7 +2662,7 @@ HRESULT Direct3DDevice::Init()
 	}
 #endif
 
-	D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+	D3D_FEATURE_LEVEL featureLevels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
 	D3D_FEATURE_LEVEL featureLevel;
 
 	// Create a D3D device using the render adapter. BGRA support is required by the WHQL test suite.
@@ -2346,7 +2671,7 @@ HRESULT Direct3DDevice::Init()
 	{
 		// If creating the D3D device failed, it's possible the render GPU was lost (e.g. detachable GPU) or else the
 		// system is in a transient state.
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Failed to create Direct3D device. HRESULT: " << hr;
 		vddlog("e", logStream.str().c_str());
 		logStream.str("");
@@ -2372,9 +2697,9 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Di
 	stringstream logStream;
 
 	logStream << "Constructing SwapChainProcessor:"
-		<< "\n  SwapChain Handle: " << static_cast<void*>(hSwapChain)
-		<< "\n  Device Pointer: " << static_cast<void*>(Device.get())
-		<< "\n  NewFrameEvent Handle: " << NewFrameEvent;
+			  << "\n  SwapChain Handle: " << static_cast<void *>(hSwapChain)
+			  << "\n  Device Pointer: " << static_cast<void *>(Device.get())
+			  << "\n  NewFrameEvent Handle: " << NewFrameEvent;
 	vddlog("d", logStream.str().c_str());
 
 	m_hTerminateEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
@@ -2415,17 +2740,17 @@ SwapChainProcessor::~SwapChainProcessor()
 
 	vddlog("d", logStream.str().c_str());
 	// Alert the swap-chain processing thread to terminate
-	//SetEvent(m_hTerminateEvent.Get()); changed for error handling + log purposes 
+	// SetEvent(m_hTerminateEvent.Get()); changed for error handling + log purposes
 
 	if (SetEvent(m_hTerminateEvent.Get()))
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Terminate event signaled successfully.";
 		vddlog("d", logStream.str().c_str());
 	}
 	else
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Failed to signal terminate event. GetLastError: " << GetLastError();
 		vddlog("e", logStream.str().c_str());
 	}
@@ -2437,30 +2762,33 @@ SwapChainProcessor::~SwapChainProcessor()
 		switch (waitResult)
 		{
 		case WAIT_OBJECT_0:
-			logStream.str(""); 
+			logStream.str("");
 			logStream << "Thread terminated successfully.";
 			vddlog("d", logStream.str().c_str());
 			break;
 		case WAIT_ABANDONED:
-			logStream.str(""); 
+			logStream.str("");
 			logStream << "Thread wait was abandoned. GetLastError: " << GetLastError();
 			vddlog("e", logStream.str().c_str());
 			break;
 		case WAIT_TIMEOUT:
-			logStream.str(""); 
+			logStream.str("");
 			logStream << "Thread wait timed out after 5 seconds. Forcing termination.";
 			vddlog("w", logStream.str().c_str());
 			// Force terminate the thread if it doesn't respond
-			if (!TerminateThread(m_hThread.Get(), 1)) {
+			if (!TerminateThread(m_hThread.Get(), 1))
+			{
 				logStream.str("");
 				logStream << "Failed to terminate thread. GetLastError: " << GetLastError();
 				vddlog("e", logStream.str().c_str());
-			} else {
+			}
+			else
+			{
 				vddlog("w", "Thread forcefully terminated due to timeout.");
 			}
 			break;
 		default:
-			logStream.str(""); 
+			logStream.str("");
 			logStream << "Unexpected result from WaitForSingleObject: " << waitResult << ". GetLastError: " << GetLastError();
 			vddlog("e", logStream.str().c_str());
 			break;
@@ -2481,7 +2809,7 @@ DWORD CALLBACK SwapChainProcessor::RunThread(LPVOID Argument)
 	logStream << "RunThread started. Argument: " << Argument;
 	vddlog("d", logStream.str().c_str());
 
-	reinterpret_cast<SwapChainProcessor*>(Argument)->Run();
+	reinterpret_cast<SwapChainProcessor *>(Argument)->Run();
 	return 0;
 }
 
@@ -2505,14 +2833,14 @@ void SwapChainProcessor::Run()
 	}
 	else
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Failed to set multimedia thread characteristics. GetLastError: " << GetLastError();
 		vddlog("e", logStream.str().c_str());
 	}
 
 	RunCore();
 
-	logStream.str(""); 
+	logStream.str("");
 	logStream << "Core processing function RunCore() completed.";
 	vddlog("d", logStream.str().c_str());
 
@@ -2520,26 +2848,29 @@ void SwapChainProcessor::Run()
 	// provide a new swap-chain if necessary.
 	if (m_hSwapChain)
 	{
-		try {
+		try
+		{
 			// Attempt graceful cleanup first
 			vddlog("d", "Attempting graceful swap-chain cleanup");
-			
+
 			// Give the system time to complete any pending operations
 			Sleep(10);
-			
+
 			WdfObjectDelete((WDFOBJECT)m_hSwapChain);
 			logStream.str("");
 			logStream << "Swap-chain object deleted successfully.";
 			vddlog("d", logStream.str().c_str());
 			m_hSwapChain = nullptr;
 		}
-		catch (const std::exception& e) {
+		catch (const std::exception &e)
+		{
 			stringstream errorStream;
 			errorStream << "Exception while deleting swap-chain: " << e.what();
 			vddlog("e", errorStream.str().c_str());
 			m_hSwapChain = nullptr; // Mark as null to prevent further access
 		}
-		catch (...) {
+		catch (...)
+		{
 			vddlog("e", "Unknown exception while deleting swap-chain");
 			m_hSwapChain = nullptr; // Mark as null to prevent further access
 		}
@@ -2552,16 +2883,17 @@ void SwapChainProcessor::Run()
 	}
 	/*
 	AvRevertMmThreadCharacteristics(AvTaskHandle);
-	*/ //error handling when reversing multimedia thread characteristics 
+	*/
+	// error handling when reversing multimedia thread characteristics
 	if (AvRevertMmThreadCharacteristics(AvTaskHandle))
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Multimedia thread characteristics reverted successfully.";
 		vddlog("d", logStream.str().c_str());
 	}
 	else
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Failed to revert multimedia thread characteristics. GetLastError: " << GetLastError();
 		vddlog("e", logStream.str().c_str());
 	}
@@ -2580,27 +2912,21 @@ void SwapChainProcessor::RunCore()
 		vddlog("e", logStream.str().c_str());
 		return;
 	}
-	logStream << "DXGI device interface obtained successfully.";
-	//vddlog("d", logStream.str().c_str());
-
 
 	IDARG_IN_SWAPCHAINSETDEVICE SetDevice = {};
 	SetDevice.pDevice = DxgiDevice.Get();
 
 	hr = IddCxSwapChainSetDevice(m_hSwapChain, &SetDevice);
-	logStream.str("");
 	if (FAILED(hr))
 	{
+		logStream.str("");
 		logStream << "Failed to set device to swap chain. HRESULT: " << hr;
 		vddlog("e", logStream.str().c_str());
 		return;
 	}
-	logStream << "Device set to swap chain successfully.";
-	//vddlog("d", logStream.str().c_str());
 
-	logStream.str(""); 
-	logStream << "Starting buffer acquisition and release loop.";
-	//vddlog("d", logStream.str().c_str());
+	// Cache function availability check outside the loop for better performance
+	const bool useBuffer2 = IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2);
 
 	// Acquire and release buffers in a loop
 	for (;;)
@@ -2610,9 +2936,10 @@ void SwapChainProcessor::RunCore()
 		// Ask for the next buffer from the producer
 		IDARG_IN_RELEASEANDACQUIREBUFFER2 BufferInArgs = {};
 		BufferInArgs.Size = sizeof(BufferInArgs);
-		IDXGIResource* pSurface;
+		IDXGIResource *pSurface;
 
-		if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2)) {
+		if (useBuffer2)
+		{
 			IDARG_OUT_RELEASEANDACQUIREBUFFER2 Buffer = {};
 			hr = IddCxSwapChainReleaseAndAcquireBuffer2(m_hSwapChain, &BufferInArgs, &Buffer);
 			pSurface = Buffer.MetaData.pSurface;
@@ -2624,36 +2951,31 @@ void SwapChainProcessor::RunCore()
 			pSurface = Buffer.MetaData.pSurface;
 		}
 		// AcquireBuffer immediately returns STATUS_PENDING if no buffer is yet available
-		logStream.str("");
 		if (hr == E_PENDING)
 		{
 			// We must wait for a new buffer
 			HANDLE WaitHandles[] =
-			{
-				m_hAvailableBufferEvent,
-				m_hTerminateEvent.Get()
-			};
+				{
+					m_hAvailableBufferEvent,
+					m_hTerminateEvent.Get()};
 			DWORD WaitResult = WaitForMultipleObjects(ARRAYSIZE(WaitHandles), WaitHandles, FALSE, 16);
-
-			logStream << "Buffer acquisition pending. WaitResult: " << WaitResult;
 
 			if (WaitResult == WAIT_OBJECT_0 || WaitResult == WAIT_TIMEOUT)
 			{
 				// We have a new buffer, so try the AcquireBuffer again
-				//vddlog("d", "New buffer trying aquire new buffer");
 				continue;
 			}
 			else if (WaitResult == WAIT_OBJECT_0 + 1)
 			{
 				// We need to terminate
-				logStream << "Terminate event signaled. Exiting loop.";
-				//vddlog("d", logStream.str().c_str());
 				break;
 			}
 			else
 			{
 				// The wait was cancelled or something unexpected happened
 				hr = HRESULT_FROM_WIN32(WaitResult);
+				// Only build log message when actually needed (error case)
+				logStream.str("");
 				logStream << "Unexpected wait result. HRESULT: " << hr;
 				vddlog("e", logStream.str().c_str());
 				break;
@@ -2675,7 +2997,6 @@ void SwapChainProcessor::RunCore()
 			// ==============================
 
 			AcquiredBuffer.Reset();
-			//vddlog("d", "Reset buffer");
 			hr = IddCxSwapChainFinishedProcessingFrame(m_hSwapChain);
 			if (FAILED(hr))
 			{
@@ -2691,7 +3012,8 @@ void SwapChainProcessor::RunCore()
 		}
 		else
 		{
-			logStream.str(""); // Clear the stream
+			// Only build log message when actually needed (error case)
+			logStream.str("");
 			logStream << "Failed to acquire buffer. Exiting loop. The swap-chain was likely abandoned (e.g. DXGI_ERROR_ACCESS_LOST) - HRESULT: " << hr;
 			vddlog("e", logStream.str().c_str());
 			// The swap-chain was likely abandoned (e.g. DXGI_ERROR_ACCESS_LOST), so exit the processing loop
@@ -2707,42 +3029,31 @@ void SwapChainProcessor::RunCore()
 const UINT64 MHZ = 1000000;
 const UINT64 KHZ = 1000;
 
-constexpr DISPLAYCONFIG_VIDEO_SIGNAL_INFO dispinfo(UINT32 h, UINT32 v, UINT32 rn, UINT32 rd) {
+constexpr DISPLAYCONFIG_VIDEO_SIGNAL_INFO dispinfo(UINT32 h, UINT32 v, UINT32 rn, UINT32 rd)
+{
 	const UINT32 clock_rate = rn * (v + 4) * (v + 4) / rd + 1000;
 	return {
-	  clock_rate,                                      // pixel clock rate [Hz]
-	{ clock_rate, v + 4 },                         // fractional horizontal refresh rate [Hz]
-	{ clock_rate, (v + 4) * (v + 4) },          // fractional vertical refresh rate [Hz]
-	{ h, v },                                    // (horizontal, vertical) active pixel resolution
-	{ h + 4, v + 4 },                         // (horizontal, vertical) total pixel resolution
-	{ { 255, 0 }},                                   // video standard and vsync divider
-	DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE
-	};
+		clock_rate,						 // pixel clock rate [Hz]
+		{clock_rate, v + 4},			 // fractional horizontal refresh rate [Hz]
+		{clock_rate, (v + 4) * (v + 4)}, // fractional vertical refresh rate [Hz]
+		{h, v},							 // (horizontal, vertical) active pixel resolution
+		{h + 4, v + 4},					 // (horizontal, vertical) total pixel resolution
+		{{255, 0}},						 // video standard and vsync divider
+		DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE};
 }
 
-vector<BYTE> hardcodedEdid =
+// Get default EDID from external header file
+// This function returns a cached copy to avoid repeated allocations
+vector<BYTE> GetHardcodedEdid()
 {
-    0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x6b, 0x34, 0x14, 0x02, 0xe7, 0x1e, 0xe7, 0x1e,
-    0x1c, 0x22, 0x01, 0x03, 0x80, 0x32, 0x1f, 0x78, 0x06, 0xee, 0x95, 0xa3, 0x54, 0x4c, 0x99, 0x26,
-    0x0f, 0x50, 0x54, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02, 0x3a, 0x80, 0x18, 0x71, 0x38, 0x2d, 0x40, 0x58, 0x2c,
-    0x45, 0x00, 0xe0, 0x0e, 0x11, 0x00, 0x00, 0x1e, 0x00, 0x00, 0x00, 0xfc, 0x00, 0x5a, 0x61, 0x6b,
-    0x6f, 0x20, 0x48, 0x44, 0x52, 0x0a, 0x20, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x64,
-    0x02, 0x03, 0x39, 0x70, 0xe6, 0x06, 0x0f, 0x01, 0xa2, 0xa2, 0x10, 0xe3, 0x05, 0xd8, 0x80, 0x68,
-    0x03, 0x0c, 0x00, 0x77, 0x77, 0x78, 0x64, 0x0f, 0x29, 0x67, 0x04, 0x03, 0x5f, 0x7f, 0x00, 0x09,
-    0x06, 0x07, 0x6d, 0xd8, 0x5d, 0xc4, 0x01, 0x78, 0xdf, 0x67, 0x3f, 0x30, 0xf0, 0xcf, 0x60, 0x00,
-    0x68, 0x1a, 0x00, 0x00, 0x01, 0x01, 0x30, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90,
-};
+	static vector<BYTE> cachedEdid = GetDefaultEdid();
+	return cachedEdid;
+}
 
-
-void modifyEdid(vector<BYTE>& edid) {
-	if (edid.size() < 12) {
+void modifyEdid(vector<BYTE> &edid)
+{
+	if (edid.size() < 12)
+	{
 		return;
 	}
 
@@ -2753,8 +3064,10 @@ void modifyEdid(vector<BYTE>& edid) {
 }
 
 // Modify EDID serial number based on client GUID to ensure consistency
-void modifyEdidSerialNumber(vector<BYTE>& edid, const GUID& clientGuid) {
-	if (edid.size() < 16) {
+void modifyEdidSerialNumber(vector<BYTE> &edid, const GUID &clientGuid)
+{
+	if (edid.size() < 16)
+	{
 		return;
 	}
 
@@ -2767,15 +3080,16 @@ void modifyEdidSerialNumber(vector<BYTE>& edid, const GUID& clientGuid) {
 	edid[15] = (BYTE)((clientGuid.Data1 >> 24) & 0xFF);
 }
 
-
-
-BYTE calculateChecksum(const std::vector<BYTE>& edid) {
+BYTE calculateChecksum(const std::vector<BYTE> &edid)
+{
 	int sum = 0;
-	for (int i = 0; i < 127; ++i) {
+	for (int i = 0; i < 127; ++i)
+	{
 		sum += edid[i];
 	}
 	sum %= 256;
-	if (sum != 0) {
+	if (sum != 0)
+	{
 		sum = 256 - sum;
 	}
 	return static_cast<BYTE>(sum);
@@ -2788,50 +3102,63 @@ BYTE calculateChecksum(const std::vector<BYTE>& edid) {
 // Byte 21: Horizontal screen size (cm)
 // Byte 22: Vertical screen size (cm)
 // If widthCm or heightCm is 0, the corresponding dimension is not updated
-void updateEdidPhysicalSize(vector<BYTE>& edid, float widthCm, float heightCm) {
-	if (edid.size() < 23) {
+void updateEdidPhysicalSize(vector<BYTE> &edid, float widthCm, float heightCm)
+{
+	if (edid.size() < 23)
+	{
 		vddlog("w", "EDID too small to update physical size");
 		return;
 	}
-	
-	if (widthCm > 0) {
+
+	if (widthCm > 0)
+	{
 		// Clamp to valid range (1-255 cm)
 		int width = static_cast<int>(widthCm);
-		if (width < 1) width = 1;
-		if (width > 255) width = 255;
+		if (width < 1)
+			width = 1;
+		if (width > 255)
+			width = 255;
 		edid[21] = static_cast<BYTE>(width);
-		
+
 		stringstream ss;
 		ss << "Set EDID horizontal size: " << width << " cm";
 		vddlog("d", ss.str().c_str());
 	}
-	
-	if (heightCm > 0) {
+
+	if (heightCm > 0)
+	{
 		// Clamp to valid range (1-255 cm)
 		int height = static_cast<int>(heightCm);
-		if (height < 1) height = 1;
-		if (height > 255) height = 255;
+		if (height < 1)
+			height = 1;
+		if (height > 255)
+			height = 255;
 		edid[22] = static_cast<BYTE>(height);
-		
+
 		stringstream ss;
 		ss << "Set EDID vertical size: " << height << " cm";
 		vddlog("d", ss.str().c_str());
 	}
 }
 
-void updateCeaExtensionCount(vector<BYTE>& edid, int count) {
+void updateCeaExtensionCount(vector<BYTE> &edid, int count)
+{
 	edid[126] = static_cast<BYTE>(count);
 }
 
 // Calculate checksum for CEA extension block (bytes 128-255)
-BYTE calculateCeaChecksum(const vector<BYTE>& edid) {
-	if (edid.size() < 256) return 0;
+BYTE calculateCeaChecksum(const vector<BYTE> &edid)
+{
+	if (edid.size() < 256)
+		return 0;
 	int sum = 0;
-	for (int i = 128; i < 255; ++i) {
+	for (int i = 128; i < 255; ++i)
+	{
 		sum += edid[i];
 	}
 	sum %= 256;
-	if (sum != 0) {
+	if (sum != 0)
+	{
 		sum = 256 - sum;
 	}
 	return static_cast<BYTE>(sum);
@@ -2847,89 +3174,105 @@ BYTE calculateCeaChecksum(const vector<BYTE>& edid) {
 // - Byte 4: Desired Content Max Luminance (cv = 50 * 2^(L/32)) - MaxCLL
 // - Byte 5: Desired Content Max Frame-average Luminance (cv = 50 * 2^(L/32)) - MaxFALL
 // - Byte 6: Desired Content Min Luminance (cv = MinLum / MaxLum * 255 * 255 / 100)
-// 
+//
 // Parameters:
 // - maxNits: Maximum Content Light Level (MaxCLL) in nits
 // - minNits: Minimum luminance in nits
 // - maxFALL: Maximum Frame-Average Light Level in nits (if 0, will be calculated as maxNits * 0.8)
-void updateEdidHdrMetadata(vector<BYTE>& edid, float maxNits, float minNits, float maxFALL) {
-	if (edid.size() < 256) {
+void updateEdidHdrMetadata(vector<BYTE> &edid, float maxNits, float minNits, float maxFALL)
+{
+	if (edid.size() < 256)
+	{
 		vddlog("w", "EDID too small to update HDR metadata");
 		return;
 	}
-	
+
 	// If maxFALL is not specified (0), calculate it as ~80% of maxNits
-	if (maxFALL <= 0) {
+	if (maxFALL <= 0)
+	{
 		maxFALL = maxNits * 0.8f;
 	}
-	
+
 	// CEA extension starts at byte 128, data blocks start at byte 132
 	const int ceaStart = 128;
 	int dtdOffset = edid[ceaStart + 2];
-	if (dtdOffset == 0) dtdOffset = 4;
-	
+	if (dtdOffset == 0)
+		dtdOffset = 4;
+
 	const int endPos = ceaStart + dtdOffset;
-	
-	for (int pos = ceaStart + 4; pos < endPos && pos < 255; ) {
+
+	for (int pos = ceaStart + 4; pos < endPos && pos < 255;)
+	{
 		const BYTE header = edid[pos];
 		const int tag = (header >> 5) & 0x07;
 		const int length = header & 0x1F;
-		
+
 		// Check for Extended Tag (0x07) with HDR Static Metadata (0x06)
-		if (tag == 0x07 && length >= 1 && (pos + 1) < 256 && edid[pos + 1] == 0x06) {
+		if (tag == 0x07 && length >= 1 && (pos + 1) < 256 && edid[pos + 1] == 0x06)
+		{
 			vddlog("d", ("Found HDR Static Metadata block at position " + to_string(pos)).c_str());
-			
+
 			// Helper lambda to calculate luminance code value: cv = 32 * log2(nits / 50)
 			// Use ceiling to ensure we meet or exceed the requested luminance
-			auto calcLumCv = [](float nits) -> BYTE {
+			auto calcLumCv = [](float nits) -> BYTE
+			{
 				float cv = 32.0f * log2f(nits / 50.0f);
 				return static_cast<BYTE>(ceilf(max(0.0f, min(255.0f, cv))));
 			};
-			
+
 			// Byte 4: Max Luminance (MaxCLL)
-			if (length >= 4 && (pos + 4) < 256) {
+			if (length >= 4 && (pos + 4) < 256)
+			{
 				edid[pos + 4] = calcLumCv(maxNits);
 				float actualNits = 50.0f * powf(2.0f, edid[pos + 4] / 32.0f);
 				vddlog("d", ("Set MaxCLL cv=" + to_string((int)edid[pos + 4]) + " (req " + to_string(maxNits) + ", actual " + to_string(actualNits) + " nits)").c_str());
 			}
-			
+
 			// Byte 5: Max Frame-Average Luminance (MaxFALL)
-			if (length >= 5 && (pos + 5) < 256) {
+			if (length >= 5 && (pos + 5) < 256)
+			{
 				edid[pos + 5] = calcLumCv(maxFALL);
 				float actualNits = 50.0f * powf(2.0f, edid[pos + 5] / 32.0f);
 				vddlog("d", ("Set MaxFALL cv=" + to_string((int)edid[pos + 5]) + " (req " + to_string(maxFALL) + ", actual " + to_string(actualNits) + " nits)").c_str());
 			}
-			
+
 			// Byte 6: Min Luminance cv = (MinLum * 255 * 255) / (MaxLum * 100)
-			if (length >= 6 && (pos + 6) < 256) {
+			if (length >= 6 && (pos + 6) < 256)
+			{
 				float minCv = (minNits * 255.0f * 255.0f) / (maxNits * 100.0f);
 				edid[pos + 6] = static_cast<BYTE>(roundf(max(0.0f, min(255.0f, minCv))));
 				float actualNits = (edid[pos + 6] * maxNits * 100.0f) / (255.0f * 255.0f);
 				vddlog("d", ("Set MinLum cv=" + to_string((int)edid[pos + 6]) + " (req " + to_string(minNits) + ", actual " + to_string(actualNits) + " nits)").c_str());
 			}
-			
+
 			edid[255] = calculateCeaChecksum(edid);
 			vddlog("d", "Updated CEA extension checksum");
 			return;
 		}
-		
+
 		pos += length + 1;
 	}
-	
+
 	vddlog("w", "HDR Static Metadata block not found in EDID");
 }
 
-vector<BYTE> loadEdid(const string& filePath) {
-	if (customEdid) {
+vector<BYTE> loadEdid(const string &filePath)
+{
+	vector<BYTE> hardcodedEdid = GetHardcodedEdid();
+
+	if (customEdid)
+	{
 		vddlog("i", "Attempting to use user Edid");
 	}
-	else {
+	else
+	{
 		vddlog("i", "Using hardcoded edid");
 		return hardcodedEdid;
 	}
 
 	ifstream file(filePath, ios::binary | ios::ate);
-	if (!file) {
+	if (!file)
+	{
 		vddlog("i", "No custom edid found");
 		vddlog("i", "Using hardcoded edid");
 		return hardcodedEdid;
@@ -2939,23 +3282,29 @@ vector<BYTE> loadEdid(const string& filePath) {
 	file.seekg(0, ios::beg);
 
 	vector<BYTE> buffer(size);
-	if (file.read((char*)buffer.data(), size)) {
-		//calculate checksum and compare it to 127 byte, if false then return hardcoded if true then return buffer to prevent loading borked edid.
+	if (file.read((char *)buffer.data(), size))
+	{
+		// calculate checksum and compare it to 127 byte, if false then return hardcoded if true then return buffer to prevent loading borked edid.
 		BYTE calculatedChecksum = calculateChecksum(buffer);
-		if (calculatedChecksum != buffer[127]) {
+		if (calculatedChecksum != buffer[127])
+		{
 			vddlog("e", "Custom edid failed due to invalid checksum");
 			vddlog("i", "Using hardcoded edid");
 			return hardcodedEdid;
 		}
 
-		if (edidCeaOverride) {
-			if (buffer.size() == 256) {
-				for (int i = 128; i < 256; ++i) {
+		if (edidCeaOverride)
+		{
+			if (buffer.size() == 256)
+			{
+				for (int i = 128; i < 256; ++i)
+				{
 					buffer[i] = hardcodedEdid[i];
 				}
 				updateCeaExtensionCount(buffer, 1);
 			}
-			else if (buffer.size() == 128) {
+			else if (buffer.size() == 128)
+			{
 				buffer.insert(buffer.end(), hardcodedEdid.begin() + 128, hardcodedEdid.end());
 				updateCeaExtensionCount(buffer, 1);
 			}
@@ -2964,78 +3313,83 @@ vector<BYTE> loadEdid(const string& filePath) {
 		vddlog("i", "Using custom edid");
 		return buffer;
 	}
-	else {
+	else
+	{
 		vddlog("i", "Using hardcoded edid");
 		return hardcodedEdid;
 	}
 }
 
-int maincalc() {
+int maincalc()
+{
 	vector<BYTE> edid = loadEdid(WStringToString(confpath) + "\\user_edid.bin");
 
 	// Validate EDID data
-	if (edid.empty()) {
+	if (edid.empty())
+	{
 		vddlog("e", "EDID data is empty, adapter initialization may fail");
 		return -1;
 	}
-	
-	if (edid.size() < 128) {
+
+	if (edid.size() < 128)
+	{
 		stringstream ss;
 		ss << "EDID data too small (" << edid.size() << " bytes), expected at least 128 bytes";
 		vddlog("e", ss.str().c_str());
 		return -1;
 	}
 
-	if (!preventManufacturerSpoof) modifyEdid(edid);
+	if (!preventManufacturerSpoof)
+		modifyEdid(edid);
 	BYTE checksum = calculateChecksum(edid);
 	edid[127] = checksum;
-	
+
 	// Setting this variable is depricated, hardcoded edid is either returned or custom in loading edid function
 	IndirectDeviceContext::s_KnownMonitorEdid = edid;
-	
+
 	stringstream ss;
 	ss << "EDID data loaded successfully (" << edid.size() << " bytes)";
 	vddlog("d", ss.str().c_str());
-	
+
 	return 0;
 }
 
-
-
-IndirectDeviceContext::IndirectDeviceContext(_In_ WDFDEVICE WdfDevice) :
-	m_WdfDevice(WdfDevice), m_hMouseEvent(nullptr)
+IndirectDeviceContext::IndirectDeviceContext(_In_ WDFDEVICE WdfDevice) : m_WdfDevice(WdfDevice), m_hMouseEvent(nullptr)
 {
 	m_Adapter = {};
 }
 
 // Helper function to wait with system state validation
-bool IndirectDeviceContext::WaitForSystemStabilization(int timeoutMs, const char* operation)
+bool IndirectDeviceContext::WaitForSystemStabilization(int timeoutMs, const char *operation)
 {
 	stringstream logStream;
 	logStream << "Waiting for system stabilization during: " << operation;
 	vddlog("d", logStream.str().c_str());
-	
+
 	const int checkInterval = 25; // Check every 25ms
 	int elapsed = 0;
-	
-	while (elapsed < timeoutMs) {
+
+	while (elapsed < timeoutMs)
+	{
 		Sleep(checkInterval);
 		elapsed += checkInterval;
-		
+
 		// Basic validation - check if our monitor handle is still valid
-		if (m_Monitor == nullptr) {
+		if (m_Monitor == nullptr)
+		{
 			vddlog("d", "Monitor handle became null during wait - system may have cleaned up");
 			return true; // This might be expected in some cases
 		}
-		
+
 		// Check if we're in the middle of multiple operations
-		if (elapsed % 100 == 0) { // Log every 100ms
+		if (elapsed % 100 == 0)
+		{ // Log every 100ms
 			logStream.str("");
 			logStream << "Still waiting for stabilization... (" << elapsed << "ms/" << timeoutMs << "ms)";
 			vddlog("d", logStream.str().c_str());
 		}
 	}
-	
+
 	logStream.str("");
 	logStream << "System stabilization wait completed for: " << operation;
 	vddlog("d", logStream.str().c_str());
@@ -3043,22 +3397,23 @@ bool IndirectDeviceContext::WaitForSystemStabilization(int timeoutMs, const char
 }
 
 // Helper function to validate monitor state before critical operations
-bool IndirectDeviceContext::ValidateMonitorState(const char* operation)
+bool IndirectDeviceContext::ValidateMonitorState(const char *operation)
 {
 	stringstream logStream;
 	logStream << "Validating monitor state for: " << operation;
 	vddlog("d", logStream.str().c_str());
-	
-	if (m_Monitor == nullptr) {
+
+	if (m_Monitor == nullptr)
+	{
 		logStream.str("");
 		logStream << "Monitor is null during: " << operation;
 		vddlog("w", logStream.str().c_str());
 		return false;
 	}
-	
+
 	// Additional state checks could be added here
 	// For now, we just verify the handle is not null
-	
+
 	logStream.str("");
 	logStream << "Monitor state validation passed for: " << operation;
 	vddlog("d", logStream.str().c_str());
@@ -3073,60 +3428,72 @@ IndirectDeviceContext::~IndirectDeviceContext()
 	vddlog("d", logStream.str().c_str());
 
 	// First stop the SwapChain processing thread
-	if (m_ProcessingThread) {
-		try {
+	if (m_ProcessingThread)
+	{
+		try
+		{
 			logStream.str("");
 			logStream << "Stopping SwapChain processing thread in destructor";
 			vddlog("d", logStream.str().c_str());
-			
+
 			m_ProcessingThread.reset();
-			
+
 			logStream.str("");
 			logStream << "SwapChain processing thread stopped successfully in destructor";
 			vddlog("d", logStream.str().c_str());
 		}
-		catch (const std::exception& e) {
+		catch (const std::exception &e)
+		{
 			stringstream errorStream;
 			errorStream << "Exception while stopping SwapChain in destructor: " << e.what();
 			vddlog("e", errorStream.str().c_str());
 		}
-		catch (...) {
+		catch (...)
+		{
 			vddlog("e", "Unknown exception while stopping SwapChain in destructor");
 		}
 	}
 
 	// Clean up hardware cursor event handle
-	if (m_hMouseEvent != nullptr) {
-		try {
+	if (m_hMouseEvent != nullptr)
+	{
+		try
+		{
 			vddlog("d", "Cleaning up hardware cursor event handle in destructor");
 			CloseHandle(m_hMouseEvent);
 			m_hMouseEvent = nullptr;
 			vddlog("d", "Hardware cursor event handle cleaned up successfully");
 		}
-		catch (const std::exception& e) {
+		catch (const std::exception &e)
+		{
 			stringstream errorStream;
 			errorStream << "Exception while cleaning mouse event in destructor: " << e.what();
 			vddlog("e", errorStream.str().c_str());
 		}
-		catch (...) {
+		catch (...)
+		{
 			vddlog("e", "Unknown exception while cleaning mouse event in destructor");
 		}
 	}
 
-	if (m_Monitor != nullptr) {
-		try {
+	if (m_Monitor != nullptr)
+	{
+		try
+		{
 			vddlog("d", "Cleaning up monitor in destructor");
 			// Do not call IddCxMonitorDeparture, as this may not be safe in the destructor
 			WdfObjectDelete(m_Monitor);
 			m_Monitor = nullptr;
 			vddlog("d", "Monitor cleaned up successfully in destructor");
 		}
-		catch (const std::exception& e) {
+		catch (const std::exception &e)
+		{
 			stringstream errorStream;
 			errorStream << "Exception while cleaning monitor in destructor: " << e.what();
 			vddlog("e", errorStream.str().c_str());
 		}
-		catch (...) {
+		catch (...)
+		{
 			vddlog("e", "Unknown exception while cleaning monitor in destructor");
 		}
 	}
@@ -3136,21 +3503,23 @@ IndirectDeviceContext::~IndirectDeviceContext()
 	vddlog("d", logStream.str().c_str());
 }
 
-#define NUM_VIRTUAL_DISPLAYS 1   //What is this even used for ?? Its never referenced
+#define NUM_VIRTUAL_DISPLAYS 1 // What is this even used for ?? Its never referenced
 
 void IndirectDeviceContext::InitAdapter()
 {
 	stringstream logStream;
-	
+
 	// Load settings and GPU configuration first
 	loadSettings();
 	logStream.str("");
-	if (gpuname.empty() || gpuname == L"default") {
+	if (gpuname.empty() || gpuname == L"default")
+	{
 		const wstring adaptername = confpath + L"\\adapter.txt";
 		Options.Adapter.load(adaptername.c_str());
 		logStream << "Attempting to Load GPU from adapter.txt";
 	}
-	else {
+	else
+	{
 		Options.Adapter.xmlprovide(gpuname);
 		logStream << "Loading GPU from vdd_settings.xml";
 	}
@@ -3159,19 +3528,21 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Validate EDID data before proceeding
 	int edidResult = maincalc();
-	if (edidResult != 0) {
+	if (edidResult != 0)
+	{
 		vddlog("e", "EDID validation failed, adapter initialization will likely fail");
 		// Continue anyway, but log the warning
 	}
 
 	// Validate monitor modes
-	if (monitorModes.empty()) {
+	if (monitorModes.empty())
+	{
 		vddlog("w", "No monitor modes loaded, adding fallback 1920x1080@60Hz mode");
 		int vsync_num, vsync_den;
 		float_to_vsync(60.0f, vsync_num, vsync_den);
 		monitorModes.push_back(std::make_tuple(1920, 1080, vsync_num, vsync_den));
 	}
-	
+
 	stringstream modeLog;
 	modeLog << "Loaded " << monitorModes.size() << " monitor modes for adapter initialization";
 	vddlog("d", modeLog.str().c_str());
@@ -3191,13 +3562,15 @@ void IndirectDeviceContext::InitAdapter()
 	IDDCX_ADAPTER_CAPS AdapterCaps = {};
 	AdapterCaps.Size = sizeof(AdapterCaps);
 
-	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2)) {
+	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2))
+	{
 		AdapterCaps.Flags = IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16;
 		logStream << "FP16 processing capability detected.";
 	}
 
 	// Validate and set monitor count with bounds checking
-	if (numVirtualDisplays == 0 || numVirtualDisplays > 16) {
+	if (numVirtualDisplays == 0 || numVirtualDisplays > 16)
+	{
 		logStream << "Invalid numVirtualDisplays value: " << numVirtualDisplays << ". Setting to 1.";
 		vddlog("w", logStream.str().c_str());
 		numVirtualDisplays = 1;
@@ -3223,14 +3596,14 @@ void IndirectDeviceContext::InitAdapter()
 	AdapterCaps.EndPointDiagnostics.pHardwareVersion = &Version;
 
 	logStream << "Adapter Caps Initialized:"
-		<< "\n  Max Monitors Supported: " << AdapterCaps.MaxMonitorsSupported
-		<< "\n  Gamma Support: " << AdapterCaps.EndPointDiagnostics.GammaSupport
-		<< "\n  Transmission Type: " << AdapterCaps.EndPointDiagnostics.TransmissionType
-		<< "\n  Friendly Name: " << AdapterCaps.EndPointDiagnostics.pEndPointFriendlyName
-		<< "\n  Manufacturer Name: " << AdapterCaps.EndPointDiagnostics.pEndPointManufacturerName
-		<< "\n  Model Name: " << AdapterCaps.EndPointDiagnostics.pEndPointModelName
-		<< "\n  Firmware Version: " << Version.MajorVer
-		<< "\n  Hardware Version: " << Version.MajorVer;
+			  << "\n  Max Monitors Supported: " << AdapterCaps.MaxMonitorsSupported
+			  << "\n  Gamma Support: " << AdapterCaps.EndPointDiagnostics.GammaSupport
+			  << "\n  Transmission Type: " << AdapterCaps.EndPointDiagnostics.TransmissionType
+			  << "\n  Friendly Name: " << AdapterCaps.EndPointDiagnostics.pEndPointFriendlyName
+			  << "\n  Manufacturer Name: " << AdapterCaps.EndPointDiagnostics.pEndPointManufacturerName
+			  << "\n  Model Name: " << AdapterCaps.EndPointDiagnostics.pEndPointModelName
+			  << "\n  Firmware Version: " << Version.MajorVer
+			  << "\n  Hardware Version: " << Version.MajorVer;
 
 	vddlog("d", logStream.str().c_str());
 	logStream.str("");
@@ -3245,7 +3618,8 @@ void IndirectDeviceContext::InitAdapter()
 	AdapterInit.ObjectAttributes = &Attr;
 
 	// Validate required parameters before initialization
-	if (AdapterInit.WdfDevice == nullptr) {
+	if (AdapterInit.WdfDevice == nullptr)
+	{
 		vddlog("e", "WdfDevice is null, cannot initialize adapter");
 		return;
 	}
@@ -3261,7 +3635,8 @@ void IndirectDeviceContext::InitAdapter()
 	if (NT_SUCCESS(Status))
 	{
 		// Validate the output handle
-		if (AdapterInitOut.AdapterObject == nullptr) {
+		if (AdapterInitOut.AdapterObject == nullptr)
+		{
 			vddlog("e", "Adapter initialization returned null handle despite success status");
 			return;
 		}
@@ -3272,18 +3647,22 @@ void IndirectDeviceContext::InitAdapter()
 		vddlog("d", logStream.str().c_str());
 
 		// Store the device context object into the WDF object context
-		auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterInitOut.AdapterObject);
-		if (pContext != nullptr) {
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterInitOut.AdapterObject);
+		if (pContext != nullptr)
+		{
 			pContext->pContext = this;
 			vddlog("d", "Device context successfully linked to adapter");
-		} else {
+		}
+		else
+		{
 			vddlog("e", "Failed to get adapter context wrapper");
 		}
 	}
-	else {
+	else
+	{
 		logStream << "Failed to initialize adapter. Status: 0x" << std::hex << Status;
 		vddlog("e", logStream.str().c_str());
-		
+
 		// Log additional diagnostic information
 		logStream.str("");
 		logStream << "Adapter initialization failed with numVirtualDisplays=" << numVirtualDisplays;
@@ -3293,21 +3672,23 @@ void IndirectDeviceContext::InitAdapter()
 
 void IndirectDeviceContext::FinishInit()
 {
-    Options.Adapter.apply(m_Adapter);
+	Options.Adapter.apply(m_Adapter);
 	SendToPipe("FinishInit");
 	vddlog("i", "Applied Adapter configs.");
 }
 
-void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm) {
+void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm)
+{
 	wstring logMessage = L"Creating Monitor: " + to_wstring(index + 1);
 	string narrowLogMessage = WStringToString(logMessage);
 	vddlog("i", narrowLogMessage.c_str());
-	
+
 	// Log HDR luminance settings and physical size
 	{
 		stringstream ss;
 		ss << "Monitor " << (index + 1) << " HDR settings - MaxNits: " << maxNits << ", MaxFALL: " << maxFALL << ", MinNits: " << minNits;
-		if (widthCm > 0 && heightCm > 0) {
+		if (widthCm > 0 && heightCm > 0)
+		{
 			ss << ", Physical size: " << widthCm << " x " << heightCm << " cm";
 		}
 		vddlog("d", ss.str().c_str());
@@ -3326,66 +3707,75 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClien
 
 	// Get or create EDID for this client GUID
 	// Use static storage to ensure EDID data persists for the lifetime of the monitor
-	vector<BYTE>* pMonitorEdid = nullptr;
-	if (pClientGuid != nullptr) {
+	vector<BYTE> *pMonitorEdid = nullptr;
+	if (pClientGuid != nullptr)
+	{
 		lock_guard<mutex> lock(s_EdidMapMutex);
 		auto it = s_ClientGuidEdidMap.find(*pClientGuid);
-		if (it != s_ClientGuidEdidMap.end()) {
+		if (it != s_ClientGuidEdidMap.end())
+		{
 			// Use existing EDID for this GUID
 			pMonitorEdid = &it->second;
 			stringstream ss;
 			ss << "Using existing EDID for client GUID (monitor " << (index + 1) << ")";
 			vddlog("d", ss.str().c_str());
-			
+
 			// Update HDR metadata in EDID with new luminance values
 			updateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
-			
+
 			// Update physical size in EDID if provided
-			if (widthCm > 0 || heightCm > 0) {
+			if (widthCm > 0 || heightCm > 0)
+			{
 				updateEdidPhysicalSize(*pMonitorEdid, widthCm, heightCm);
 			}
-			
+
 			// Recalculate checksum after modifying EDID
 			BYTE checksum = calculateChecksum(*pMonitorEdid);
 			(*pMonitorEdid)[127] = checksum;
-		} else {
+		}
+		else
+		{
 			// Create new EDID copy and modify serial number based on client GUID
 			// Same GUID will always produce the same serial number
 			s_ClientGuidEdidMap[*pClientGuid] = s_KnownMonitorEdid;
 			pMonitorEdid = &s_ClientGuidEdidMap[*pClientGuid];
 			modifyEdidSerialNumber(*pMonitorEdid, *pClientGuid);
-			
+
 			// Update HDR metadata in EDID with luminance values
 			updateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
-			
+
 			// Update physical size in EDID if provided
-			if (widthCm > 0 || heightCm > 0) {
+			if (widthCm > 0 || heightCm > 0)
+			{
 				updateEdidPhysicalSize(*pMonitorEdid, widthCm, heightCm);
 			}
-			
+
 			// Recalculate checksum after modifying EDID
 			BYTE checksum = calculateChecksum(*pMonitorEdid);
 			(*pMonitorEdid)[127] = checksum;
-			
+
 			stringstream ss;
 			ss << "Created new EDID with serial number based on client GUID for monitor " << (index + 1);
 			vddlog("d", ss.str().c_str());
 		}
-	} else {
+	}
+	else
+	{
 		// No client GUID, create a temporary copy to update HDR metadata
 		// Note: For monitors without GUID, we update the shared EDID
 		// This might affect other monitors using the same EDID
 		updateEdidHdrMetadata(s_KnownMonitorEdid, maxNits, minNits, maxFALL);
-		
+
 		// Update physical size in EDID if provided
-		if (widthCm > 0 || heightCm > 0) {
+		if (widthCm > 0 || heightCm > 0)
+		{
 			updateEdidPhysicalSize(s_KnownMonitorEdid, widthCm, heightCm);
 		}
-		
+
 		// Recalculate checksum after modifying EDID
 		BYTE checksum = calculateChecksum(s_KnownMonitorEdid);
 		s_KnownMonitorEdid[127] = checksum;
-		
+
 		pMonitorEdid = &s_KnownMonitorEdid;
 	}
 
@@ -3395,7 +3785,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClien
 	MonitorInfo.ConnectorIndex = index;
 	MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
 	MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-	//MonitorInfo.MonitorDescription.DataSize = sizeof(s_KnownMonitorEdid);        can no longer use size of as converted to vector
+	// MonitorInfo.MonitorDescription.DataSize = sizeof(s_KnownMonitorEdid);        can no longer use size of as converted to vector
 	if (pMonitorEdid->size() > UINT_MAX)
 	{
 		vddlog("e", "Edid size passes UINT_Max, escape to prevent loading borked display");
@@ -3404,17 +3794,12 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClien
 	{
 		MonitorInfo.MonitorDescription.DataSize = static_cast<UINT>(pMonitorEdid->size());
 	}
-	//MonitorInfo.MonitorDescription.pData = const_cast<BYTE*>(s_KnownMonitorEdid);
-	// Changed from using const_cast to data() to safely access the EDID data.
-	// This improves type safety and code readability, as it eliminates the need for casting 
-	// and ensures we are directly working with the underlying container of known monitor EDID data.
-	// Use the monitor-specific EDID (either shared or client-specific)
+	// MonitorInfo.MonitorDescription.pData = const_cast<BYTE*>(s_KnownMonitorEdid);
+	//  Changed from using const_cast to data() to safely access the EDID data.
+	//  This improves type safety and code readability, as it eliminates the need for casting
+	//  and ensures we are directly working with the underlying container of known monitor EDID data.
+	//  Use the monitor-specific EDID (either shared or client-specific)
 	MonitorInfo.MonitorDescription.pData = pMonitorEdid->data();
-
-
-
-
-
 
 	// ==============================
 	// TODO: The monitor's container ID should be distinct from "this" device's container ID if the monitor is not
@@ -3425,12 +3810,15 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClien
 	// ==============================
 
 	// Use client-provided GUID as container ID if available, otherwise generate a new one
-	if (pClientGuid != nullptr) {
+	if (pClientGuid != nullptr)
+	{
 		MonitorInfo.MonitorContainerId = *pClientGuid;
 		stringstream ss;
 		ss << "Using client-provided GUID as container ID for monitor " << (index + 1);
 		vddlog("d", ss.str().c_str());
-	} else {
+	}
+	else
+	{
 		CoCreateGuid(&MonitorInfo.MonitorContainerId);
 		vddlog("d", "Created container ID");
 	}
@@ -3447,9 +3835,10 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClien
 		vddlog("d", "Monitor created successfully.");
 		m_Monitor = MonitorCreateOut.MonitorObject;
 
-		if (m_Monitor == nullptr) {
-    		vddlog("e", "Invalid monitor handle");
-    		return;
+		if (m_Monitor == nullptr)
+		{
+			vddlog("e", "Invalid monitor handle");
+			return;
 		}
 
 		// Store HDR luminance settings for this monitor
@@ -3459,14 +3848,14 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClien
 			hdrSettings.maxNits = maxNits;
 			hdrSettings.minNits = minNits;
 			s_MonitorHdrSettingsMap[m_Monitor] = hdrSettings;
-			
+
 			stringstream ss;
 			ss << "Stored HDR settings for monitor " << (index + 1) << " - MaxNits: " << maxNits << ", MinNits: " << minNits;
 			vddlog("d", ss.str().c_str());
 		}
 
 		// Associate the monitor with this device context
-		auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorCreateOut.MonitorObject);
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorCreateOut.MonitorObject);
 		pContext->pContext = this;
 
 		// Tell the OS that the monitor has been plugged in
@@ -3491,8 +3880,10 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID* pClien
 	}
 }
 
-void IndirectDeviceContext::DestroyMonitor(unsigned int index) {
-	if (m_Monitor == nullptr) {
+void IndirectDeviceContext::DestroyMonitor(unsigned int index)
+{
+	if (m_Monitor == nullptr)
+	{
 		vddlog("w", "Monitor handle is already null");
 		return;
 	}
@@ -3501,26 +3892,30 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index) {
 	logStream << "Destroying monitor (Index: " << index << ")";
 	vddlog("d", logStream.str().c_str());
 
-	try {
+	try
+	{
 		// Clean up HDR settings for this monitor
 		{
 			lock_guard<mutex> lock(s_HdrSettingsMutex);
 			auto it = s_MonitorHdrSettingsMap.find(m_Monitor);
-			if (it != s_MonitorHdrSettingsMap.end()) {
+			if (it != s_MonitorHdrSettingsMap.end())
+			{
 				s_MonitorHdrSettingsMap.erase(it);
 				vddlog("d", "Cleaned up HDR settings for monitor");
 			}
 		}
 
 		// Step 1: Stop SwapChain processing immediately
-		if (m_ProcessingThread) {
+		if (m_ProcessingThread)
+		{
 			vddlog("d", "Stopping SwapChain processing thread before monitor destruction");
 			m_ProcessingThread.reset();
 			vddlog("d", "SwapChain processing thread stopped");
 		}
 
 		// Step 1.5: Clean up hardware cursor event handle
-		if (m_hMouseEvent != nullptr) {
+		if (m_hMouseEvent != nullptr)
+		{
 			vddlog("d", "Cleaning up hardware cursor event handle");
 			CloseHandle(m_hMouseEvent);
 			m_hMouseEvent = nullptr;
@@ -3528,95 +3923,121 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index) {
 		}
 
 		// Step 2: Wait for all resources to stabilize with system validation
-		if (!WaitForSystemStabilization(300, "resource stabilization before monitor departure")) {
+		if (!WaitForSystemStabilization(300, "resource stabilization before monitor departure"))
+		{
 			vddlog("w", "System stabilization timed out, continuing with departure");
 		}
 
 		// Step 3: Report monitor departure to the system with retry mechanism
 		NTSTATUS Status = STATUS_UNSUCCESSFUL;
-		if (!ValidateMonitorState("monitor departure reporting")) {
+		if (!ValidateMonitorState("monitor departure reporting"))
+		{
 			vddlog("e", "Monitor state validation failed, skipping departure reporting");
-		} else {
+		}
+		else
+		{
 			vddlog("d", "Reporting monitor departure to system");
 			int retryCount = 0;
 			const int maxRetries = 3;
-			
-			while (retryCount < maxRetries) {
+
+			while (retryCount < maxRetries)
+			{
 				// Validate state before each retry
-				if (!ValidateMonitorState("monitor departure retry")) {
+				if (!ValidateMonitorState("monitor departure retry"))
+				{
 					vddlog("w", "Monitor state invalid during retry, aborting departure attempts");
 					break;
 				}
-				
+
 				Status = IddCxMonitorDeparture(m_Monitor);
-				if (NT_SUCCESS(Status)) {
+				if (NT_SUCCESS(Status))
+				{
 					vddlog("d", "Successfully reported monitor departure");
 					break;
-				} else {
+				}
+				else
+				{
 					retryCount++;
 					stringstream errorStream;
-					errorStream << "Failed to report monitor departure attempt " << retryCount 
-						<< "/" << maxRetries << ". Status: 0x" << hex << Status;
+					errorStream << "Failed to report monitor departure attempt " << retryCount
+								<< "/" << maxRetries << ". Status: 0x" << hex << Status;
 					vddlog("w", errorStream.str().c_str());
-					
-					if (retryCount < maxRetries) {
+
+					if (retryCount < maxRetries)
+					{
 						vddlog("d", "Retrying monitor departure after short delay");
 						Sleep(100); // Wait before retry
 					}
 				}
 			}
 		}
-		
-		if (!NT_SUCCESS(Status)) {
+
+		if (!NT_SUCCESS(Status))
+		{
 			vddlog("e", "All monitor departure attempts failed, continuing with cleanup");
 			// Continue cleanup even if failed to avoid resource leaks
 		}
 
 		// Step 4: Wait for system to process the departure with validation
-		if (!WaitForSystemStabilization(500, "system processing of monitor departure")) {
+		if (!WaitForSystemStabilization(500, "system processing of monitor departure"))
+		{
 			vddlog("w", "System departure processing timed out, continuing with cleanup");
 		}
 
 		// Step 5: Safely delete the monitor object
-		if (ValidateMonitorState("final monitor deletion")) {
+		if (ValidateMonitorState("final monitor deletion"))
+		{
 			vddlog("d", "Deleting monitor WDF object");
 			WdfObjectDelete(m_Monitor);
 			m_Monitor = nullptr;
 			vddlog("d", "Monitor WDF object deleted successfully");
-		} else {
+		}
+		else
+		{
 			vddlog("w", "Monitor already null, skipping WDF object deletion");
 		}
 
 		logStream.str("");
 		logStream << "Monitor object destroyed successfully (Index: " << index << ")";
 		vddlog("i", logStream.str().c_str());
-
-	} catch (const std::exception& e) {
+	}
+	catch (const std::exception &e)
+	{
 		stringstream errorStream;
 		errorStream << "Exception during monitor destruction (Index: " << index << "): " << e.what();
 		vddlog("e", errorStream.str().c_str());
-		
+
 		// Force cleanup even after exception
-		if (m_Monitor != nullptr) {
-			try {
+		if (m_Monitor != nullptr)
+		{
+			try
+			{
 				WdfObjectDelete(m_Monitor);
 				m_Monitor = nullptr;
 				vddlog("w", "Forced monitor cleanup after exception");
-			} catch (...) {
+			}
+			catch (...)
+			{
 				vddlog("e", "Failed to force cleanup monitor after exception");
 				m_Monitor = nullptr; // Set to null anyway to prevent further access
 			}
 		}
-	} catch (...) {
+	}
+	catch (...)
+	{
 		vddlog("e", "Unknown exception during monitor destruction");
-		
+
 		// Force cleanup even after unknown exception
-		if (m_Monitor != nullptr) {
-			try {
+		if (m_Monitor != nullptr)
+		{
+			try
+			{
 				WdfObjectDelete(m_Monitor);
 				m_Monitor = nullptr;
 				vddlog("w", "Forced monitor cleanup after unknown exception");
-			} catch (...) {
+			}
+			catch (...)
+			{
 				vddlog("e", "Failed to force cleanup monitor after unknown exception");
 				m_Monitor = nullptr; // Set to null anyway to prevent further access
 			}
@@ -3624,7 +4045,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index) {
 	}
 }
 
-void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent)
+void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR &Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent)
 {
 	m_ProcessingThread.reset();
 
@@ -3635,7 +4056,7 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 		WdfObjectDelete(SwapChain);
 		return;
 	}
-	HRESULT hr = Device->Init(); 
+	HRESULT hr = Device->Init();
 	if (FAILED(hr))
 	{
 		vddlog("e", "Failed to initialize Direct3DDevice.");
@@ -3645,20 +4066,21 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 		vddlog("d", "Creating a new swap-chain processing thread.");
 		m_ProcessingThread.reset(new SwapChainProcessor(SwapChain, Device, NewFrameEvent));
 
-		if (hardwareCursor){
+		if (hardwareCursor)
+		{
 			// Clean up any existing mouse event handle first
-			if (m_hMouseEvent != nullptr) {
+			if (m_hMouseEvent != nullptr)
+			{
 				CloseHandle(m_hMouseEvent);
 				m_hMouseEvent = nullptr;
 				vddlog("d", "Cleaned up existing mouse event handle");
 			}
 
 			m_hMouseEvent = CreateEventA(
-				nullptr, 
-				false,   
-				false,   
-				"VirtualDisplayDriverMouse"
-			);
+				nullptr,
+				false,
+				false,
+				"VirtualDisplayDriverMouse");
 
 			if (!m_hMouseEvent)
 			{
@@ -3668,13 +4090,13 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 
 			IDDCX_CURSOR_CAPS cursorInfo = {};
 			cursorInfo.Size = sizeof(cursorInfo);
-			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL; 
+			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
 
-			cursorInfo.MaxX = CursorMaxX;       //Apparently in most cases 128 is fine but for safe guarding we will go 512, older intel cpus may be limited to 64x64
+			cursorInfo.MaxX = CursorMaxX; // Apparently in most cases 128 is fine but for safe guarding we will go 512, older intel cpus may be limited to 64x64
 			cursorInfo.MaxY = CursorMaxY;
 
-			//DirectXDevice->QueryMaxCursorSize(&cursorInfo.MaxX, &cursorInfo.MaxY);                 Experimental to get max cursor size - THIS IS NTO WORKING CODE
+			// DirectXDevice->QueryMaxCursorSize(&cursorInfo.MaxX, &cursorInfo.MaxY);                 Experimental to get max cursor size - THIS IS NTO WORKING CODE
 
 			IDARG_IN_SETUP_HWCURSOR hwCursor = {};
 			hwCursor.CursorInfo = cursorInfo;
@@ -3682,12 +4104,11 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 
 			NTSTATUS Status = IddCxMonitorSetupHardwareCursor(
 				Monitor,
-				&hwCursor
-			);
+				&hwCursor);
 
 			if (FAILED(Status))
 			{
-				CloseHandle(m_hMouseEvent); 
+				CloseHandle(m_hMouseEvent);
 				m_hMouseEvent = nullptr;
 				vddlog("e", "Failed to setup hardware cursor");
 				return;
@@ -3695,7 +4116,8 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 
 			vddlog("d", "Hardware cursor setup completed successfully.");
 		}
-		else {
+		else
+		{
 			vddlog("d", "Hardware cursor is disabled, Skipped creation.");
 		}
 		// At this point, the swap-chain is set up and the hardware cursor is enabled
@@ -3703,46 +4125,51 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR& Monitor, IDDCX_SWAPCH
 	}
 }
 
-
 void IndirectDeviceContext::UnassignSwapChain()
 {
 	// Stop processing the last swap-chain
 	vddlog("i", "Unassigning Swapchain. Processing will be stopped.");
-	
-	if (m_ProcessingThread) {
-		try {
+
+	if (m_ProcessingThread)
+	{
+		try
+		{
 			vddlog("d", "Stopping SwapChain processing thread");
-			
+
 			// Store a reference to ensure thread cleanup completes
 			auto processingThread = std::move(m_ProcessingThread);
-			
+
 			// Give the thread time to clean up gracefully
 			vddlog("d", "Waiting for SwapChain thread to complete cleanup");
 			Sleep(50);
-			
+
 			// Now reset the thread (this will trigger the destructor)
 			processingThread.reset();
-			
+
 			vddlog("d", "SwapChain processing thread stopped successfully");
-			
+
 			// Additional wait to ensure all cleanup is complete
 			Sleep(25);
-			
 		}
-		catch (const std::exception& e) {
+		catch (const std::exception &e)
+		{
 			stringstream errorStream;
 			errorStream << "Exception while stopping SwapChain processing thread: " << e.what();
 			vddlog("e", errorStream.str().c_str());
 		}
-		catch (...) {
+		catch (...)
+		{
 			vddlog("e", "Unknown exception while stopping SwapChain processing thread");
 		}
-	} else {
+	}
+	else
+	{
 		vddlog("d", "No SwapChain processing thread to stop");
 	}
-	
+
 	// Ensure m_ProcessingThread is definitely null
-	if (m_ProcessingThread) {
+	if (m_ProcessingThread)
+	{
 		vddlog("w", "Forcing m_ProcessingThread to null after cleanup");
 		m_ProcessingThread.reset();
 	}
@@ -3753,12 +4180,13 @@ void IndirectDeviceContext::UnassignSwapChain()
 #pragma region DDI Callbacks
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_IN_ADAPTER_INIT_FINISHED* pInArgs)
+	NTSTATUS
+	VirtualDisplayDriverAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_IN_ADAPTER_INIT_FINISHED *pInArgs)
 {
 	// This is called when the OS has finished setting up the adapter for use by the IddCx driver. It's now possible
 	// to report attached monitors.
 
-	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
 	if (NT_SUCCESS(pInArgs->AdapterInitStatus))
 	{
 		pContext->pContext->FinishInit();
@@ -3771,13 +4199,13 @@ NTSTATUS VirtualDisplayDriverAdapterInitFinished(IDDCX_ADAPTER AdapterObject, co
 		vddlog("e", ss.str().c_str());
 	}
 	vddlog("i", "Finished Setting up adapter.");
-	
 
 	return STATUS_SUCCESS;
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverAdapterCommitModes(IDDCX_ADAPTER AdapterObject, const IDARG_IN_COMMITMODES* pInArgs)
+	NTSTATUS
+	VirtualDisplayDriverAdapterCommitModes(IDDCX_ADAPTER AdapterObject, const IDARG_IN_COMMITMODES *pInArgs)
 {
 	UNREFERENCED_PARAMETER(AdapterObject);
 	UNREFERENCED_PARAMETER(pInArgs);
@@ -3793,7 +4221,8 @@ NTSTATUS VirtualDisplayDriverAdapterCommitModes(IDDCX_ADAPTER AdapterObject, con
 	return STATUS_SUCCESS;
 }
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION* pInArgs, IDARG_OUT_PARSEMONITORDESCRIPTION* pOutArgs)
+	NTSTATUS
+	VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION *pInArgs, IDARG_OUT_PARSEMONITORDESCRIPTION *pOutArgs)
 {
 	// ==============================
 	// TODO: In a real driver, this function would be called to generate monitor modes for an EDID by parsing it. In
@@ -3807,7 +4236,8 @@ NTSTATUS VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITOR
 	// Clear previous monitor modes to prevent accumulation on reload
 	s_KnownMonitorModes2.clear();
 
-	for (int i = 0; i < monitorModes.size(); i++) {
+	for (int i = 0; i < monitorModes.size(); i++)
+	{
 		s_KnownMonitorModes2.push_back(dispinfo(std::get<0>(monitorModes[i]), std::get<1>(monitorModes[i]), std::get<2>(monitorModes[i]), std::get<3>(monitorModes[i])));
 	}
 	pOutArgs->MonitorModeBufferOutputCount = (UINT)monitorModes.size();
@@ -3818,7 +4248,7 @@ NTSTATUS VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITOR
 
 	if (pInArgs->MonitorModeBufferInputCount < monitorModes.size())
 	{
-		logStream.str(""); 
+		logStream.str("");
 		logStream << "Buffer too small. Input count: " << pInArgs->MonitorModeBufferInputCount << ", Required: " << monitorModes.size();
 		vddlog("w", logStream.str().c_str());
 		// Return success if there was no buffer, since the caller was only asking for a count of modes
@@ -3842,7 +4272,8 @@ NTSTATUS VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITOR
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverMonitorGetDefaultModes(IDDCX_MONITOR MonitorObject, const IDARG_IN_GETDEFAULTDESCRIPTIONMODES* pInArgs, IDARG_OUT_GETDEFAULTDESCRIPTIONMODES* pOutArgs)
+	NTSTATUS
+	VirtualDisplayDriverMonitorGetDefaultModes(IDDCX_MONITOR MonitorObject, const IDARG_IN_GETDEFAULTDESCRIPTIONMODES *pInArgs, IDARG_OUT_GETDEFAULTDESCRIPTIONMODES *pOutArgs)
 {
 	UNREFERENCED_PARAMETER(MonitorObject);
 	UNREFERENCED_PARAMETER(pInArgs);
@@ -3863,13 +4294,13 @@ NTSTATUS VirtualDisplayDriverMonitorGetDefaultModes(IDDCX_MONITOR MonitorObject,
 /// <summary>
 /// Creates a target mode from the fundamental mode attributes.
 /// </summary>
-void CreateTargetMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO& Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
+void CreateTargetMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
 	stringstream logStream;
 	logStream << "Creating target mode with Width: " << Width
-		<< ", Height: " << Height
-		<< ", VSyncNum: " << VSyncNum
-		<< ", VSyncDen: " << VSyncDen;
+			  << ", Height: " << Height
+			  << ", VSyncNum: " << VSyncNum
+			  << ", VSyncDen: " << VSyncDen;
 	vddlog("d", logStream.str().c_str());
 
 	Mode.totalSize.cx = Mode.activeSize.cx = Width;
@@ -3885,61 +4316,64 @@ void CreateTargetMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO& Mode, UINT Width, UINT He
 
 	logStream.str("");
 	logStream << "Target mode configured with:"
-		<< "\n  Total Size: (" << Mode.totalSize.cx << ", " << Mode.totalSize.cy << ")"
-		<< "\n  Active Size: (" << Mode.activeSize.cx << ", " << Mode.activeSize.cy << ")"
-		<< "\n  vSync Frequency: " << Mode.vSyncFreq.Numerator << "/" << Mode.vSyncFreq.Denominator
-		<< "\n  hSync Frequency: " << Mode.hSyncFreq.Numerator << "/" << Mode.hSyncFreq.Denominator
-		<< "\n  Pixel Rate: " << Mode.pixelRate
-		<< "\n  Scan Line Ordering: " << Mode.scanLineOrdering;
+			  << "\n  Total Size: (" << Mode.totalSize.cx << ", " << Mode.totalSize.cy << ")"
+			  << "\n  Active Size: (" << Mode.activeSize.cx << ", " << Mode.activeSize.cy << ")"
+			  << "\n  vSync Frequency: " << Mode.vSyncFreq.Numerator << "/" << Mode.vSyncFreq.Denominator
+			  << "\n  hSync Frequency: " << Mode.hSyncFreq.Numerator << "/" << Mode.hSyncFreq.Denominator
+			  << "\n  Pixel Rate: " << Mode.pixelRate
+			  << "\n  Scan Line Ordering: " << Mode.scanLineOrdering;
 	vddlog("d", logStream.str().c_str());
 }
 
-void CreateTargetMode(IDDCX_TARGET_MODE& Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
+void CreateTargetMode(IDDCX_TARGET_MODE &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
 	Mode.Size = sizeof(Mode);
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
 
-void CreateTargetMode2(IDDCX_TARGET_MODE2& Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
+void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
 	stringstream logStream;
 	logStream << "Creating IDDCX_TARGET_MODE2 with Width: " << Width
-		<< ", Height: " << Height
-		<< ", VSyncNum: " << VSyncNum
-		<< ", VSyncDen: " << VSyncDen;
+			  << ", Height: " << Height
+			  << ", VSyncNum: " << VSyncNum
+			  << ", VSyncDen: " << VSyncDen;
 	vddlog("d", logStream.str().c_str());
 
 	Mode.Size = sizeof(Mode);
 
-
-	if (ColourFormat == L"RGB") {
+	if (ColourFormat == L"RGB")
+	{
 		Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;
 	}
-	else if (ColourFormat == L"YCbCr444") {
+	else if (ColourFormat == L"YCbCr444")
+	{
 		Mode.BitsPerComponent.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
 	}
-	else if (ColourFormat == L"YCbCr422") {
-		Mode.BitsPerComponent.YCbCr422 = SDRCOLOUR | HDRCOLOUR; 
+	else if (ColourFormat == L"YCbCr422")
+	{
+		Mode.BitsPerComponent.YCbCr422 = SDRCOLOUR | HDRCOLOUR;
 	}
-	else if (ColourFormat == L"YCbCr420") {
-		Mode.BitsPerComponent.YCbCr420 = SDRCOLOUR | HDRCOLOUR; 
+	else if (ColourFormat == L"YCbCr420")
+	{
+		Mode.BitsPerComponent.YCbCr420 = SDRCOLOUR | HDRCOLOUR;
 	}
-	else {
-		Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;  // Default to RGB
+	else
+	{
+		Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
 	}
-	
 
-	logStream.str(""); 
+	logStream.str("");
 	logStream << "IDDCX_TARGET_MODE2 configured with Size: " << Mode.Size
-		<< " and colour format " << WStringToString(ColourFormat);
+			  << " and colour format " << WStringToString(ColourFormat);
 	vddlog("d", logStream.str().c_str());
-
 
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverMonitorQueryModes(IDDCX_MONITOR MonitorObject, const IDARG_IN_QUERYTARGETMODES* pInArgs, IDARG_OUT_QUERYTARGETMODES* pOutArgs)////////////////////////////////////////////////////////////////////////////////
+	NTSTATUS
+	VirtualDisplayDriverMonitorQueryModes(IDDCX_MONITOR MonitorObject, const IDARG_IN_QUERYTARGETMODES *pInArgs, IDARG_OUT_QUERYTARGETMODES *pOutArgs) ////////////////////////////////////////////////////////////////////////////////
 {
 	UNREFERENCED_PARAMETER(MonitorObject);
 
@@ -3953,13 +4387,14 @@ NTSTATUS VirtualDisplayDriverMonitorQueryModes(IDDCX_MONITOR MonitorObject, cons
 	// monitor's descriptor and instead are based on the static processing capability of the device. The OS will
 	// report the available set of modes for a given output as the intersection of monitor modes with target modes.
 
-	for (int i = 0; i < monitorModes.size(); i++) {
+	for (int i = 0; i < monitorModes.size(); i++)
+	{
 		CreateTargetMode(TargetModes[i], std::get<0>(monitorModes[i]), std::get<1>(monitorModes[i]), std::get<2>(monitorModes[i]), std::get<3>(monitorModes[i]));
 
 		logStream.str("");
 		logStream << "Created target mode " << i << ": Width = " << std::get<0>(monitorModes[i])
-			<< ", Height = " << std::get<1>(monitorModes[i])
-			<< ", VSync = " << std::get<2>(monitorModes[i]);
+				  << ", Height = " << std::get<1>(monitorModes[i])
+				  << ", VSync = " << std::get<2>(monitorModes[i]);
 		vddlog("d", logStream.str().c_str());
 	}
 
@@ -3976,10 +4411,11 @@ NTSTATUS VirtualDisplayDriverMonitorQueryModes(IDDCX_MONITOR MonitorObject, cons
 		vddlog("d", logStream.str().c_str());
 		copy(TargetModes.begin(), TargetModes.end(), pInArgs->pTargetModes);
 	}
-	else {
+	else
+	{
 		logStream.str("");
 		logStream << "Input buffer too small. Required: " << TargetModes.size()
-			<< ", Provided: " << pInArgs->TargetModeBufferInputCount;
+				  << ", Provided: " << pInArgs->TargetModeBufferInputCount;
 		vddlog("w", logStream.str().c_str());
 	}
 
@@ -3987,38 +4423,40 @@ NTSTATUS VirtualDisplayDriverMonitorQueryModes(IDDCX_MONITOR MonitorObject, cons
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverMonitorAssignSwapChain(IDDCX_MONITOR MonitorObject, const IDARG_IN_SETSWAPCHAIN* pInArgs)
+	NTSTATUS
+	VirtualDisplayDriverMonitorAssignSwapChain(IDDCX_MONITOR MonitorObject, const IDARG_IN_SETSWAPCHAIN *pInArgs)
 {
 	stringstream logStream;
 	logStream << "Assigning swap chain:"
-		<< "\n  hSwapChain: " << pInArgs->hSwapChain
-		<< "\n  RenderAdapterLuid: " << pInArgs->RenderAdapterLuid.LowPart << "-" << pInArgs->RenderAdapterLuid.HighPart
-		<< "\n  hNextSurfaceAvailable: " << pInArgs->hNextSurfaceAvailable;
+			  << "\n  hSwapChain: " << pInArgs->hSwapChain
+			  << "\n  RenderAdapterLuid: " << pInArgs->RenderAdapterLuid.LowPart << "-" << pInArgs->RenderAdapterLuid.HighPart
+			  << "\n  hNextSurfaceAvailable: " << pInArgs->hNextSurfaceAvailable;
 	vddlog("d", logStream.str().c_str());
-	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
 	pContext->pContext->AssignSwapChain(MonitorObject, pInArgs->hSwapChain, pInArgs->RenderAdapterLuid, pInArgs->hNextSurfaceAvailable);
 	vddlog("d", "Swap chain assigned successfully.");
 	return STATUS_SUCCESS;
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverMonitorUnassignSwapChain(IDDCX_MONITOR MonitorObject)
+	NTSTATUS
+	VirtualDisplayDriverMonitorUnassignSwapChain(IDDCX_MONITOR MonitorObject)
 {
 	stringstream logStream;
 	logStream << "Unassigning swap chain for monitor object: " << MonitorObject;
 	vddlog("d", logStream.str().c_str());
-	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
 	pContext->pContext->UnassignSwapChain();
 	vddlog("d", "Swap chain unassigned successfully.");
 	return STATUS_SUCCESS;
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverEvtIddCxAdapterQueryTargetInfo(
-	IDDCX_ADAPTER AdapterObject,
-	IDARG_IN_QUERYTARGET_INFO* pInArgs,
-	IDARG_OUT_QUERYTARGET_INFO* pOutArgs
-)
+	NTSTATUS
+	VirtualDisplayDriverEvtIddCxAdapterQueryTargetInfo(
+		IDDCX_ADAPTER AdapterObject,
+		IDARG_IN_QUERYTARGET_INFO *pInArgs,
+		IDARG_OUT_QUERYTARGET_INFO *pOutArgs)
 {
 	stringstream logStream;
 	logStream << "Querying target info for adapter object: " << AdapterObject;
@@ -4028,68 +4466,77 @@ NTSTATUS VirtualDisplayDriverEvtIddCxAdapterQueryTargetInfo(
 
 	pOutArgs->TargetCaps = IDDCX_TARGET_CAPS_HIGH_COLOR_SPACE | IDDCX_TARGET_CAPS_WIDE_COLOR_SPACE;
 
-	if (ColourFormat == L"RGB") {
+	if (ColourFormat == L"RGB")
+	{
 		pOutArgs->DitheringSupport.Rgb = SDRCOLOUR | HDRCOLOUR;
 	}
-	else if (ColourFormat == L"YCbCr444") {
+	else if (ColourFormat == L"YCbCr444")
+	{
 		pOutArgs->DitheringSupport.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
 	}
-	else if (ColourFormat == L"YCbCr422") {
-		pOutArgs->DitheringSupport.YCbCr422 = SDRCOLOUR | HDRCOLOUR; 
+	else if (ColourFormat == L"YCbCr422")
+	{
+		pOutArgs->DitheringSupport.YCbCr422 = SDRCOLOUR | HDRCOLOUR;
 	}
-	else if (ColourFormat == L"YCbCr420") {
-		pOutArgs->DitheringSupport.YCbCr420 = SDRCOLOUR | HDRCOLOUR; 
+	else if (ColourFormat == L"YCbCr420")
+	{
+		pOutArgs->DitheringSupport.YCbCr420 = SDRCOLOUR | HDRCOLOUR;
 	}
-	else {
-		pOutArgs->DitheringSupport.Rgb = SDRCOLOUR | HDRCOLOUR;  // Default to RGB
+	else
+	{
+		pOutArgs->DitheringSupport.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
 	}
 
 	logStream.str("");
 	logStream << "Target capabilities set to: " << pOutArgs->TargetCaps
-		<< "\nDithering support colour format set to: " << WStringToString(ColourFormat);
+			  << "\nDithering support colour format set to: " << WStringToString(ColourFormat);
 	vddlog("d", logStream.str().c_str());
 
 	return STATUS_SUCCESS;
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverEvtIddCxMonitorSetDefaultHdrMetadata(
-	IDDCX_MONITOR MonitorObject,
-	const IDARG_IN_MONITOR_SET_DEFAULT_HDR_METADATA* pInArgs
-)
+	NTSTATUS
+	VirtualDisplayDriverEvtIddCxMonitorSetDefaultHdrMetadata(
+		IDDCX_MONITOR MonitorObject,
+		const IDARG_IN_MONITOR_SET_DEFAULT_HDR_METADATA *pInArgs)
 {
 	stringstream logStream;
 	logStream << "Setting default HDR metadata for monitor object: " << MonitorObject;
 	vddlog("d", logStream.str().c_str());
 
 	// Get the HDR luminance settings for this monitor
-	float maxNits = 1000.0f;  // Default max luminance
-	float minNits = 0.0001f;  // Default min luminance
-	
+	float maxNits = 1000.0f; // Default max luminance
+	float minNits = 0.0001f; // Default min luminance
+
 	{
 		lock_guard<mutex> lock(s_HdrSettingsMutex);
 		auto it = s_MonitorHdrSettingsMap.find(MonitorObject);
-		if (it != s_MonitorHdrSettingsMap.end()) {
+		if (it != s_MonitorHdrSettingsMap.end())
+		{
 			maxNits = it->second.maxNits;
 			minNits = it->second.minNits;
 			logStream.str("");
 			logStream << "Retrieved HDR settings - MaxNits: " << maxNits << ", MinNits: " << minNits;
 			vddlog("d", logStream.str().c_str());
-		} else {
+		}
+		else
+		{
 			vddlog("d", "Using default HDR luminance settings (monitor not found in settings map)");
 		}
 	}
 
 	// Log the incoming metadata type
-	if (pInArgs) {
+	if (pInArgs)
+	{
 		logStream.str("");
 		logStream << "HDR Metadata Type: " << static_cast<int>(pInArgs->Type);
 		vddlog("d", logStream.str().c_str());
-		
+
 		// Log current luminance settings being applied
 		logStream.str("");
-		logStream << "Applying HDR10 metadata - MaxMasteringLuminance: " << maxNits 
-		          << " nits, MinMasteringLuminance: " << (minNits * 10000.0f) << " (normalized)";
+		logStream << "Applying HDR10 metadata - MaxMasteringLuminance: " << maxNits
+				  << " nits, MinMasteringLuminance: " << (minNits * 10000.0f) << " (normalized)";
 		vddlog("d", logStream.str().c_str());
 	}
 
@@ -4099,10 +4546,10 @@ NTSTATUS VirtualDisplayDriverEvtIddCxMonitorSetDefaultHdrMetadata(
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverEvtIddCxParseMonitorDescription2(
-	const IDARG_IN_PARSEMONITORDESCRIPTION2* pInArgs,
-	IDARG_OUT_PARSEMONITORDESCRIPTION* pOutArgs
-)
+	NTSTATUS
+	VirtualDisplayDriverEvtIddCxParseMonitorDescription2(
+		const IDARG_IN_PARSEMONITORDESCRIPTION2 *pInArgs,
+		IDARG_OUT_PARSEMONITORDESCRIPTION *pOutArgs)
 {
 	// ==============================
 	// TODO: In a real driver, this function would be called to generate monitor modes for an EDID by parsing it. In
@@ -4111,24 +4558,25 @@ NTSTATUS VirtualDisplayDriverEvtIddCxParseMonitorDescription2(
 
 	stringstream logStream;
 	logStream << "Parsing monitor description:"
-		<< "\n  MonitorModeBufferInputCount: " << pInArgs->MonitorModeBufferInputCount
-		<< "\n  pMonitorModes: " << (pInArgs->pMonitorModes ? "Valid" : "Null");
+			  << "\n  MonitorModeBufferInputCount: " << pInArgs->MonitorModeBufferInputCount
+			  << "\n  pMonitorModes: " << (pInArgs->pMonitorModes ? "Valid" : "Null");
 	vddlog("d", logStream.str().c_str());
 
 	logStream.str("");
 	logStream << "Monitor Modes:";
-	for (const auto& mode : monitorModes)
+	for (const auto &mode : monitorModes)
 	{
 		logStream << "\n  Mode - Width: " << std::get<0>(mode)
-			<< ", Height: " << std::get<1>(mode)
-			<< ", RefreshRate: " << std::get<2>(mode);
+				  << ", Height: " << std::get<1>(mode)
+				  << ", RefreshRate: " << std::get<2>(mode);
 	}
 	vddlog("d", logStream.str().c_str());
 
 	// Clear previous monitor modes to prevent accumulation on reload
 	s_KnownMonitorModes2.clear();
 
-	for (int i = 0; i < monitorModes.size(); i++) {
+	for (int i = 0; i < monitorModes.size(); i++)
+	{
 		s_KnownMonitorModes2.push_back(dispinfo(std::get<0>(monitorModes[i]), std::get<1>(monitorModes[i]), std::get<2>(monitorModes[i]), std::get<3>(monitorModes[i])));
 	}
 	pOutArgs->MonitorModeBufferOutputCount = (UINT)monitorModes.size();
@@ -4149,30 +4597,31 @@ NTSTATUS VirtualDisplayDriverEvtIddCxParseMonitorDescription2(
 			pInArgs->pMonitorModes[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
 			pInArgs->pMonitorModes[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
 
-
-			if (ColourFormat == L"RGB") {
+			if (ColourFormat == L"RGB")
+			{
 				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;
-				
 			}
-			else if (ColourFormat == L"YCbCr444") {
+			else if (ColourFormat == L"YCbCr444")
+			{
 				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
 			}
-			else if (ColourFormat == L"YCbCr422") {
+			else if (ColourFormat == L"YCbCr422")
+			{
 				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.YCbCr422 = SDRCOLOUR | HDRCOLOUR;
 			}
-			else if (ColourFormat == L"YCbCr420") {
+			else if (ColourFormat == L"YCbCr420")
+			{
 				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.YCbCr420 = SDRCOLOUR | HDRCOLOUR;
 			}
-			else {
-				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;  // Default to RGB
+			else
+			{
+				pInArgs->pMonitorModes[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
 			}
 
-
-
 			logStream << "\n  ModeIndex: " << ModeIndex
-				<< "\n    Size: " << pInArgs->pMonitorModes[ModeIndex].Size
-				<< "\n    Origin: " << pInArgs->pMonitorModes[ModeIndex].Origin
-				<< "\n    Colour Format: " << WStringToString(ColourFormat);
+					  << "\n    Size: " << pInArgs->pMonitorModes[ModeIndex].Size
+					  << "\n    Origin: " << pInArgs->pMonitorModes[ModeIndex].Origin
+					  << "\n    Colour Format: " << WStringToString(ColourFormat);
 		}
 
 		vddlog("d", logStream.str().c_str());
@@ -4185,18 +4634,18 @@ NTSTATUS VirtualDisplayDriverEvtIddCxParseMonitorDescription2(
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverEvtIddCxMonitorQueryTargetModes2(
-	IDDCX_MONITOR MonitorObject,
-	const IDARG_IN_QUERYTARGETMODES2* pInArgs,
-	IDARG_OUT_QUERYTARGETMODES* pOutArgs
-)
+	NTSTATUS
+	VirtualDisplayDriverEvtIddCxMonitorQueryTargetModes2(
+		IDDCX_MONITOR MonitorObject,
+		const IDARG_IN_QUERYTARGETMODES2 *pInArgs,
+		IDARG_OUT_QUERYTARGETMODES *pOutArgs)
 {
-	//UNREFERENCED_PARAMETER(MonitorObject);
+	// UNREFERENCED_PARAMETER(MonitorObject);
 	stringstream logStream;
 
 	logStream << "Querying target modes:"
-		<< "\n  MonitorObject Handle: " << static_cast<void*>(MonitorObject) 
-		<< "\n  TargetModeBufferInputCount: " << pInArgs->TargetModeBufferInputCount;
+			  << "\n  MonitorObject Handle: " << static_cast<void *>(MonitorObject)
+			  << "\n  TargetModeBufferInputCount: " << pInArgs->TargetModeBufferInputCount;
 	vddlog("d", logStream.str().c_str());
 
 	vector<IDDCX_TARGET_MODE2> TargetModes(monitorModes.size());
@@ -4208,12 +4657,13 @@ NTSTATUS VirtualDisplayDriverEvtIddCxMonitorQueryTargetModes2(
 	logStream.str(""); // Clear the stream
 	logStream << "Creating target modes:";
 
-	for (int i = 0; i < monitorModes.size(); i++) {
+	for (int i = 0; i < monitorModes.size(); i++)
+	{
 		CreateTargetMode2(TargetModes[i], std::get<0>(monitorModes[i]), std::get<1>(monitorModes[i]), std::get<2>(monitorModes[i]), std::get<3>(monitorModes[i]));
 		logStream << "\n  TargetModeIndex: " << i
-			<< "\n    Width: " << std::get<0>(monitorModes[i])
-			<< "\n    Height: " << std::get<1>(monitorModes[i])
-			<< "\n    RefreshRate: " << std::get<2>(monitorModes[i]);
+				  << "\n    Width: " << std::get<0>(monitorModes[i])
+				  << "\n    Height: " << std::get<1>(monitorModes[i])
+				  << "\n    RefreshRate: " << std::get<2>(monitorModes[i]);
 	}
 	vddlog("d", logStream.str().c_str());
 
@@ -4232,8 +4682,8 @@ NTSTATUS VirtualDisplayDriverEvtIddCxMonitorQueryTargetModes2(
 		for (int i = 0; i < TargetModes.size(); i++)
 		{
 			logStream << "\n  TargetModeIndex: " << i
-				<< "\n    Size: " << TargetModes[i].Size
-				<< "\n    ColourFormat: " << WStringToString(ColourFormat);
+					  << "\n    Size: " << TargetModes[i].Size
+					  << "\n    ColourFormat: " << WStringToString(ColourFormat);
 		}
 		vddlog("d", logStream.str().c_str());
 	}
@@ -4246,10 +4696,10 @@ NTSTATUS VirtualDisplayDriverEvtIddCxMonitorQueryTargetModes2(
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverEvtIddCxAdapterCommitModes2(
-	IDDCX_ADAPTER AdapterObject,
-	const IDARG_IN_COMMITMODES2* pInArgs
-)
+	NTSTATUS
+	VirtualDisplayDriverEvtIddCxAdapterCommitModes2(
+		IDDCX_ADAPTER AdapterObject,
+		const IDARG_IN_COMMITMODES2 *pInArgs)
 {
 	UNREFERENCED_PARAMETER(AdapterObject);
 	UNREFERENCED_PARAMETER(pInArgs);
@@ -4258,10 +4708,10 @@ NTSTATUS VirtualDisplayDriverEvtIddCxAdapterCommitModes2(
 }
 
 _Use_decl_annotations_
-NTSTATUS VirtualDisplayDriverEvtIddCxMonitorSetGammaRamp(
-	IDDCX_MONITOR MonitorObject,
-	const IDARG_IN_SET_GAMMARAMP* pInArgs
-)
+	NTSTATUS
+	VirtualDisplayDriverEvtIddCxMonitorSetGammaRamp(
+		IDDCX_MONITOR MonitorObject,
+		const IDARG_IN_SET_GAMMARAMP *pInArgs)
 {
 	UNREFERENCED_PARAMETER(MonitorObject);
 	UNREFERENCED_PARAMETER(pInArgs);

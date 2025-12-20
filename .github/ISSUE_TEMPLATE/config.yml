@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Foundation Sunshine 相关问题
+    url: https://github.com/qiin2333/foundation-sunshine/issues
+    about: 如果您的问题与 Foundation Sunshine 相关，请前往 Foundation Sunshine 仓库提交 Issue
+  - name: 社区讨论
+    url: https://github.com/qiin2333/zako-vdd/discussions
+    about: 想要讨论功能、分享使用经验或提问？请使用 Discussions
+

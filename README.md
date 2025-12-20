@@ -1,4 +1,4 @@
-# Virtual Display Driver (HDR)
+# Zako VDD
 
 专为 [Foundation Sunshine](https://github.com/qiin2333/foundation-sunshine) 设计的 Windows 虚拟显示器驱动，提供完整的 HDR 支持和灵活的虚拟显示器管理功能。
 

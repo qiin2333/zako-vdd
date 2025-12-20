@@ -1,38 +1,76 @@
 name: Feature Request
-description: Request a new Feature.
+description: 请求新功能
 title: "[Feature]: "
-labels: ["remove", "customize", "companion", "enhancement", "newcode"]
+labels: ["enhancement", "newcode"]
 assignees: ["zjoasan", "bud3699", "itsmikethetech"]
 
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to fill out this feature request report!
+        感谢您花时间填写此功能请求！请详细描述您希望添加的功能。
+  
   - type: textarea
     id: frprob
     attributes:
-      label: Is the feature related to a "problem"?
-      description: Describe the problem, in detail.
-      placeholder: Tell us how to reproduce
-      value: "When start X I wish to.."
+      label: 功能需求背景
+      description: 这个功能是为了解决什么问题？或者您希望实现什么目标？
+      placeholder: |
+        请详细描述：
+        - 您遇到的问题或使用场景
+        - 为什么需要这个功能
+        - 这个功能将如何改善您的使用体验
+      value: "当使用虚拟显示器时，我希望..."
     validations:
       required: true
+  
   - type: textarea
     id: your-solution
     attributes:
-      label: Your suggestion
-      description: Describe what would solve your problem, as detailed as possible.
-      placeholder: Tell us how to progress!
-      value: "Disable a specific VD via hotkey"
+      label: 功能建议
+      description: 请详细描述您希望实现的功能，尽可能具体
+      placeholder: |
+        请描述：
+        - 功能的具体实现方式
+        - 用户如何与这个功能交互
+        - 任何相关的技术细节或约束
+      value: "例如：通过快捷键禁用特定的虚拟显示器"
     validations:
-      required: true 
+      required: true
+  
+  - type: dropdown
+    id: feature-category
+    attributes:
+      label: 功能类别
+      description: 这个功能属于哪个类别？
+      options:
+        - 虚拟显示器管理
+        - HDR 相关
+        - 性能优化
+        - 配置管理
+        - Foundation Sunshine 集成
+        - 社区脚本
+        - 其他
+      default: 0
+    validations:
+      required: false
+  
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案
+      description: 您是否考虑过其他解决方案？如果有，请说明为什么它们不够好。
+      placeholder: |
+        描述您考虑过的其他方案，以及它们的局限性
+    validations:
+      required: false
+  
   - type: input
     id: contact
     attributes:
-      label: Contact Details
-      description: How can we get in touch with you if we need more info?
-      placeholder: ex. email@example.com
+      label: 联系方式
+      description: 如果需要更多信息，我们如何联系您？
+      placeholder: 例如：email@example.com 或 GitHub 用户名
     validations:
       required: false
 

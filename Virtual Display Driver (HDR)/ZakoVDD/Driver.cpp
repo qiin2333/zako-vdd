@@ -60,6 +60,7 @@ extern "C" DRIVER_INITIALIZE DriverEntry;
 
 EVT_WDF_DRIVER_DEVICE_ADD VirtualDisplayDriverDeviceAdd;
 EVT_WDF_DEVICE_D0_ENTRY VirtualDisplayDriverDeviceD0Entry;
+EVT_WDF_DEVICE_D0_EXIT VirtualDisplayDriverDeviceD0Exit;
 
 EVT_IDD_CX_ADAPTER_INIT_FINISHED VirtualDisplayDriverAdapterInitFinished;
 EVT_IDD_CX_ADAPTER_COMMIT_MODES VirtualDisplayDriverAdapterCommitModes;
@@ -2144,7 +2145,7 @@ void loadSettings()
 		wstring gpuFriendlyName;
 		UINT monitorcount = 1;
 		set<tuple<int, int>> resolutions;
-		vector<int> globalRefreshRates;
+		vector<float> globalRefreshRates;
 
 		while (S_OK == (hr = pReader->Read(&nodeType)))
 		{
@@ -2211,7 +2212,7 @@ void loadSettings()
 				}
 				else if (currentElement == L"g_refresh_rate")
 				{
-					globalRefreshRates.push_back(stoi(wstring(pwszValue, cwchValue)));
+					globalRefreshRates.push_back(stof(wstring(pwszValue, cwchValue)));
 				}
 				break;
 			}
@@ -2234,7 +2235,7 @@ void loadSettings()
 		}
 		*/
 
-		for (int globalRate : globalRefreshRates)
+		for (float globalRate : globalRefreshRates)
 		{
 			for (const auto &resTuple : resolutions)
 			{
@@ -2242,7 +2243,7 @@ void loadSettings()
 				int global_height = get<1>(resTuple);
 
 				int vsync_num, vsync_den;
-				float_to_vsync(static_cast<float>(globalRate), vsync_num, vsync_den);
+				float_to_vsync(globalRate, vsync_num, vsync_den);
 				res.push_back(make_tuple(global_width, global_height, vsync_num, vsync_den));
 			}
 		}
@@ -2383,9 +2384,10 @@ _Use_decl_annotations_
 			  << "\n  DeviceInit Pointer: " << static_cast<void *>(pDeviceInit);
 	vddlog("d", logStream.str().c_str());
 
-	// Register for power callbacks - in this sample only power-on is needed
+	// Register for power callbacks - D0Entry for power-on, D0Exit for power-off (IDDCX 1.10 power management)
 	WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&PnpPowerCallbacks);
 	PnpPowerCallbacks.EvtDeviceD0Entry = VirtualDisplayDriverDeviceD0Entry;
+	PnpPowerCallbacks.EvtDeviceD0Exit = VirtualDisplayDriverDeviceD0Exit;
 	WdfDeviceInitSetPnpPowerEventCallbacks(pDeviceInit, &PnpPowerCallbacks);
 
 	IDD_CX_CLIENT_CONFIG IddConfig;
@@ -2559,8 +2561,6 @@ _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
 {
-	// UNREFERENCED_PARAMETER(PreviousState);
-
 	stringstream logStream;
 
 	// Log the entry into D0 state
@@ -2570,24 +2570,35 @@ _Use_decl_annotations_
 	vddlog("d", logStream.str().c_str());
 
 	// This function is called by WDF to start the device in the fully-on power state.
-
-	/*
-	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
-	pContext->pContext->InitAdapter();
-	*/
-	// Added error handling incase fails to get device context
+	// For IDDCX 1.10 power management: when recovering from low-power state (D3),
+	// we need to ensure the adapter is initialized so the system can re-assign SwapChain.
 
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	if (pContext && pContext->pContext)
 	{
-		logStream.str("");
-		logStream << "Initializing adapter...";
-		vddlog("d", logStream.str().c_str());
+		// Check if we're recovering from a low-power state
+		if (PreviousState == WdfPowerDeviceD3 || PreviousState == WdfPowerDeviceD3Final)
+		{
+			logStream.str("");
+			logStream << "Recovering from low-power state (D3), reinitializing adapter...";
+			vddlog("i", logStream.str().c_str());
+		}
+		else
+		{
+			logStream.str("");
+			logStream << "Initializing adapter...";
+			vddlog("d", logStream.str().c_str());
+		}
 
+		// Initialize adapter (safe to call multiple times)
 		pContext->pContext->InitAdapter();
+		
 		logStream.str("");
 		logStream << "InitAdapter called successfully.";
 		vddlog("d", logStream.str().c_str());
+
+		// Note: When recovering from D3, the system will automatically re-assign SwapChain
+		// through the EvtIddCxMonitorAssignSwapChain callback, so we don't need to do it here.
 	}
 	else
 	{
@@ -2595,6 +2606,80 @@ _Use_decl_annotations_
 		logStream << "Failed to get device context.";
 		vddlog("e", logStream.str().c_str());
 		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	return STATUS_SUCCESS;
+}
+
+_Use_decl_annotations_
+	NTSTATUS
+	VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
+{
+	stringstream logStream;
+
+	// Log the exit from D0 state
+	logStream << "Exiting D0 power state:"
+			  << "\n  Device Handle: " << static_cast<void *>(Device)
+			  << "\n  Target State: " << TargetState;
+	vddlog("d", logStream.str().c_str());
+
+	// This function is called by WDF when the device is transitioning to a low-power state (D3).
+	// For IDDCX 1.10 power management, we should pause SwapChain processing to save resources.
+
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+	if (pContext && pContext->pContext)
+	{
+		logStream.str("");
+		logStream << "Preparing device for low-power state...";
+		vddlog("d", logStream.str().c_str());
+
+		// Stop SwapChain processing to save GPU/CPU resources during low-power state
+		if (pContext->pContext->HasActiveSwapChain())
+		{
+			logStream.str("");
+			logStream << "Pausing SwapChain processing for power management";
+			vddlog("i", logStream.str().c_str());
+
+			try
+			{
+				// Unassign swap chain to stop processing
+				pContext->pContext->UnassignSwapChain();
+				
+				// Give time for cleanup to complete
+				Sleep(50);
+				
+				logStream.str("");
+				logStream << "SwapChain processing paused successfully for power management";
+				vddlog("d", logStream.str().c_str());
+			}
+			catch (const std::exception &e)
+			{
+				stringstream errorStream;
+				errorStream << "Exception while pausing SwapChain for power management: " << e.what();
+				vddlog("e", errorStream.str().c_str());
+			}
+			catch (...)
+			{
+				vddlog("e", "Unknown exception while pausing SwapChain for power management");
+			}
+		}
+		else
+		{
+			logStream.str("");
+			logStream << "No active SwapChain to pause";
+			vddlog("d", logStream.str().c_str());
+		}
+
+		logStream.str("");
+		logStream << "Device prepared for low-power state";
+		vddlog("d", logStream.str().c_str());
+	}
+	else
+	{
+		logStream.str("");
+		logStream << "Failed to get device context during D0Exit";
+		vddlog("w", logStream.str().c_str());
+		// Don't return error - allow power transition to continue
 	}
 
 	return STATUS_SUCCESS;

@@ -16,6 +16,7 @@
 #include <vector>
 #include <tuple>
 #include <string>
+#include <map>
 
 #include "Trace.h"
 
@@ -94,12 +95,15 @@ namespace Microsoft
             void CreateMonitor(unsigned int index, const GUID* pClientGuid = nullptr, float maxNits = 1000.0f, float minNits = 0.0001f, float maxFALL = 0.0f, float widthCm = 0.0f, float heightCm = 0.0f);
             void DestroyMonitor(unsigned int index);
 
-            void AssignSwapChain(IDDCX_MONITOR &Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
-            void UnassignSwapChain();
+            void AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
+            void UnassignSwapChain(IDDCX_MONITOR Monitor);
 
             // Helper methods for driver reload
-            bool HasActiveSwapChain() const { return m_ProcessingThread != nullptr; }
-            bool HasActiveMonitor() const { return m_Monitor != nullptr; }
+            bool HasActiveSwapChain() const { return !m_ProcessingThreads.empty(); }
+            bool HasActiveMonitor() const { return !m_Monitors.empty(); }
+            bool HasMonitor(unsigned int index) const { return m_Monitors.count(index) > 0; }
+            void UnassignAllSwapChains();
+            void DestroyAllMonitors();
 
         private:
             bool WaitForSystemStabilization(int timeoutMs, const char *operation);
@@ -108,11 +112,10 @@ namespace Microsoft
         protected:
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
-            IDDCX_MONITOR m_Monitor;
-            IDDCX_MONITOR m_Monitor2;
+            std::map<unsigned int, IDDCX_MONITOR> m_Monitors;
 
-            std::unique_ptr<SwapChainProcessor> m_ProcessingThread;
-            HANDLE m_hMouseEvent; // Hardware cursor event handle
+            std::map<IDDCX_MONITOR, std::unique_ptr<SwapChainProcessor>> m_ProcessingThreads;
+            std::map<IDDCX_MONITOR, HANDLE> m_MouseEvents;
 
         public:
             static const DISPLAYCONFIG_VIDEO_SIGNAL_INFO s_KnownMonitorModes[];

@@ -26,8 +26,20 @@ jobs:
       - name: Install WDK
         shell: pwsh
         run: |
-          choco install windowsdriverkit11 -y
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # Check if WDK is already installed
+          $wdfHeader = Get-ChildItem "C:\Program Files*\Windows Kits\10\Include\*\wdf" -Directory -ErrorAction SilentlyContinue |
+                       Sort-Object { $_.Parent.Name } -Descending |
+                       Select-Object -First 1
+          if ($wdfHeader) {
+            Write-Host "WDK already installed at: $($wdfHeader.FullName)"
+          } else {
+            Write-Host "Installing WDK..."
+            $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2272234"
+            $wdkInstaller = "$env:TEMP\wdksetup.exe"
+            Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
+            $proc = Start-Process -FilePath $wdkInstaller -ArgumentList "/quiet", "/norestart", "/features", "+" -Wait -NoNewWindow -PassThru
+            Write-Host "WDK installer exit code: $($proc.ExitCode)"
+          }
 
           # Install WDK VSIX for MSBuild integration
           $vsixFiles = Get-ChildItem "C:\Program Files*\Windows Kits\10\Vsix\*\WDK.vsix" -Recurse -ErrorAction SilentlyContinue

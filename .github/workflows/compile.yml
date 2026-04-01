@@ -110,13 +110,15 @@ jobs:
             exit 0
           }
 
-          # Import PFX certificate
+          # Import PFX certificate and get its thumbprint
           $pfxBytes = [Convert]::FromBase64String($env:SIGNING_CERT_PFX)
           $pfxPath = Join-Path $env:TEMP "signcert.pfx"
           [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
 
           $securePass = ConvertTo-SecureString $env:SIGNING_CERT_PASSWORD -AsPlainText -Force
-          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePass | Out-Null
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePass
+          $thumbprint = $cert.Thumbprint
+          Write-Host "Imported certificate thumbprint: $thumbprint"
           Remove-Item $pfxPath -Force
 
           # Locate signtool from WDK
@@ -141,13 +143,16 @@ jobs:
             Write-Host "inf2cat exit code: $LASTEXITCODE"
           }
 
-          # Sign the catalog file
+          # Sign the catalog file with our specific certificate
           $catFile = Join-Path $buildDir "zakovdd.cat"
           if (Test-Path $catFile) {
             Write-Host "Signing catalog file..."
-            & $signtool.FullName sign /a /fd SHA256 /v $catFile
-            Write-Host "Catalog sign exit code: $LASTEXITCODE"
-            & $signtool.FullName verify /pa /v $catFile
+            & $signtool.FullName sign /sha1 $thumbprint /fd SHA256 /v $catFile
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to sign catalog file"
+              exit 1
+            }
+            Write-Host "Catalog signed successfully"
           }
 
       - name: Upload built driver

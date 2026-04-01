@@ -58,6 +58,41 @@ jobs:
         run: |
           msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
 
+      - name: Stamp driver version
+        shell: pwsh
+        run: |
+          # Resolve stampinf path from WDK
+          $stampinf = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\stampinf.exe" -ErrorAction SilentlyContinue |
+                      Sort-Object { $_.Directory.Parent.Name } -Descending |
+                      Select-Object -First 1
+          if (-not $stampinf) {
+            Write-Error "stampinf.exe not found"
+            exit 1
+          }
+          Write-Host "Using stampinf: $($stampinf.FullName)"
+
+          $infPath = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf"
+
+          # Extract version from tag (e.g. v0.13 -> 0.13.0.0) or use date-based version
+          $ref = "${{ github.ref }}"
+          if ($ref -match '^refs/tags/v(.+)$') {
+            $ver = $Matches[1]
+            # Pad to 4 parts: 0.13 -> 0.13.0.0
+            $parts = $ver.Split('.')
+            while ($parts.Count -lt 4) { $parts += '0' }
+            $version = ($parts[0..3] -join '.')
+          } else {
+            # Non-tag build: use 99.MM.DD.HHMM to ensure high version
+            $now = Get-Date -Format "MM.dd.HHmm"
+            $version = "99.$now"
+          }
+
+          $date = Get-Date -Format "MM/dd/yyyy"
+          Write-Host "Setting DriverVer = $date, $version"
+
+          & $stampinf.FullName -f $infPath -d $date -v $version
+          Get-Content $infPath | Select-String "DriverVer"
+
       - name: List build directory
         continue-on-error: true
         run: dir "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
@@ -90,7 +125,7 @@ jobs:
       - name: Package release zip
         run: |
           cd driver-x64
-          zip -j ../zakovdd.zip ZakoVDD.dll ZakoVDD.inf zakovdd.cat
+          zip -j ../zakovdd.zip ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml
           cd ..
           ls -la zakovdd.zip
 

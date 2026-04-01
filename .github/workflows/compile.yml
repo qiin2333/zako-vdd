@@ -73,12 +73,14 @@ jobs:
 
           $infPath = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf"
 
-          # Extract version from tag (e.g. v0.13 -> 0.13.0.0) or use date-based version
+          # Extract version from tag (e.g. v0.13 -> 100.13.0.0) or use date-based version
           $ref = "${{ github.ref }}"
           if ($ref -match '^refs/tags/v(.+)$') {
             $ver = $Matches[1]
-            # Pad to 4 parts: 0.13 -> 0.13.0.0
+            # Prefix with 100 to ensure CI builds always outrank local builds
+            # v0.13 -> 100.0.13.0, v1.2.3 -> 100.1.2.3
             $parts = $ver.Split('.')
+            $parts = @('100') + $parts
             while ($parts.Count -lt 4) { $parts += '0' }
             $version = ($parts[0..3] -join '.')
           } else {

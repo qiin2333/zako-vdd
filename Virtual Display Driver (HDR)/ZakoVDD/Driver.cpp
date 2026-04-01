@@ -922,11 +922,23 @@ bool UpdateXmlToggleSetting(bool toggle, const wchar_t *variable)
 		case XmlNodeType_Element:
 			pReader->GetLocalName(&pwszLocalName, nullptr);
 			pWriter->WriteStartElement(nullptr, pwszLocalName, nullptr);
+			// Check if this element matches the target variable
+			if (wcscmp(pwszLocalName, variable) == 0)
+			{
+				variableElementFound = true;
+			}
+			else
+			{
+				// A different child element appeared before Text, so the
+				// previous match was a container element, not the target leaf
+				variableElementFound = false;
+			}
 			break;
 
 		case XmlNodeType_EndElement:
 			pReader->GetLocalName(&pwszLocalName, nullptr);
 			pWriter->WriteEndElement();
+			variableElementFound = false; // EndElement without Text means container
 			break;
 
 		case XmlNodeType_Text:
@@ -951,15 +963,6 @@ bool UpdateXmlToggleSetting(bool toggle, const wchar_t *variable)
 			pReader->GetValue(&pwszValue, nullptr);
 			pWriter->WriteComment(pwszValue);
 			break;
-		}
-
-		if (nodeType == XmlNodeType_Element)
-		{
-			pReader->GetLocalName(&pwszLocalName, nullptr);
-			if (wcscmp(pwszLocalName, variable) == 0)
-			{
-				variableElementFound = true;
-			}
 		}
 	}
 

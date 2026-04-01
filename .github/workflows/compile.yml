@@ -99,6 +99,57 @@ jobs:
         continue-on-error: true
         run: dir "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
 
+      - name: Sign driver with certificate
+        shell: pwsh
+        env:
+          SIGNING_CERT_PFX: ${{ secrets.SIGNING_CERT_PFX }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          if (-not $env:SIGNING_CERT_PFX) {
+            Write-Host "::warning::No signing certificate configured, skipping signing"
+            exit 0
+          }
+
+          # Import PFX certificate
+          $pfxBytes = [Convert]::FromBase64String($env:SIGNING_CERT_PFX)
+          $pfxPath = Join-Path $env:TEMP "signcert.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+
+          $securePass = ConvertTo-SecureString $env:SIGNING_CERT_PASSWORD -AsPlainText -Force
+          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePass | Out-Null
+          Remove-Item $pfxPath -Force
+
+          # Locate signtool from WDK
+          $signtool = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+                      Sort-Object { $_.Directory.Parent.Name } -Descending |
+                      Select-Object -First 1
+          if (-not $signtool) {
+            Write-Error "signtool.exe not found"
+            exit 1
+          }
+          Write-Host "Using signtool: $($signtool.FullName)"
+
+          $buildDir = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
+          $inf2cat = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\inf2cat.exe" -ErrorAction SilentlyContinue |
+                     Sort-Object { $_.Directory.Parent.Name } -Descending |
+                     Select-Object -First 1
+
+          # Recreate catalog file with inf2cat
+          if ($inf2cat) {
+            Write-Host "Recreating catalog with inf2cat..."
+            & $inf2cat.FullName /driver:"$buildDir" /os:10_X64 /verbose
+            Write-Host "inf2cat exit code: $LASTEXITCODE"
+          }
+
+          # Sign the catalog file
+          $catFile = Join-Path $buildDir "zakovdd.cat"
+          if (Test-Path $catFile) {
+            Write-Host "Signing catalog file..."
+            & $signtool.FullName sign /a /fd SHA256 /v $catFile
+            Write-Host "Catalog sign exit code: $LASTEXITCODE"
+            & $signtool.FullName verify /pa /v $catFile
+          }
+
       - name: Upload built driver
         id: upload_artifact
         uses: actions/upload-artifact@v4

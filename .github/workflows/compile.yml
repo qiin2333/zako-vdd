@@ -132,15 +132,24 @@ jobs:
           Write-Host "Using signtool: $($signtool.FullName)"
 
           $buildDir = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
-          $inf2cat = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\inf2cat.exe" -ErrorAction SilentlyContinue |
+          
+          # Search for inf2cat in both x64 and x86 (MSBuild uses x86)
+          $inf2cat = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\inf2cat.exe","C:\Program Files*\Windows Kits\10\bin\*\x86\inf2cat.exe" -ErrorAction SilentlyContinue |
                      Sort-Object { $_.Directory.Parent.Name } -Descending |
                      Select-Object -First 1
 
-          # Recreate catalog file with inf2cat
+          # Recreate catalog file after stampinf modified the INF
           if ($inf2cat) {
-            Write-Host "Recreating catalog with inf2cat..."
+            Write-Host "Recreating catalog with inf2cat: $($inf2cat.FullName)"
             & $inf2cat.FullName /driver:"$buildDir" /os:10_X64 /verbose
-            Write-Host "inf2cat exit code: $LASTEXITCODE"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "inf2cat failed with exit code $LASTEXITCODE"
+              exit 1
+            }
+            Write-Host "Catalog regenerated successfully"
+          } else {
+            Write-Error "inf2cat.exe not found"
+            exit 1
           }
 
           # Sign the catalog file with our specific certificate

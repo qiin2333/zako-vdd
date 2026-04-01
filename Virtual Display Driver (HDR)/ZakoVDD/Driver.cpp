@@ -39,6 +39,7 @@ Environment:
 #include <cwchar>
 #include <map>
 #include <set>
+#include <atomic>
 
 #define PIPE_NAME L"\\\\.\\pipe\\ZakoVDDPipe"
 
@@ -47,7 +48,7 @@ Environment:
 #pragma comment(lib, "shell32.lib")
 
 HANDLE hPipeThread = NULL;
-bool g_Running = true;
+std::atomic<bool> g_Running{true};
 mutex g_Mutex;
 mutex g_DataMutex; // Protects monitorModes, s_KnownMonitorModes2, numVirtualDisplays, gpuname
 HANDLE g_pipeHandle = INVALID_HANDLE_VALUE;
@@ -101,8 +102,8 @@ wstring confpath = []()
 	}
 	return wstring(sysDrive) + L"\\VirtualDisplayDriver";
 }();
-bool logsEnabled = false;
-bool debugLogs = false;
+std::atomic<bool> logsEnabled{false};
+std::atomic<bool> debugLogs{false};
 
 // Cached log file handle for performance optimization
 static FILE *s_cachedLogFile = nullptr;
@@ -130,16 +131,16 @@ static wstring GetFallbackLogDir()
 	// Last resort: use C:\Windows\Temp
 	return wstring(L"C:\\Windows\\Temp\\VirtualDisplayDriver\\Logs");
 }
-bool HDRPlus = false;
-bool SDR10 = false;
-bool customEdid = false;
-bool hardwareCursor = false;
-bool preventManufacturerSpoof = false;
-bool edidCeaOverride = false;
-bool sendLogsThroughPipe = true;
+std::atomic<bool> HDRPlus{false};
+std::atomic<bool> SDR10{false};
+std::atomic<bool> customEdid{false};
+std::atomic<bool> hardwareCursor{false};
+std::atomic<bool> preventManufacturerSpoof{false};
+std::atomic<bool> edidCeaOverride{false};
+std::atomic<bool> sendLogsThroughPipe{true};
 
 // Mouse settings
-bool alphaCursorSupport = true;
+std::atomic<bool> alphaCursorSupport{true};
 int CursorMaxX = 128;
 int CursorMaxY = 128;
 IDDCX_XOR_CURSOR_SUPPORT XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
@@ -389,7 +390,7 @@ int GetIntegerSetting(const std::wstring &settingKey)
 	HKEY hKey;
 	DWORD dwValue;
 	DWORD dwBufferSize = sizeof(dwValue);
-	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver", 0, KEY_READ, &hKey);
+	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ZakoTech\\ZakoDisplayAdapter", 0, KEY_READ, &hKey);
 
 	if (lResult == ERROR_SUCCESS)
 	{
@@ -497,7 +498,7 @@ std::wstring GetStringSetting(const std::wstring &settingKey)
 	DWORD dwBufferSize = MAX_PATH;
 	wchar_t buffer[MAX_PATH];
 
-	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver", 0, KEY_READ, &hKey);
+	LONG lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ZakoTech\\ZakoDisplayAdapter", 0, KEY_READ, &hKey);
 	if (lResult == ERROR_SUCCESS)
 	{
 		lResult = RegQueryValueExW(hKey, regName.c_str(), NULL, NULL, (LPBYTE)buffer, &dwBufferSize);
@@ -851,8 +852,12 @@ extern "C" BOOL WINAPI DllMain(
 	return TRUE;
 }
 
+static mutex s_xmlWriteMutex;
+
 bool UpdateXmlToggleSetting(bool toggle, const wchar_t *variable)
 {
+	std::lock_guard<std::mutex> xmlLock(s_xmlWriteMutex);
+
 	const wstring settingsname = confpath + L"\\vdd_settings.xml";
 	CComPtr<IStream> pFileStream;
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READWRITE, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
@@ -3429,7 +3434,14 @@ vector<BYTE> loadEdid(const string &filePath)
 	streamsize size = file.tellg();
 	file.seekg(0, ios::beg);
 
-	vector<BYTE> buffer(size);
+	if (size <= 0 || size > 1024 * 1024)
+	{
+		vddlog("e", "Custom edid file size invalid (must be >0 and <=1MB)");
+		vddlog("i", "Using hardcoded edid");
+		return hardcodedEdid;
+	}
+
+	vector<BYTE> buffer(static_cast<size_t>(size));
 	if (file.read((char *)buffer.data(), size))
 	{
 		// calculate checksum and compare it to 127 byte, if false then return hardcoded if true then return buffer to prevent loading borked edid.
@@ -3813,6 +3825,8 @@ void IndirectDeviceContext::FinishInit()
 
 void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm)
 {
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
 	wstring logMessage = L"Creating Monitor: " + to_wstring(index + 1);
 	string narrowLogMessage = WStringToString(logMessage);
 	vddlog("i", narrowLogMessage.c_str());
@@ -3844,7 +3858,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	vector<BYTE> *pMonitorEdid = nullptr;
 	if (pClientGuid != nullptr)
 	{
-		lock_guard<mutex> lock(s_EdidMapMutex);
+		lock_guard<mutex> edidLock(s_EdidMapMutex);
 		auto it = s_ClientGuidEdidMap.find(*pClientGuid);
 		if (it != s_ClientGuidEdidMap.end())
 		{
@@ -3911,6 +3925,16 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		s_KnownMonitorEdid[127] = checksum;
 
 		pMonitorEdid = &s_KnownMonitorEdid;
+	}
+
+	// Track GUID for cleanup in DestroyMonitor
+	if (pClientGuid != nullptr)
+	{
+		m_MonitorGuids[index] = *pClientGuid;
+	}
+	else
+	{
+		m_MonitorGuids.erase(index);
 	}
 
 	IDDCX_MONITOR_INFO MonitorInfo = {};
@@ -3980,7 +4004,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 
 		// Store HDR luminance settings for this monitor
 		{
-			lock_guard<mutex> lock(s_HdrSettingsMutex);
+			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
 			MonitorHdrSettings hdrSettings;
 			hdrSettings.maxNits = maxNits;
 			hdrSettings.minNits = minNits;
@@ -4019,6 +4043,8 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 
 void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 {
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
 	auto monIt = m_Monitors.find(index);
 	if (monIt == m_Monitors.end() || monIt->second == nullptr)
 	{
@@ -4038,12 +4064,24 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 	{
 		// Clean up HDR settings for this monitor
 		{
-			lock_guard<mutex> lock(s_HdrSettingsMutex);
+			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
 			auto it = s_MonitorHdrSettingsMap.find(hMonitor);
 			if (it != s_MonitorHdrSettingsMap.end())
 			{
 				s_MonitorHdrSettingsMap.erase(it);
 				vddlog("d", "Cleaned up HDR settings for monitor");
+			}
+		}
+
+		// Clean up EDID cache for this monitor's client GUID
+		{
+			auto guidIt = m_MonitorGuids.find(index);
+			if (guidIt != m_MonitorGuids.end())
+			{
+				lock_guard<mutex> edidLock(s_EdidMapMutex);
+				s_ClientGuidEdidMap.erase(guidIt->second);
+				m_MonitorGuids.erase(guidIt);
+				vddlog("d", "Cleaned up EDID cache for monitor client GUID");
 			}
 		}
 
@@ -4144,6 +4182,8 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 
 void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent)
 {
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
 	// Stop any existing swap chain processing for this monitor
 	{
 		auto scIt = m_ProcessingThreads.find(Monitor);
@@ -4232,6 +4272,8 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 
 void IndirectDeviceContext::UnassignSwapChain(IDDCX_MONITOR Monitor)
 {
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
 	vddlog("i", "Unassigning Swapchain. Processing will be stopped.");
 
 	auto scIt = m_ProcessingThreads.find(Monitor);
@@ -4267,6 +4309,8 @@ void IndirectDeviceContext::UnassignSwapChain(IDDCX_MONITOR Monitor)
 
 void IndirectDeviceContext::UnassignAllSwapChains()
 {
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
 	vddlog("i", "Unassigning all SwapChains.");
 	for (auto it = m_ProcessingThreads.begin(); it != m_ProcessingThreads.end();)
 	{
@@ -4286,6 +4330,8 @@ void IndirectDeviceContext::UnassignAllSwapChains()
 
 void IndirectDeviceContext::DestroyAllMonitors()
 {
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
 	vddlog("i", "Destroying all monitors.");
 	// Get a copy of the keys to iterate safely
 	vector<unsigned int> indices;

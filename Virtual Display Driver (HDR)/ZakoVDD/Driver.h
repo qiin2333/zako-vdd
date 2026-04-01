@@ -17,6 +17,7 @@
 #include <tuple>
 #include <string>
 #include <map>
+#include <mutex>
 
 #include "Trace.h"
 
@@ -99,9 +100,9 @@ namespace Microsoft
             void UnassignSwapChain(IDDCX_MONITOR Monitor);
 
             // Helper methods for driver reload
-            bool HasActiveSwapChain() const { return !m_ProcessingThreads.empty(); }
-            bool HasActiveMonitor() const { return !m_Monitors.empty(); }
-            bool HasMonitor(unsigned int index) const { return m_Monitors.count(index) > 0; }
+            bool HasActiveSwapChain() const { std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex); return !m_ProcessingThreads.empty(); }
+            bool HasActiveMonitor() const { std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex); return !m_Monitors.empty(); }
+            bool HasMonitor(unsigned int index) const { std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex); return m_Monitors.count(index) > 0; }
             void UnassignAllSwapChains();
             void DestroyAllMonitors();
 
@@ -112,7 +113,9 @@ namespace Microsoft
         protected:
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
+            mutable std::recursive_mutex m_monitorsMutex; // Protects m_Monitors, m_ProcessingThreads, m_MouseEvents
             std::map<unsigned int, IDDCX_MONITOR> m_Monitors;
+            std::map<unsigned int, GUID> m_MonitorGuids; // Maps index to client GUID for EDID cleanup
 
             std::map<IDDCX_MONITOR, std::unique_ptr<SwapChainProcessor>> m_ProcessingThreads;
             std::map<IDDCX_MONITOR, HANDLE> m_MouseEvents;

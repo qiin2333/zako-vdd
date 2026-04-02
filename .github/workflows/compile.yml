@@ -164,6 +164,11 @@ jobs:
             Write-Host "Catalog signed successfully"
           }
 
+          # Export the signing certificate as .cer (overrides the self-signed test cert from MSBuild)
+          $cerPath = Join-Path $buildDir "ZakoVDD.cer"
+          Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT | Out-Null
+          Write-Host "Exported signing certificate to $cerPath"
+
       - name: Upload built driver
         id: upload_artifact
         uses: actions/upload-artifact@v4
@@ -174,6 +179,7 @@ jobs:
             Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf
             Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\zakovdd.cat
             Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\vdd_settings.xml
+            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.cer
 
   release:
     name: Create Release
@@ -192,7 +198,7 @@ jobs:
       - name: Package release zip
         run: |
           cd driver-x64
-          zip -j ../zakovdd.zip ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml
+          zip -j ../zakovdd.zip ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml ZakoVDD.cer
           cd ..
           ls -la zakovdd.zip
 

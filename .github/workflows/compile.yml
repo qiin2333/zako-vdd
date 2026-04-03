@@ -209,6 +209,7 @@ jobs:
           generate_release_notes: true
 
       - name: Notify Sunshine to update VDD version
+        continue-on-error: true
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.SUNSHINE_DISPATCH_TOKEN }}

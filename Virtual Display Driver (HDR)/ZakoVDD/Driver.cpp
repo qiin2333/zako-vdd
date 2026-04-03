@@ -3073,6 +3073,24 @@ void SwapChainProcessor::RunCore()
 		return;
 	}
 
+	// Raise GPU priority to realtime for this device to avoid starvation under heavy GPU load (IddCx 1.9+)
+	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSetRealtimeGPUPriority))
+	{
+		IDARG_IN_SETREALTIMEGPUPRIORITY PriorityArgs = {};
+		PriorityArgs.pDevice = DxgiDevice.Get();
+		hr = IddCxSetRealtimeGPUPriority(m_hSwapChain, &PriorityArgs);
+		if (FAILED(hr))
+		{
+			logStream.str("");
+			logStream << "IddCxSetRealtimeGPUPriority failed (non-fatal). HRESULT: 0x" << hex << hr;
+			vddlog("w", logStream.str().c_str());
+		}
+		else
+		{
+			vddlog("d", "GPU priority raised to realtime for swap chain processing");
+		}
+	}
+
 	// Cache function availability check outside the loop for better performance
 	const bool useBuffer2 = IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2);
 

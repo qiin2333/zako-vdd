@@ -3727,7 +3727,7 @@ void IndirectDeviceContext::InitAdapter()
 	logStream.str("");
 
 	IDDCX_ADAPTER_CAPS AdapterCaps = {};
-	AdapterCaps.Size = sizeof(AdapterCaps);
+	IDDCX_ADAPTER_CAPS_INIT(&AdapterCaps);
 
 	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2))
 	{
@@ -3746,7 +3746,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare basic feature support for the adapter (required)
 	AdapterCaps.MaxMonitorsSupported = numVirtualDisplays;
-	AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
+	IDDCX_ENDPOINT_DIAGNOSTIC_INFO_INIT(&AdapterCaps.EndPointDiagnostics);
 	AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
 	AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
@@ -3757,7 +3757,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare your hardware and firmware versions (required)
 	IDDCX_ENDPOINT_VERSION Version = {};
-	Version.Size = sizeof(Version);
+	IDDCX_ENDPOINT_VERSION_INIT(&Version);
 	Version.MajorVer = 1;
 	AdapterCaps.EndPointDiagnostics.pFirmwareVersion = &Version;
 	AdapterCaps.EndPointDiagnostics.pHardwareVersion = &Version;
@@ -3959,7 +3959,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	}
 
 	IDDCX_MONITOR_INFO MonitorInfo = {};
-	MonitorInfo.Size = sizeof(MonitorInfo);
+	IDDCX_MONITOR_INFO_INIT(&MonitorInfo);
 	MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
 	MonitorInfo.ConnectorIndex = index;
 	MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
@@ -4259,7 +4259,7 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 			m_MouseEvents[Monitor] = hMouseEvent;
 
 			IDDCX_CURSOR_CAPS cursorInfo = {};
-			cursorInfo.Size = sizeof(cursorInfo);
+			IDDCX_CURSOR_CAPS_INIT(&cursorInfo);
 			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
 
@@ -4461,7 +4461,7 @@ _Use_decl_annotations_
 		// Copy the known modes to the output buffer
 		for (DWORD ModeIndex = 0; ModeIndex < localModes.size(); ModeIndex++)
 		{
-			pInArgs->pMonitorModes[ModeIndex].Size = sizeof(IDDCX_MONITOR_MODE);
+			IDDCX_MONITOR_MODE_INIT(&pInArgs->pMonitorModes[ModeIndex]);
 			pInArgs->pMonitorModes[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
 			pInArgs->pMonitorModes[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
 		}
@@ -4529,7 +4529,7 @@ void CreateTargetMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO &Mode, UINT Width, UINT He
 
 void CreateTargetMode(IDDCX_TARGET_MODE &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
-	Mode.Size = sizeof(Mode);
+	IDDCX_TARGET_MODE_INIT(&Mode);
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
 

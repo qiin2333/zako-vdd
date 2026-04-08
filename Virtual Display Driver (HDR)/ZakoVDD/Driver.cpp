@@ -1581,29 +1581,43 @@ void HandleClient(HANDLE hPipe)
 			vddlog("p", "Heartbeat Ping");
 		};
 
-		auto handleCreateMonitor = [](HANDLE, wchar_t *param)
+		auto handleCreateMonitor = [](HANDLE hPipe, wchar_t *param)
 		{
+			auto writePipeResponse = [&](const char *resp)
+			{
+				if (hPipe != INVALID_HANDLE_VALUE)
+				{
+					DWORD bytesWritten;
+					WriteFile(hPipe, resp, static_cast<DWORD>(strlen(resp)), &bytesWritten, NULL);
+				}
+			};
+
 			if (g_GlobalDevice == nullptr)
 			{
 				vddlog("e", "Global device not initialized");
+				writePipeResponse("FAIL");
 				return;
 			}
 
-			lock_guard<mutex> lock(g_Mutex);
-			auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
-			if (!pContext || !pContext->pContext)
+			bool has_monitors = false;
 			{
-				vddlog("e", "Failed to get device context for monitor creation");
-				return;
-			}
+				lock_guard<mutex> lock(g_Mutex);
+				auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+				if (!pContext || !pContext->pContext)
+				{
+					vddlog("e", "Failed to get device context for monitor creation");
+					writePipeResponse("FAIL");
+					return;
+				}
 
-			if (numVirtualDisplays == 0)
-			{
-				vddlog("e", "Invalid display count: 0");
-				return;
-			}
+				if (numVirtualDisplays == 0)
+				{
+					vddlog("e", "Invalid display count: 0");
+					writePipeResponse("FAIL");
+					return;
+				}
 
-			vddlog("i", "Starting monitor creation");
+				vddlog("i", "Starting monitor creation");
 
 			// Parse GUID and HDR luminance settings from parameter
 			// Format: "{GUID}:[maxNits,minNits,maxFALL][widthCm,heightCm]" or multiple space-separated entries
@@ -1743,6 +1757,82 @@ void HandleClient(HANDLE hPipe)
 					heightCm = mp.heightCm;
 				}
 				pContext->pContext->CreateMonitor(i, pGuid, maxNits, minNits, maxFALL, widthCm, heightCm);
+			}
+
+			// Check if any monitors were actually created before waiting for CCD
+			has_monitors = pContext->pContext->HasActiveMonitor();
+			} // release g_Mutex before CCD wait
+
+			if (!has_monitors)
+			{
+				vddlog("e", "No monitors were created, skipping CCD wait");
+				writePipeResponse("FAIL");
+				return;
+			}
+
+			// Wait for CCD system to recognize the new monitor before responding
+			// This prevents Sunshine from having to poll/retry after creation
+			constexpr int CCD_WAIT_MAX_MS = 15000;
+			constexpr int CCD_WAIT_INTERVAL_MS = 200;
+			bool ccd_ready = false;
+
+			vddlog("i", "Waiting for CCD system to recognize new monitor...");
+
+			for (int elapsed = 0; elapsed < CCD_WAIT_MAX_MS; elapsed += CCD_WAIT_INTERVAL_MS)
+			{
+				UINT32 pathCount = 0, modeCount = 0;
+				LONG result = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount);
+
+				if (result == ERROR_SUCCESS && pathCount > 0)
+				{
+					std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+					std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+					result = QueryDisplayConfig(
+						QDC_ONLY_ACTIVE_PATHS,
+						&pathCount, paths.data(),
+						&modeCount, modes.data(), nullptr);
+
+					if (result == ERROR_SUCCESS)
+					{
+						for (UINT32 j = 0; j < pathCount; j++)
+						{
+							DISPLAYCONFIG_TARGET_DEVICE_NAME targetName = {};
+							targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+							targetName.header.size = sizeof(targetName);
+							targetName.header.adapterId = paths[j].targetInfo.adapterId;
+							targetName.header.id = paths[j].targetInfo.id;
+
+							if (DisplayConfigGetDeviceInfo(&targetName.header) == ERROR_SUCCESS)
+							{
+								if (wcscmp(targetName.monitorFriendlyDeviceName, L"Zako HDR") == 0)
+								{
+									ccd_ready = true;
+									break;
+								}
+							}
+						}
+					}
+				}
+
+				if (ccd_ready)
+				{
+					stringstream ss;
+					ss << "CCD recognized VDD monitor after " << elapsed << "ms";
+					vddlog("i", ss.str().c_str());
+					break;
+				}
+
+				Sleep(CCD_WAIT_INTERVAL_MS);
+			}
+
+			if (ccd_ready)
+			{
+				writePipeResponse("OK");
+			}
+			else
+			{
+				vddlog("w", "CCD did not recognize VDD monitor within timeout");
+				writePipeResponse("OK_PENDING");
 			}
 		};
 

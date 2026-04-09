@@ -42,6 +42,7 @@ Environment:
 #include <atomic>
 
 #define PIPE_NAME L"\\\\.\\pipe\\ZakoVDDPipe"
+#define VDD_MONITOR_NAME L"Zako HDR"
 
 #pragma comment(lib, "xmllite.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -1804,7 +1805,7 @@ void HandleClient(HANDLE hPipe)
 
 							if (DisplayConfigGetDeviceInfo(&targetName.header) == ERROR_SUCCESS)
 							{
-								if (wcscmp(targetName.monitorFriendlyDeviceName, L"Zako HDR") == 0)
+								if (wcscmp(targetName.monitorFriendlyDeviceName, VDD_MONITOR_NAME) == 0)
 								{
 									ccd_ready = true;
 									break;

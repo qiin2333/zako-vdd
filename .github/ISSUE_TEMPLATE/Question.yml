@@ -1,44 +1,59 @@
 name: Question
-
-description: Ask a general question.
-
+description: 提出一般性问题
 title: "[Question]: "
-
 labels: ["question", "triage"]
-
 assignees: ["zjoasan", "bud3699", "itsmikethetech"]
 
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reaching out! Please provide as much detail as possible to help us understand your question.
+        感谢您联系我们！请尽可能详细地描述您的问题，这将帮助我们更好地回答您。
   
   - type: textarea
     id: question-info
     attributes:
-      label: What is your question?
-      description: Provide details about your question.
+      label: 您的问题是什么？
+      description: 请详细描述您的问题
       placeholder: |
-        Describe your question clearly so we can assist you effectively.
+        请清楚地描述您的问题，以便我们能够有效地帮助您。
+        例如：如何配置虚拟显示器？如何启用 HDR？如何与 Foundation Sunshine 集成？
     validations:
       required: true
+  
+  - type: dropdown
+    id: question-category
+    attributes:
+      label: 问题类别
+      description: 这个问题属于哪个类别？
+      options:
+        - 安装和配置
+        - 虚拟显示器管理
+        - HDR 相关
+        - Foundation Sunshine 集成
+        - 社区脚本使用
+        - 性能问题
+        - 其他
+      default: 0
+    validations:
+      required: false
   
   - type: textarea
     id: additional-info
     attributes:
-      label: Additional information
-      description: Any extra details that might help us answer your question.
+      label: 其他信息
+      description: 任何可能帮助我们回答您问题的额外信息
       placeholder: |
-        Provide any relevant context, screenshots, or references.
+        提供相关的上下文、截图或参考资料。
+        例如：您当前的配置、已尝试的步骤、相关文档链接等。
     validations:
       required: false
 
   - type: input
     id: contact
     attributes:
-      label: Contact Details
-      description: How can we reach you if we need more information?
-      placeholder: ex. email@example.com
+      label: 联系方式
+      description: 如果需要更多信息，我们如何联系您？
+      placeholder: 例如：email@example.com 或 GitHub 用户名
     validations:
       required: false

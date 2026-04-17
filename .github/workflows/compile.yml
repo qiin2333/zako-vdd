@@ -6,9 +6,10 @@ on:
       - master
     tags:
       - 'v*'
-  pull_request:
+  pull_request_target:
     branches:
       - master
+      - sunshine
 jobs:
   build:
     runs-on: windows-latest
@@ -19,6 +20,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -100,6 +103,8 @@ jobs:
         run: dir "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
 
       - name: Sign driver with certificate
+        # Skip signing for PRs from forks to prevent secret exfiltration
+        if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
         shell: pwsh
         env:
           SIGNING_CERT_PFX: ${{ secrets.SIGNING_CERT_PFX }}

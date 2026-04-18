@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - sunshine
     tags:
       - 'v*'
   pull_request_target:

@@ -58,14 +58,20 @@ namespace Microsoft
             Microsoft::WRL::ComPtr<ID3D11DeviceContext> DeviceContext;
         };
 
+        // Forward declaration for VDD->Sunshine direct-capture frame exporter
+        class SharedFrameExporter;
+
         /// <summary>
         /// Manages a thread that consumes buffers from an indirect display swap-chain object.
         /// </summary>
         class SwapChainProcessor
         {
         public:
-            SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent);
+            SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex);
             ~SwapChainProcessor();
+
+            void PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO& mode);
+            void UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL);
 
         private:
             static DWORD CALLBACK RunThread(LPVOID Argument);
@@ -79,6 +85,8 @@ namespace Microsoft
             HANDLE m_hAvailableBufferEvent;
             Microsoft::WRL::Wrappers::Thread m_hThread;
             Microsoft::WRL::Wrappers::Event m_hTerminateEvent;
+            unsigned int m_MonitorIndex;
+            std::unique_ptr<SharedFrameExporter> m_Exporter;
         };
 
         /// <summary>
@@ -98,6 +106,9 @@ namespace Microsoft
 
             void AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
             void UnassignSwapChain(IDDCX_MONITOR Monitor);
+            void CommitModes(const IDARG_IN_COMMITMODES* pInArgs);
+            void CommitModes2(const IDARG_IN_COMMITMODES2* pInArgs);
+            void UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool isHdr, float maxNits, float minNits, float maxFALL);
 
             // Helper methods for driver reload
             bool HasActiveSwapChain() const { std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex); return !m_ProcessingThreads.empty(); }
@@ -117,6 +128,7 @@ namespace Microsoft
             std::map<unsigned int, IDDCX_MONITOR> m_Monitors;
             std::map<unsigned int, GUID> m_MonitorGuids; // Maps index to client GUID for EDID cleanup
 
+            std::map<IDDCX_MONITOR, DISPLAYCONFIG_VIDEO_SIGNAL_INFO> m_CommittedTargetModes;
             std::map<IDDCX_MONITOR, std::unique_ptr<SwapChainProcessor>> m_ProcessingThreads;
             std::map<IDDCX_MONITOR, HANDLE> m_MouseEvents;
 

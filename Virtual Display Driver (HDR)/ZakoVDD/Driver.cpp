@@ -220,6 +220,7 @@ static mutex s_EdidMapMutex;
 // Structure to store HDR luminance settings per monitor
 struct MonitorHdrSettings
 {
+	bool isHdr;     // Whether the OS has enabled HDR for this monitor
 	float maxNits; // Maximum luminance in nits (Max CLL - Content Light Level)
 	float minNits; // Minimum luminance in nits
 	float maxFALL; // Maximum Frame-Average Light Level in nits
@@ -2829,18 +2830,422 @@ HRESULT Direct3DDevice::Init()
 
 #pragma endregion
 
+#pragma region SharedFrameExporter
+
+namespace Microsoft { namespace IndirectDisp {
+
+// =============================================================================
+// SharedFrameExporter
+// -----------------------------------------------------------------------------
+// Exports each acquired IddCx swap-chain frame to a named D3D11 shared texture
+// (NT shared handle) plus a named Win32 event so that an external consumer
+// (e.g. Sunshine running as SYSTEM service or in a user session) can pick up
+// the frame WITHOUT going through DXGI Desktop Duplication / WGC.
+//
+// Per-monitor named objects:
+//   Texture handle name : Global\ZakoVDD_Frame_<idx>
+//   Frame-ready event   : Global\ZakoVDD_FrameReady_<idx>
+//   Metadata mapping    : Global\ZakoVDD_Meta_<idx>
+//
+// Texture is keyed-mutex protected:
+//   Producer (this driver): acquire key 0 with 0ms timeout, on success
+//                            CopyResource then release key 1.
+//   Consumer (Sunshine)   : acquire key 1, copy/encode, release key 0.
+// If the producer can't acquire (consumer slow), the frame is skipped and the
+// previous frame remains visible to the consumer (no stall on producer side).
+// =============================================================================
+
+struct SharedFrameMetadata
+{
+    UINT32 Magic;          // 'ZVDF' = 0x5A564446
+    UINT32 Version;        // 1
+    UINT32 Width;
+    UINT32 Height;
+    UINT32 DxgiFormat;     // DXGI_FORMAT
+    UINT32 IsHdr;          // 0/1
+    float  MaxNits;
+    float  MinNits;
+    float  MaxFALL;
+    UINT64 FrameCounter;   // Incremented per pushed frame
+    UINT64 LastPresentQpc; // QueryPerformanceCounter at producer-side push
+};
+
+class SharedFrameExporter
+{
+public:
+    SharedFrameExporter(unsigned int monitorIndex, std::shared_ptr<Direct3DDevice> device)
+        : m_MonitorIndex(monitorIndex), m_Device(device)
+    {
+    }
+
+    ~SharedFrameExporter()
+    {
+        Teardown();
+    }
+
+    // Push one acquired surface to the consumer. Best-effort. Never throws.
+    void PushFrame(IDXGIResource* acquired)
+    {
+		std::lock_guard<std::mutex> lock(m_ExportMutex);
+
+        if (!acquired || !m_Device || !m_Device->Device)
+        {
+            return;
+        }
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> srcTex;
+        if (FAILED(acquired->QueryInterface(__uuidof(ID3D11Texture2D), &srcTex)) || !srcTex)
+        {
+            return;
+        }
+
+        D3D11_TEXTURE2D_DESC srcDesc = {};
+        srcTex->GetDesc(&srcDesc);
+
+        if (!EnsureSharedTexture(srcDesc))
+        {
+            return;
+        }
+
+        // Best-effort acquire with 0 timeout. If consumer holds key 0 the
+        // producer will simply skip this frame (do not stall the IddCx loop).
+        HRESULT hr = m_KeyedMutex->AcquireSync(0, 0);
+        if (hr == static_cast<HRESULT>(WAIT_TIMEOUT))
+        {
+            return;
+        }
+        if (FAILED(hr))
+        {
+            return;
+        }
+
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
+        m_Device->Device->GetImmediateContext(&ctx);
+        ctx->CopyResource(m_SharedTex.Get(), srcTex.Get());
+        ctx->Flush();
+
+        m_KeyedMutex->ReleaseSync(1);
+
+        // Update metadata block (frame counter / present timestamp).
+        if (m_MetaView)
+        {
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            m_MetaView->FrameCounter++;
+            m_MetaView->LastPresentQpc = static_cast<UINT64>(qpc.QuadPart);
+        }
+
+        if (m_FrameReadyEvent)
+        {
+            SetEvent(m_FrameReadyEvent);
+        }
+    }
+
+    void UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL)
+    {
+		std::lock_guard<std::mutex> lock(m_ExportMutex);
+
+        m_PendingIsHdr = isHdr;
+        m_PendingMaxNits = maxNits;
+        m_PendingMinNits = minNits;
+        m_PendingMaxFALL = maxFALL;
+        if (m_MetaView)
+        {
+            m_MetaView->IsHdr = isHdr ? 1u : 0u;
+            m_MetaView->MaxNits = maxNits;
+            m_MetaView->MinNits = minNits;
+            m_MetaView->MaxFALL = maxFALL;
+			if (m_CachedFormat == DXGI_FORMAT_UNKNOWN)
+			{
+				m_MetaView->DxgiFormat = GuessMetadataFormat();
+			}
+        }
+    }
+
+	void PublishModeMetadata(UINT width, UINT height)
+	{
+		if (width == 0 || height == 0)
+		{
+			return;
+		}
+
+		std::lock_guard<std::mutex> lock(m_ExportMutex);
+
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = width;
+		desc.Height = height;
+		desc.Format = GuessMetadataFormat();
+
+		if (!EnsureEventAndMetadata(desc))
+		{
+			std::stringstream ss;
+			ss << "[VddExport] Failed to publish mode metadata for monitor=" << m_MonitorIndex
+			   << " " << width << "x" << height;
+			vddlog("e", ss.str().c_str());
+			return;
+		}
+
+		std::stringstream ss;
+		ss << "[VddExport] Published mode metadata monitor=" << m_MonitorIndex
+		   << " " << width << "x" << height
+		   << " fmt=" << desc.Format
+		   << " hdr=" << (m_PendingIsHdr ? 1 : 0);
+		vddlog("i", ss.str().c_str());
+	}
+
+private:
+	DXGI_FORMAT GuessMetadataFormat() const
+	{
+		return m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+	}
+
+    bool EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDesc)
+    {
+        if (m_SharedTex &&
+            m_CachedWidth == srcDesc.Width &&
+            m_CachedHeight == srcDesc.Height &&
+            m_CachedFormat == srcDesc.Format)
+        {
+            return true;
+        }
+
+        // Recreate everything since dimensions / format changed.
+        TeardownTexture();
+
+        // Build SDDL: Built-in Admin (BA) + Interactive Users (IU), full access.
+        SECURITY_ATTRIBUTES sa = {};
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"D:(A;;GA;;;BA)(A;;GA;;;IU)", SDDL_REVISION_1, &sd, nullptr))
+        {
+            vddlog("e", "[VddExport] Failed to build SDDL for shared texture");
+            return false;
+        }
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = sd;
+        sa.bInheritHandle = FALSE;
+
+        D3D11_TEXTURE2D_DESC desc = srcDesc;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.CPUAccessFlags = 0;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+
+        HRESULT hr = m_Device->Device->CreateTexture2D(&desc, nullptr, &m_SharedTex);
+        if (FAILED(hr))
+        {
+            std::stringstream ss;
+            ss << "[VddExport] CreateTexture2D failed: 0x" << std::hex << hr;
+            vddlog("e", ss.str().c_str());
+            LocalFree(sd);
+            return false;
+        }
+
+        Microsoft::WRL::ComPtr<IDXGIResource1> dxgiRes;
+        hr = m_SharedTex.As(&dxgiRes);
+        if (FAILED(hr))
+        {
+            vddlog("e", "[VddExport] QueryInterface IDXGIResource1 failed");
+            m_SharedTex.Reset();
+            LocalFree(sd);
+            return false;
+        }
+
+        std::wstring texName = L"Global\\ZakoVDD_Frame_" + std::to_wstring(m_MonitorIndex);
+        HANDLE ntHandle = nullptr;
+        hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, texName.c_str(), &ntHandle);
+        LocalFree(sd);
+        if (FAILED(hr))
+        {
+            std::stringstream ss;
+            ss << "[VddExport] CreateSharedHandle failed: 0x" << std::hex << hr;
+            vddlog("e", ss.str().c_str());
+            m_SharedTex.Reset();
+            return false;
+        }
+        // The NT handle MUST stay open for the named lookup to remain valid;
+        // closing it before consumers open will make OpenSharedResourceByName
+        // return E_INVALIDARG even though the texture is still alive in our process.
+        if (m_NtHandle) { CloseHandle(m_NtHandle); }
+        m_NtHandle = ntHandle;
+
+        hr = m_SharedTex.As(&m_KeyedMutex);
+        if (FAILED(hr) || !m_KeyedMutex)
+        {
+            vddlog("e", "[VddExport] QueryInterface IDXGIKeyedMutex failed");
+            m_SharedTex.Reset();
+            return false;
+        }
+
+        if (!EnsureEventAndMetadata(srcDesc))
+        {
+            m_KeyedMutex.Reset();
+            m_SharedTex.Reset();
+            return false;
+        }
+
+        m_CachedWidth = srcDesc.Width;
+        m_CachedHeight = srcDesc.Height;
+        m_CachedFormat = srcDesc.Format;
+
+        std::stringstream ss;
+        ss << "[VddExport] Shared texture ready monitor=" << m_MonitorIndex
+           << " " << srcDesc.Width << "x" << srcDesc.Height
+           << " fmt=" << srcDesc.Format;
+        vddlog("i", ss.str().c_str());
+        return true;
+    }
+
+    bool EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& srcDesc)
+    {
+        SECURITY_ATTRIBUTES sa = {};
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"D:(A;;GA;;;BA)(A;;GA;;;IU)", SDDL_REVISION_1, &sd, nullptr))
+        {
+            return false;
+        }
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = sd;
+        sa.bInheritHandle = FALSE;
+
+        if (!m_FrameReadyEvent)
+        {
+            std::wstring evName = L"Global\\ZakoVDD_FrameReady_" + std::to_wstring(m_MonitorIndex);
+            m_FrameReadyEvent = CreateEventW(&sa, FALSE, FALSE, evName.c_str());
+            if (!m_FrameReadyEvent)
+            {
+                std::stringstream ss;
+                ss << "[VddExport] CreateEventW failed: " << GetLastError();
+                vddlog("e", ss.str().c_str());
+                LocalFree(sd);
+                return false;
+            }
+        }
+
+        if (!m_MetaMapping)
+        {
+            std::wstring mapName = L"Global\\ZakoVDD_Meta_" + std::to_wstring(m_MonitorIndex);
+            m_MetaMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa,
+                                               PAGE_READWRITE, 0, sizeof(SharedFrameMetadata),
+                                               mapName.c_str());
+            if (!m_MetaMapping)
+            {
+                std::stringstream ss;
+                ss << "[VddExport] CreateFileMappingW failed: " << GetLastError();
+                vddlog("e", ss.str().c_str());
+                LocalFree(sd);
+                return false;
+            }
+            m_MetaView = static_cast<SharedFrameMetadata*>(
+                MapViewOfFile(m_MetaMapping, FILE_MAP_WRITE, 0, 0, sizeof(SharedFrameMetadata)));
+            if (!m_MetaView)
+            {
+                LocalFree(sd);
+                return false;
+            }
+            ZeroMemory(m_MetaView, sizeof(SharedFrameMetadata));
+            m_MetaView->Magic = 0x5A564446; // 'ZVDF'
+            m_MetaView->Version = 1;
+        }
+        LocalFree(sd);
+
+        m_MetaView->Width = srcDesc.Width;
+        m_MetaView->Height = srcDesc.Height;
+        m_MetaView->DxgiFormat = srcDesc.Format;
+        m_MetaView->IsHdr = m_PendingIsHdr ? 1u : 0u;
+        m_MetaView->MaxNits = m_PendingMaxNits;
+        m_MetaView->MinNits = m_PendingMinNits;
+        m_MetaView->MaxFALL = m_PendingMaxFALL;
+        return true;
+    }
+
+    void TeardownTexture()
+    {
+        m_KeyedMutex.Reset();
+        m_SharedTex.Reset();
+        if (m_NtHandle)
+        {
+            CloseHandle(m_NtHandle);
+            m_NtHandle = nullptr;
+        }
+        m_CachedWidth = 0;
+        m_CachedHeight = 0;
+        m_CachedFormat = DXGI_FORMAT_UNKNOWN;
+    }
+
+    void Teardown()
+    {
+        TeardownTexture();
+        if (m_MetaView)
+        {
+            UnmapViewOfFile(m_MetaView);
+            m_MetaView = nullptr;
+        }
+        if (m_MetaMapping)
+        {
+            CloseHandle(m_MetaMapping);
+            m_MetaMapping = nullptr;
+        }
+        if (m_FrameReadyEvent)
+        {
+            CloseHandle(m_FrameReadyEvent);
+            m_FrameReadyEvent = nullptr;
+        }
+    }
+
+    unsigned int m_MonitorIndex = 0;
+    std::shared_ptr<Direct3DDevice> m_Device;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_SharedTex;
+    Microsoft::WRL::ComPtr<IDXGIKeyedMutex> m_KeyedMutex;
+	std::mutex m_ExportMutex;
+    HANDLE m_NtHandle = nullptr;
+    HANDLE m_FrameReadyEvent = nullptr;
+    HANDLE m_MetaMapping = nullptr;
+    SharedFrameMetadata* m_MetaView = nullptr;
+
+    UINT m_CachedWidth = 0;
+    UINT m_CachedHeight = 0;
+    DXGI_FORMAT m_CachedFormat = DXGI_FORMAT_UNKNOWN;
+
+    bool  m_PendingIsHdr = false;
+    float m_PendingMaxNits = 0.0f;
+    float m_PendingMinNits = 0.0f;
+    float m_PendingMaxFALL = 0.0f;
+};
+
+}} // namespace Microsoft::IndirectDisp
+
+#pragma endregion
+
 #pragma region SwapChainProcessor
 
-SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent)
-	: m_hSwapChain(hSwapChain), m_Device(Device), m_hAvailableBufferEvent(NewFrameEvent)
+SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex)
+	: m_hSwapChain(hSwapChain), m_Device(Device), m_hAvailableBufferEvent(NewFrameEvent), m_MonitorIndex(MonitorIndex)
 {
 	stringstream logStream;
 
 	logStream << "Constructing SwapChainProcessor:"
 			  << "\n  SwapChain Handle: " << static_cast<void *>(hSwapChain)
 			  << "\n  Device Pointer: " << static_cast<void *>(Device.get())
-			  << "\n  NewFrameEvent Handle: " << NewFrameEvent;
+			  << "\n  NewFrameEvent Handle: " << NewFrameEvent
+			  << "\n  Monitor Index: " << MonitorIndex;
 	vddlog("d", logStream.str().c_str());
+
+	// Initialize the VDD->external consumer frame exporter (best effort).
+	try
+	{
+		m_Exporter = std::make_unique<SharedFrameExporter>(MonitorIndex, Device);
+	}
+	catch (...)
+	{
+		vddlog("e", "[VddExport] Failed to construct SharedFrameExporter (non-fatal)");
+		m_Exporter.reset();
+	}
 
 	m_hTerminateEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
 	if (!m_hTerminateEvent.Get())
@@ -2932,6 +3337,28 @@ SwapChainProcessor::~SwapChainProcessor()
 		logStream << "No valid thread handle to wait for.";
 		vddlog("e", logStream.str().c_str());
 	}
+}
+
+void SwapChainProcessor::PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO& mode)
+{
+	if (!m_Exporter)
+	{
+		return;
+	}
+
+	const UINT width = mode.activeSize.cx ? static_cast<UINT>(mode.activeSize.cx) : static_cast<UINT>(mode.totalSize.cx);
+	const UINT height = mode.activeSize.cy ? static_cast<UINT>(mode.activeSize.cy) : static_cast<UINT>(mode.totalSize.cy);
+	m_Exporter->PublishModeMetadata(width, height);
+}
+
+void SwapChainProcessor::UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL)
+{
+	if (!m_Exporter)
+	{
+		return;
+	}
+
+	m_Exporter->UpdateHdrMetadata(isHdr, maxNits, minNits, maxFALL);
 }
 
 DWORD CALLBACK SwapChainProcessor::RunThread(LPVOID Argument)
@@ -3153,15 +3580,13 @@ void SwapChainProcessor::RunCore()
 			AcquiredBuffer.Attach(pSurface);
 
 			// ==============================
-			// TODO: Process the frame here
-			//
-			// This is the most performance-critical section of code in an IddCx driver. It's important that whatever
-			// is done with the acquired surface be finished as quickly as possible. This operation could be:
-			//  * a GPU copy to another buffer surface for later processing (such as a staging surface for mapping to CPU memory)
-			//  * a GPU encode operation
-			//  * a GPU VPBlt to another surface
-			//  * a GPU custom compute shader encode operation
+			// VDD->Sunshine direct-capture export. Best-effort, never throws,
+			// failure here MUST NOT stall the IddCx swap-chain loop.
 			// ==============================
+			if (m_Exporter)
+			{
+				m_Exporter->PushFrame(AcquiredBuffer.Get());
+			}
 
 			AcquiredBuffer.Reset();
 			hr = IddCxSwapChainFinishedProcessingFrame(m_hSwapChain);
@@ -4027,12 +4452,17 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		{
 			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
 			MonitorHdrSettings hdrSettings;
+			hdrSettings.isHdr = false;
 			hdrSettings.maxNits = maxNits;
 			hdrSettings.minNits = minNits;
+			hdrSettings.maxFALL = maxFALL;
 			s_MonitorHdrSettingsMap[newMonitor] = hdrSettings;
 
 			stringstream ss;
-			ss << "Stored HDR settings for monitor " << (index + 1) << " - MaxNits: " << maxNits << ", MinNits: " << minNits;
+			ss << "Stored HDR settings for monitor " << (index + 1)
+			   << " - IsHdr: false, MaxNits: " << maxNits
+			   << ", MinNits: " << minNits
+			   << ", MaxFALL: " << maxFALL;
 			vddlog("d", ss.str().c_str());
 		}
 
@@ -4093,6 +4523,8 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 				vddlog("d", "Cleaned up HDR settings for monitor");
 			}
 		}
+
+		m_CommittedTargetModes.erase(hMonitor);
 
 		// Clean up EDID cache for this monitor's client GUID
 		{
@@ -4228,7 +4660,39 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 	else
 	{
 		vddlog("d", "Creating a new swap-chain processing thread.");
-		m_ProcessingThreads[Monitor] = std::unique_ptr<SwapChainProcessor>(new SwapChainProcessor(SwapChain, Device, NewFrameEvent));
+
+		// Reverse-look up monitor index for the VDD->Sunshine frame exporter.
+		unsigned int monitorIndex = 0xFFFFFFFFu;
+		for (const auto &kv : m_Monitors)
+		{
+			if (kv.second == Monitor)
+			{
+				monitorIndex = kv.first;
+				break;
+			}
+		}
+
+		m_ProcessingThreads[Monitor] = std::unique_ptr<SwapChainProcessor>(new SwapChainProcessor(SwapChain, Device, NewFrameEvent, monitorIndex));
+
+		auto procIt = m_ProcessingThreads.find(Monitor);
+		if (procIt != m_ProcessingThreads.end() && procIt->second)
+		{
+			auto modeIt = m_CommittedTargetModes.find(Monitor);
+			if (modeIt != m_CommittedTargetModes.end())
+			{
+				procIt->second->PublishModeMetadata(modeIt->second);
+			}
+
+			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
+			auto hdrIt = s_MonitorHdrSettingsMap.find(Monitor);
+			if (hdrIt != s_MonitorHdrSettingsMap.end())
+			{
+				procIt->second->UpdateHdrMetadata(hdrIt->second.isHdr,
+				                                hdrIt->second.maxNits,
+				                                hdrIt->second.minNits,
+				                                hdrIt->second.maxFALL);
+			}
+		}
 
 		if (hardwareCursor)
 		{
@@ -4288,6 +4752,92 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 		{
 			vddlog("d", "Hardware cursor is disabled, Skipped creation.");
 		}
+	}
+}
+
+void IndirectDeviceContext::CommitModes(const IDARG_IN_COMMITMODES* pInArgs)
+{
+	if (!pInArgs || !pInArgs->pPaths)
+	{
+		return;
+	}
+
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+	for (UINT i = 0; i < pInArgs->PathCount; ++i)
+	{
+		const auto& path = pInArgs->pPaths[i];
+		if (!path.MonitorObject)
+		{
+			continue;
+		}
+
+		if ((path.Flags & IDDCX_PATH_FLAGS_ACTIVE) != 0)
+		{
+			m_CommittedTargetModes[path.MonitorObject] = path.TargetVideoSignalInfo;
+
+			auto procIt = m_ProcessingThreads.find(path.MonitorObject);
+			if (procIt != m_ProcessingThreads.end() && procIt->second)
+			{
+				procIt->second->PublishModeMetadata(path.TargetVideoSignalInfo);
+			}
+		}
+		else
+		{
+			m_CommittedTargetModes.erase(path.MonitorObject);
+		}
+	}
+}
+
+void IndirectDeviceContext::CommitModes2(const IDARG_IN_COMMITMODES2* pInArgs)
+{
+	if (!pInArgs || !pInArgs->pPaths)
+	{
+		return;
+	}
+
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+	for (UINT i = 0; i < pInArgs->PathCount; ++i)
+	{
+		const auto& path = pInArgs->pPaths[i];
+		if (!path.MonitorObject)
+		{
+			continue;
+		}
+
+		if ((path.Flags & IDDCX_PATH_FLAGS_ACTIVE) != 0)
+		{
+			m_CommittedTargetModes[path.MonitorObject] = path.TargetVideoSignalInfo;
+
+			auto procIt = m_ProcessingThreads.find(path.MonitorObject);
+			if (procIt != m_ProcessingThreads.end() && procIt->second)
+			{
+				procIt->second->PublishModeMetadata(path.TargetVideoSignalInfo);
+			}
+		}
+		else
+		{
+			m_CommittedTargetModes.erase(path.MonitorObject);
+		}
+	}
+}
+
+void IndirectDeviceContext::UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool isHdr, float maxNits, float minNits, float maxFALL)
+{
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
+	{
+		lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
+		auto& hdrSettings = s_MonitorHdrSettingsMap[Monitor];
+		hdrSettings.isHdr = isHdr;
+		hdrSettings.maxNits = maxNits;
+		hdrSettings.minNits = minNits;
+		hdrSettings.maxFALL = maxFALL;
+	}
+
+	auto procIt = m_ProcessingThreads.find(Monitor);
+	if (procIt != m_ProcessingThreads.end() && procIt->second)
+	{
+		procIt->second->UpdateHdrMetadata(isHdr, maxNits, minNits, maxFALL);
 	}
 }
 
@@ -4402,8 +4952,11 @@ _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverAdapterCommitModes(IDDCX_ADAPTER AdapterObject, const IDARG_IN_COMMITMODES *pInArgs)
 {
-	UNREFERENCED_PARAMETER(AdapterObject);
-	UNREFERENCED_PARAMETER(pInArgs);
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
+		if (pContext && pContext->pContext)
+		{
+			pContext->pContext->CommitModes(pInArgs);
+		}
 
 	// For the sample, do nothing when modes are picked - the swap-chain is taken care of by IddCx
 
@@ -4717,6 +5270,7 @@ _Use_decl_annotations_
 	// Get the HDR luminance settings for this monitor
 	float maxNits = 1000.0f; // Default max luminance
 	float minNits = 0.0001f; // Default min luminance
+	float maxFALL = 0.0f;     // Default MaxFALL
 
 	{
 		lock_guard<mutex> lock(s_HdrSettingsMutex);
@@ -4725,8 +5279,11 @@ _Use_decl_annotations_
 		{
 			maxNits = it->second.maxNits;
 			minNits = it->second.minNits;
+			maxFALL = it->second.maxFALL;
 			logStream.str("");
-			logStream << "Retrieved HDR settings - MaxNits: " << maxNits << ", MinNits: " << minNits;
+			logStream << "Retrieved HDR settings - MaxNits: " << maxNits
+			          << ", MinNits: " << minNits
+			          << ", MaxFALL: " << maxFALL;
 			vddlog("d", logStream.str().c_str());
 		}
 		else
@@ -4747,6 +5304,12 @@ _Use_decl_annotations_
 		logStream << "Applying HDR10 metadata - MaxMasteringLuminance: " << maxNits
 				  << " nits, MinMasteringLuminance: " << (minNits * 10000.0f) << " (normalized)";
 		vddlog("d", logStream.str().c_str());
+	}
+
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
+	if (pContext && pContext->pContext)
+	{
+		pContext->pContext->UpdateMonitorHdrMetadata(MonitorObject, true, maxNits, minNits, maxFALL);
 	}
 
 	vddlog("d", "Default HDR metadata set successfully.");
@@ -4924,8 +5487,11 @@ _Use_decl_annotations_
 		IDDCX_ADAPTER AdapterObject,
 		const IDARG_IN_COMMITMODES2 *pInArgs)
 {
-	UNREFERENCED_PARAMETER(AdapterObject);
-	UNREFERENCED_PARAMETER(pInArgs);
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(AdapterObject);
+		if (pContext && pContext->pContext)
+		{
+			pContext->pContext->CommitModes2(pInArgs);
+		}
 
 	return STATUS_SUCCESS;
 }

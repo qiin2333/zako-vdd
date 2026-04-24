@@ -240,3 +240,12 @@ ModelManifest.xml
 
 # FAKE - F# Make
 .fake/
+
+# Local tooling/debug artifacts
+nul
+tools/nul
+tools/dist/
+tools/VkLayer_hdr_inject/full_debug.txt
+tools/VkLayer_hdr_inject/hdr_inject_log.txt
+tools/VkLayer_hdr_inject/external/
+tools/vdd_capture_test/deploy.log

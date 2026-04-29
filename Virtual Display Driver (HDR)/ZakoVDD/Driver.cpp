@@ -43,6 +43,13 @@ Environment:
 
 #define PIPE_NAME L"\\\\.\\pipe\\ZakoVDDPipe"
 
+#define ZAKO_IDDCX_STRUCT_INIT(obj, type) \
+	do \
+	{ \
+		RtlZeroMemory(&(obj), sizeof(obj)); \
+		(obj).Size = IDD_STRUCTURE_SIZE(type); \
+	} while (0)
+
 #pragma comment(lib, "xmllite.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
@@ -4152,7 +4159,7 @@ void IndirectDeviceContext::InitAdapter()
 	logStream.str("");
 
 	IDDCX_ADAPTER_CAPS AdapterCaps = {};
-	IDDCX_ADAPTER_CAPS_INIT(&AdapterCaps);
+	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps, IDDCX_ADAPTER_CAPS);
 
 	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2))
 	{
@@ -4171,7 +4178,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare basic feature support for the adapter (required)
 	AdapterCaps.MaxMonitorsSupported = numVirtualDisplays;
-	IDDCX_ENDPOINT_DIAGNOSTIC_INFO_INIT(&AdapterCaps.EndPointDiagnostics);
+	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps.EndPointDiagnostics, IDDCX_ENDPOINT_DIAGNOSTIC_INFO);
 	AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
 	AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
@@ -4182,7 +4189,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare your hardware and firmware versions (required)
 	IDDCX_ENDPOINT_VERSION Version = {};
-	IDDCX_ENDPOINT_VERSION_INIT(&Version);
+	ZAKO_IDDCX_STRUCT_INIT(Version, IDDCX_ENDPOINT_VERSION);
 	Version.MajorVer = 1;
 	AdapterCaps.EndPointDiagnostics.pFirmwareVersion = &Version;
 	AdapterCaps.EndPointDiagnostics.pHardwareVersion = &Version;
@@ -4384,7 +4391,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	}
 
 	IDDCX_MONITOR_INFO MonitorInfo = {};
-	IDDCX_MONITOR_INFO_INIT(&MonitorInfo);
+	ZAKO_IDDCX_STRUCT_INIT(MonitorInfo, IDDCX_MONITOR_INFO);
 	MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
 	MonitorInfo.ConnectorIndex = index;
 	MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
@@ -4723,7 +4730,7 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 			m_MouseEvents[Monitor] = hMouseEvent;
 
 			IDDCX_CURSOR_CAPS cursorInfo = {};
-			IDDCX_CURSOR_CAPS_INIT(&cursorInfo);
+			ZAKO_IDDCX_STRUCT_INIT(cursorInfo, IDDCX_CURSOR_CAPS);
 			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
 
@@ -5014,7 +5021,7 @@ _Use_decl_annotations_
 		// Copy the known modes to the output buffer
 		for (DWORD ModeIndex = 0; ModeIndex < localModes.size(); ModeIndex++)
 		{
-			IDDCX_MONITOR_MODE_INIT(&pInArgs->pMonitorModes[ModeIndex]);
+			ZAKO_IDDCX_STRUCT_INIT(pInArgs->pMonitorModes[ModeIndex], IDDCX_MONITOR_MODE);
 			pInArgs->pMonitorModes[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
 			pInArgs->pMonitorModes[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
 		}
@@ -5082,7 +5089,7 @@ void CreateTargetMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO &Mode, UINT Width, UINT He
 
 void CreateTargetMode(IDDCX_TARGET_MODE &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
-	IDDCX_TARGET_MODE_INIT(&Mode);
+	ZAKO_IDDCX_STRUCT_INIT(Mode, IDDCX_TARGET_MODE);
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
 
@@ -5095,7 +5102,7 @@ void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT V
 			  << ", VSyncDen: " << VSyncDen;
 	vddlog("d", logStream.str().c_str());
 
-	IDDCX_TARGET_MODE2_INIT(&Mode);
+	ZAKO_IDDCX_STRUCT_INIT(Mode, IDDCX_TARGET_MODE2);
 
 	if (ColourFormat == L"RGB")
 	{
@@ -5372,7 +5379,7 @@ _Use_decl_annotations_
 		logStream << "Writing monitor modes to output buffer:";
 		for (DWORD ModeIndex = 0; ModeIndex < localModes.size(); ModeIndex++)
 		{
-			IDDCX_MONITOR_MODE2_INIT(&pInArgs->pMonitorModes[ModeIndex]);
+			ZAKO_IDDCX_STRUCT_INIT(pInArgs->pMonitorModes[ModeIndex], IDDCX_MONITOR_MODE2);
 			pInArgs->pMonitorModes[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
 			pInArgs->pMonitorModes[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
 

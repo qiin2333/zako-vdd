@@ -21,6 +21,7 @@ Environment:
 #include <tuple>
 #include <vector>
 #include <AdapterOption.h>
+#include <vdd_control_ioctl.h>
 #include <xmllite.h>
 #include <shlwapi.h>
 #include <shlobj.h>
@@ -41,16 +42,39 @@ Environment:
 #include <set>
 #include <atomic>
 
+// =====================================================================
+// Transitional named-pipe transport
+// ---------------------------------------------------------------------
+// All pipe-related code in this translation unit is marked with the
+// tag [LEGACY-PIPE] in a leading comment so it can be removed in a
+// single mechanical pass once every Sunshine release in the wild
+// speaks IOCTL natively. To strip:
+//   1. grep -nE '\[LEGACY-PIPE\]' Driver.cpp and delete each tagged
+//      block (signature + body, plus the call site in DriverEntry /
+//      EvtDriverUnload).
+//   2. Drop PIPE_NAME, hPipeThread, g_Running (pipe-only), g_pipeHandle,
+//      sendLogsThroughPipe, SendToPipe, the SendLogsThroughPipe registry
+//      hook, HandleClient, StartNamedPipeServer, StopNamedPipeServer.
+//   3. Drop the `hPipeForResponse` parameter on DispatchVddCommandBuffer
+//      and remove the GETSETTINGS WriteFile guarded branch.
+// The IOCTL transport (VirtualDisplayDriverIoDeviceControl +
+// GUID_DEVINTERFACE_ZAKO_VDD_CONTROL) and DispatchVddCommandBuffer
+// remain untouched.
+// =====================================================================
+
+// [LEGACY-PIPE]
 #define PIPE_NAME L"\\\\.\\pipe\\ZakoVDDPipe"
 
 #pragma comment(lib, "xmllite.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
 
+// [LEGACY-PIPE]
 HANDLE hPipeThread = NULL;
 std::atomic<bool> g_Running{true};
 mutex g_Mutex;
 mutex g_DataMutex; // Protects monitorModes, s_KnownMonitorModes2, numVirtualDisplays, gpuname
+// [LEGACY-PIPE]
 HANDLE g_pipeHandle = INVALID_HANDLE_VALUE;
 WDFDEVICE g_GlobalDevice = nullptr;
 
@@ -65,6 +89,8 @@ extern "C" DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD VirtualDisplayDriverDeviceAdd;
 EVT_WDF_DEVICE_D0_ENTRY VirtualDisplayDriverDeviceD0Entry;
 EVT_WDF_DEVICE_D0_EXIT VirtualDisplayDriverDeviceD0Exit;
+
+EVT_IDD_CX_DEVICE_IO_CONTROL VirtualDisplayDriverIoDeviceControl;
 
 EVT_IDD_CX_ADAPTER_INIT_FINISHED VirtualDisplayDriverAdapterInitFinished;
 EVT_IDD_CX_ADAPTER_COMMIT_MODES VirtualDisplayDriverAdapterCommitModes;
@@ -137,6 +163,7 @@ std::atomic<bool> customEdid{false};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
 std::atomic<bool> edidCeaOverride{false};
+// [LEGACY-PIPE]
 std::atomic<bool> sendLogsThroughPipe{true};
 
 // Mouse settings
@@ -588,6 +615,7 @@ void float_to_vsync(float refresh_rate, int &num, int &den)
 	den /= divisor;
 }
 
+// [LEGACY-PIPE] entire function
 void SendToPipe(const std::string &logMessage)
 {
 	if (g_pipeHandle != INVALID_HANDLE_VALUE)
@@ -744,7 +772,7 @@ void vddlog(const char *type, const char *message)
 	fprintf(logFile, "[%s] [%s] %s\n", ss.str().c_str(), logType.c_str(), message);
 	fflush(logFile); // Ensure data is written immediately
 
-	// Send through pipe if enabled
+	// [LEGACY-PIPE] Send through pipe if enabled
 	if (sendLogsThroughPipe && g_pipeHandle != INVALID_HANDLE_VALUE)
 	{
 		string logMessage = ss.str() + " [" + logType + "] " + message + "\n";
@@ -1427,6 +1455,429 @@ void toggleSettingImpl(HANDLE hPipe, wchar_t *param, const wchar_t *settingName,
 	}
 }
 
+// Centralised command-buffer dispatch shared by both the legacy named-pipe
+// transport (HandleClient) and the new IOCTL transport
+// (VirtualDisplayDriverIoDeviceControl).
+//
+// `buffer` MUST be a writable, null-terminated UTF-16 string of at most
+// 2048 wchar_t. `hPipeForResponse` is the response sink for the few
+// commands that write back via WriteFile/SendToPipe (GETSETTINGS / PING);
+// pass INVALID_HANDLE_VALUE for IOCTL callers and those response handlers
+// will silently no-op (Sunshine never relies on the response payload of
+// any command it sends, so this is intentional and safe).
+void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
+{
+	struct Command
+	{
+		const wchar_t *name;
+		size_t length;
+		void (*action)(HANDLE, wchar_t *);
+	};
+
+	auto handleReloadDriver = [](HANDLE hPipe, wchar_t *)
+	{
+		vddlog("c", "Reloading the driver");
+		ReloadDriver(hPipe);
+	};
+
+	auto handleLogDebug = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"debuglogging", "Pipe debugging enabled", "Debugging disabled");
+	};
+
+	auto handleLogging = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"logging", "Logging Enabled", "Logging disabled");
+	};
+
+	auto handleHDRPlus = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"HDRPlus", "HDR+ Enabled", "HDR+ Disabled");
+	};
+
+	auto handleSDR10 = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"SDR10bit", "SDR 10 Bit Enabled", "SDR 10 Bit Disabled");
+	};
+
+	auto handleCustomEdid = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"CustomEdid", "Custom Edid Enabled", "Custom Edid Disabled");
+	};
+
+	auto handlePreventSpoof = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"PreventSpoof", "Prevent Spoof Enabled", "Prevent Spoof Disabled");
+	};
+
+	auto handleCeaOverride = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
+	};
+
+	auto handleHardwareCursor = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
+	};
+
+	auto handleD3DDeviceGPU = [](HANDLE, wchar_t *)
+	{
+		vddlog("c", "Retrieving D3D GPU (This information may be inaccurate without reloading the driver first)");
+		InitializeD3DDeviceAndLogGPU();
+		vddlog("c", "Retrieved D3D GPU");
+	};
+
+	auto handleIddCxVersion = [](HANDLE, wchar_t *)
+	{
+		vddlog("c", "Logging iddcx version");
+		LogIddCxVersion();
+	};
+
+	auto handleGetAssignedGPU = [](HANDLE, wchar_t *)
+	{
+		vddlog("c", "Retrieving Assigned GPU");
+		GetGpuInfo();
+		vddlog("c", "Retrieved Assigned GPU");
+	};
+
+	auto handleGetAllGPUs = [](HANDLE, wchar_t *)
+	{
+		vddlog("c", "Logging all GPUs");
+		vddlog("i", "Any GPUs which show twice but you only have one, will most likely be the GPU the driver is attached to");
+		logAvailableGPUs();
+		vddlog("c", "Logged all GPUs");
+	};
+
+	auto handleSetGPU = [](HANDLE hPipe, wchar_t *param)
+	{
+		std::wstring gpuName = param;
+		gpuName = gpuName.substr(1, gpuName.size() - 2);
+
+		std::string gpuNameNarrow = WStringToString(gpuName);
+
+		vddlog("c", ("Setting GPU to: " + gpuNameNarrow).c_str());
+		if (UpdateXmlGpuSetting(gpuName.c_str()))
+		{
+			vddlog("c", "Gpu Changed, Restarting Driver");
+		}
+		else
+		{
+			vddlog("e", "Failed to update GPU setting in XML. Restarting anyway");
+		}
+		ReloadDriver(hPipe);
+	};
+
+	auto handleSetDisplayCount = [](HANDLE hPipe, wchar_t *param)
+	{
+		vddlog("i", "Setting Display Count");
+
+		int newDisplayCount = 1;
+		swscanf_s(param, L"%d", &newDisplayCount);
+
+		std::wstring displayLog = L"Setting display count  to " + std::to_wstring(newDisplayCount);
+		vddlog("c", WStringToString(displayLog).c_str());
+
+		if (UpdateXmlDisplayCountSetting(newDisplayCount))
+		{
+			vddlog("c", "Display Count Changed, Restarting Driver");
+		}
+		else
+		{
+			vddlog("e", "Failed to update display count setting in XML. Restarting anyway");
+		}
+		ReloadDriver(hPipe);
+	};
+
+	auto handleGetSettings = [](HANDLE hPipe, wchar_t *)
+	{
+		bool debugEnabled = EnabledQuery(L"DebugLoggingEnabled");
+		bool loggingEnabled = EnabledQuery(L"LoggingEnabled");
+
+		wstring settingsResponse = L"SETTINGS ";
+		settingsResponse += debugEnabled ? L"DEBUG=true " : L"DEBUG=false ";
+		settingsResponse += loggingEnabled ? L"LOG=true" : L"LOG=false";
+
+		// IOCTL callers pass INVALID_HANDLE_VALUE; WriteFile would fail with
+		// ERROR_INVALID_HANDLE which we explicitly tolerate here. The IOCTL
+		// path returns no payload because Sunshine never queries settings.
+		if (hPipe != INVALID_HANDLE_VALUE && hPipe != NULL)
+		{
+			DWORD bytesWritten;
+			DWORD bytesToWrite = static_cast<DWORD>((settingsResponse.length() + 1) * sizeof(wchar_t));
+			WriteFile(hPipe, settingsResponse.c_str(), bytesToWrite, &bytesWritten, NULL);
+		}
+	};
+
+	auto handlePing = [](HANDLE, wchar_t *)
+	{
+		// SendToPipe checks g_pipeHandle internally; for IOCTL callers
+		// g_pipeHandle is INVALID_HANDLE_VALUE so this is a logged no-op.
+		SendToPipe("PONG");
+		vddlog("p", "Heartbeat Ping");
+	};
+
+	auto handleCreateMonitor = [](HANDLE, wchar_t *param)
+	{
+		if (g_GlobalDevice == nullptr)
+		{
+			vddlog("e", "Global device not initialized");
+			return;
+		}
+
+		lock_guard<mutex> lock(g_Mutex);
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+		if (!pContext || !pContext->pContext)
+		{
+			vddlog("e", "Failed to get device context for monitor creation");
+			return;
+		}
+
+		if (numVirtualDisplays == 0)
+		{
+			vddlog("e", "Invalid display count: 0");
+			return;
+		}
+
+		vddlog("i", "Starting monitor creation");
+
+		// Parse GUID and HDR luminance settings from parameter
+		// Format: "{GUID}:[maxNits,minNits,maxFALL][widthCm,heightCm]" or multiple space-separated entries
+		struct MonitorParams
+		{
+			GUID guid;
+			bool hasGuid = false;
+			float maxNits = 1000.0f;
+			float minNits = 0.0001f;
+			float maxFALL = 1000.0f;
+			float widthCm = 0.0f;  // 0 means use EDID default
+			float heightCm = 0.0f; // 0 means use EDID default
+		};
+		vector<MonitorParams> monitorParams;
+
+		if (param && wcslen(param) > 0)
+		{
+			wstringstream wss(param);
+			wstring token;
+
+			while (wss >> token)
+			{
+				MonitorParams mp;
+				size_t colonPos = token.find(L':');
+				wstring guidStr = (colonPos != wstring::npos) ? token.substr(0, colonPos) : token;
+
+				// Parse settings after colon: [maxNits,minNits,maxFALL][widthCm,heightCm]
+				if (colonPos != wstring::npos)
+				{
+					wstring settingsStr = token.substr(colonPos + 1);
+
+					// Find all bracket pairs
+					size_t pos = 0;
+					int bracketIndex = 0;
+
+					while (pos < settingsStr.length())
+					{
+						size_t openBracket = settingsStr.find(L'[', pos);
+						if (openBracket == wstring::npos)
+							break;
+
+						size_t closeBracket = settingsStr.find(L']', openBracket);
+						if (closeBracket == wstring::npos)
+							break;
+
+						wstring innerStr = settingsStr.substr(openBracket + 1, closeBracket - openBracket - 1);
+						wstringstream valueStream(innerStr);
+						wstring val;
+						vector<float> values;
+
+						while (getline(valueStream, val, L','))
+						{
+							try
+							{
+								values.push_back(std::stof(val));
+							}
+							catch (...)
+							{
+								break;
+							}
+						}
+
+						if (bracketIndex == 0)
+						{
+							// First bracket: [maxNits,minNits,maxFALL]
+							if (values.size() >= 2)
+							{
+								mp.maxNits = values[0];
+								mp.minNits = values[1];
+								mp.maxFALL = (values.size() >= 3) ? values[2] : values[0];
+
+								stringstream ss;
+								ss << "Parsed luminance - MaxNits: " << mp.maxNits
+								   << ", MinNits: " << mp.minNits << ", MaxFALL: " << mp.maxFALL;
+								vddlog("d", ss.str().c_str());
+							}
+						}
+						else if (bracketIndex == 1)
+						{
+							// Second bracket: [widthCm,heightCm]
+							if (values.size() >= 2)
+							{
+								mp.widthCm = values[0];
+								mp.heightCm = values[1];
+
+								stringstream ss;
+								ss << "Parsed dimensions - Width: " << mp.widthCm
+								   << " cm, Height: " << mp.heightCm << " cm";
+								vddlog("d", ss.str().c_str());
+							}
+						}
+
+						bracketIndex++;
+						pos = closeBracket + 1;
+					}
+				}
+
+				// Parse GUID
+				if (!guidStr.empty())
+				{
+					wstring guidWithBraces = guidStr;
+					if (guidWithBraces.front() != L'{')
+						guidWithBraces = L"{" + guidWithBraces;
+					if (guidWithBraces.back() != L'}')
+						guidWithBraces += L"}";
+
+					if (SUCCEEDED(CLSIDFromString(guidWithBraces.c_str(), &mp.guid)))
+					{
+						mp.hasGuid = true;
+						vddlog("d", ("Parsed client GUID: " + WStringToString(guidWithBraces)).c_str());
+					}
+					else
+					{
+						vddlog("w", ("Failed to parse GUID: " + WStringToString(guidStr)).c_str());
+					}
+				}
+
+				monitorParams.push_back(mp);
+			}
+		}
+
+		for (unsigned int i = 0; i < numVirtualDisplays; i++)
+		{
+			const GUID *pGuid = nullptr;
+			float maxNits = 1000.0f, minNits = 0.0001f, maxFALL = 1000.0f;
+			float widthCm = 0.0f, heightCm = 0.0f;
+
+			if (i < monitorParams.size())
+			{
+				const auto &mp = monitorParams[i];
+				if (mp.hasGuid)
+					pGuid = &mp.guid;
+				maxNits = mp.maxNits;
+				minNits = mp.minNits;
+				maxFALL = mp.maxFALL;
+				widthCm = mp.widthCm;
+				heightCm = mp.heightCm;
+			}
+			pContext->pContext->CreateMonitor(i, pGuid, maxNits, minNits, maxFALL, widthCm, heightCm);
+		}
+	};
+
+	auto handleDestroyMonitor = [](HANDLE, wchar_t *)
+	{
+		if (g_GlobalDevice != nullptr)
+		{
+			lock_guard<mutex> lock(g_Mutex);
+			auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+			if (pContext && pContext->pContext)
+			{
+				vddlog("i", "Starting monitor destruction process");
+
+				vddlog("d", "Preparing system for monitor destruction");
+				Sleep(50);
+
+				try
+				{
+					pContext->pContext->DestroyAllMonitors();
+
+					vddlog("d", "Allowing system to stabilize after monitor destruction");
+					Sleep(100);
+
+					vddlog("i", "All monitors destroyed successfully");
+				}
+				catch (const std::exception &e)
+				{
+					stringstream errorStream;
+					errorStream << "Exception during monitor destruction: " << e.what();
+					vddlog("e", errorStream.str().c_str());
+
+					Sleep(200);
+				}
+				catch (...)
+				{
+					vddlog("e", "Unknown exception during monitor destruction");
+
+					Sleep(200);
+				}
+			}
+			else
+			{
+				vddlog("e", "Failed to get device context for monitor destruction");
+			}
+		}
+		else
+		{
+			vddlog("e", "Global device not initialized for monitor destruction");
+		}
+	};
+
+	auto handleUnknownCommand = [](HANDLE, wchar_t *buffer)
+	{
+		vddlog("e", "Unknown command");
+
+		std::string narrowString = WStringToString(buffer);
+		vddlog("e", narrowString.c_str());
+	};
+
+	Command commands[] = {
+		{L"RELOAD_DRIVER", 13, handleReloadDriver},
+		{L"LOG_DEBUG", 9, handleLogDebug},
+		{L"LOGGING", 7, handleLogging},
+		{L"HDRPLUS", 7, handleHDRPlus},
+		{L"SDR10", 5, handleSDR10},
+		{L"CUSTOMEDID", 10, handleCustomEdid},
+		{L"PREVENTSPOOF", 12, handlePreventSpoof},
+		{L"CEAOVERRIDE", 11, handleCeaOverride},
+		{L"HARDWARECURSOR", 14, handleHardwareCursor},
+		{L"D3DDEVICEGPU", 12, handleD3DDeviceGPU},
+		{L"IDDCXVERSION", 12, handleIddCxVersion},
+		{L"GETASSIGNEDGPU", 14, handleGetAssignedGPU},
+		{L"GETALLGPUS", 10, handleGetAllGPUs},
+		{L"SETGPU", 6, handleSetGPU},
+		{L"SETDISPLAYCOUNT", 15, handleSetDisplayCount},
+		{L"GETSETTINGS", 11, handleGetSettings},
+		{L"PING", 4, handlePing},
+		{L"CREATEMONITOR", 13, handleCreateMonitor},
+		{L"DESTROYMONITOR", 14, handleDestroyMonitor},
+		{nullptr, 0, handleUnknownCommand}};
+
+	for (const auto &cmd : commands)
+	{
+		if (cmd.name && wcsncmp(buffer, cmd.name, cmd.length) == 0)
+		{
+			// Parse parameter: skip command name and optional space
+			wchar_t *param = buffer + cmd.length;
+			// Skip space if present
+			if (*param == L' ')
+			{
+				param++;
+			}
+			// If param points to null terminator, it means no parameter was provided
+			cmd.action(hPipeForResponse, param);
+			break;
+		}
+	}
+}
+
+// [LEGACY-PIPE] entire function -- pipe-side wrapper around DispatchVddCommandBuffer
 void HandleClient(HANDLE hPipe)
 {
 	g_pipeHandle = hPipe;
@@ -1441,412 +1892,113 @@ void HandleClient(HANDLE hPipe)
 		string bufferstr = WStringToString(bufferwstr);
 		vddlog("p", bufferstr.c_str());
 
-		struct Command
-		{
-			const wchar_t *name;
-			size_t length;
-			void (*action)(HANDLE, wchar_t *);
-		};
-
-		auto handleReloadDriver = [](HANDLE hPipe, wchar_t *)
-		{
-			vddlog("c", "Reloading the driver");
-			ReloadDriver(hPipe);
-		};
-
-		auto handleLogDebug = [](HANDLE hPipe, wchar_t *param)
-		{
-			toggleSettingImpl(hPipe, param, L"debuglogging", "Pipe debugging enabled", "Debugging disabled");
-		};
-
-		auto handleLogging = [](HANDLE hPipe, wchar_t *param)
-		{
-			toggleSettingImpl(hPipe, param, L"logging", "Logging Enabled", "Logging disabled");
-		};
-
-		auto handleHDRPlus = [](HANDLE hPipe, wchar_t *param)
-		{
-			toggleSettingImpl(hPipe, param, L"HDRPlus", "HDR+ Enabled", "HDR+ Disabled");
-		};
-
-		auto handleSDR10 = [](HANDLE hPipe, wchar_t *param)
-		{
-			toggleSettingImpl(hPipe, param, L"SDR10bit", "SDR 10 Bit Enabled", "SDR 10 Bit Disabled");
-		};
-
-		auto handleCustomEdid = [](HANDLE hPipe, wchar_t *param)
-		{
-			toggleSettingImpl(hPipe, param, L"CustomEdid", "Custom Edid Enabled", "Custom Edid Disabled");
-		};
-
-		auto handlePreventSpoof = [](HANDLE hPipe, wchar_t *param)
-		{
-			toggleSettingImpl(hPipe, param, L"PreventSpoof", "Prevent Spoof Enabled", "Prevent Spoof Disabled");
-		};
-
-		auto handleCeaOverride = [](HANDLE hPipe, wchar_t *param)
-		{
-			toggleSettingImpl(hPipe, param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
-		};
-
-		auto handleHardwareCursor = [](HANDLE hPipe, wchar_t *param)
-		{
-			toggleSettingImpl(hPipe, param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
-		};
-
-		auto handleD3DDeviceGPU = [](HANDLE, wchar_t *)
-		{
-			vddlog("c", "Retrieving D3D GPU (This information may be inaccurate without reloading the driver first)");
-			InitializeD3DDeviceAndLogGPU();
-			vddlog("c", "Retrieved D3D GPU");
-		};
-
-		auto handleIddCxVersion = [](HANDLE, wchar_t *)
-		{
-			vddlog("c", "Logging iddcx version");
-			LogIddCxVersion();
-		};
-
-		auto handleGetAssignedGPU = [](HANDLE, wchar_t *)
-		{
-			vddlog("c", "Retrieving Assigned GPU");
-			GetGpuInfo();
-			vddlog("c", "Retrieved Assigned GPU");
-		};
-
-		auto handleGetAllGPUs = [](HANDLE, wchar_t *)
-		{
-			vddlog("c", "Logging all GPUs");
-			vddlog("i", "Any GPUs which show twice but you only have one, will most likely be the GPU the driver is attached to");
-			logAvailableGPUs();
-			vddlog("c", "Logged all GPUs");
-		};
-
-		auto handleSetGPU = [](HANDLE hPipe, wchar_t *param)
-		{
-			std::wstring gpuName = param;
-			gpuName = gpuName.substr(1, gpuName.size() - 2);
-
-			std::string gpuNameNarrow = WStringToString(gpuName);
-
-			vddlog("c", ("Setting GPU to: " + gpuNameNarrow).c_str());
-			if (UpdateXmlGpuSetting(gpuName.c_str()))
-			{
-				vddlog("c", "Gpu Changed, Restarting Driver");
-			}
-			else
-			{
-				vddlog("e", "Failed to update GPU setting in XML. Restarting anyway");
-			}
-			ReloadDriver(hPipe);
-		};
-
-		auto handleSetDisplayCount = [](HANDLE hPipe, wchar_t *param)
-		{
-			vddlog("i", "Setting Display Count");
-
-			int newDisplayCount = 1;
-			swscanf_s(param, L"%d", &newDisplayCount);
-
-			std::wstring displayLog = L"Setting display count  to " + std::to_wstring(newDisplayCount);
-			vddlog("c", WStringToString(displayLog).c_str());
-
-			if (UpdateXmlDisplayCountSetting(newDisplayCount))
-			{
-				vddlog("c", "Display Count Changed, Restarting Driver");
-			}
-			else
-			{
-				vddlog("e", "Failed to update display count setting in XML. Restarting anyway");
-			}
-			ReloadDriver(hPipe);
-		};
-
-		auto handleGetSettings = [](HANDLE hPipe, wchar_t *)
-		{
-			bool debugEnabled = EnabledQuery(L"DebugLoggingEnabled");
-			bool loggingEnabled = EnabledQuery(L"LoggingEnabled");
-
-			wstring settingsResponse = L"SETTINGS ";
-			settingsResponse += debugEnabled ? L"DEBUG=true " : L"DEBUG=false ";
-			settingsResponse += loggingEnabled ? L"LOG=true" : L"LOG=false";
-
-			DWORD bytesWritten;
-			DWORD bytesToWrite = static_cast<DWORD>((settingsResponse.length() + 1) * sizeof(wchar_t));
-			WriteFile(hPipe, settingsResponse.c_str(), bytesToWrite, &bytesWritten, NULL);
-		};
-
-		auto handlePing = [](HANDLE, wchar_t *)
-		{
-			SendToPipe("PONG");
-			vddlog("p", "Heartbeat Ping");
-		};
-
-		auto handleCreateMonitor = [](HANDLE, wchar_t *param)
-		{
-			if (g_GlobalDevice == nullptr)
-			{
-				vddlog("e", "Global device not initialized");
-				return;
-			}
-
-			lock_guard<mutex> lock(g_Mutex);
-			auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
-			if (!pContext || !pContext->pContext)
-			{
-				vddlog("e", "Failed to get device context for monitor creation");
-				return;
-			}
-
-			if (numVirtualDisplays == 0)
-			{
-				vddlog("e", "Invalid display count: 0");
-				return;
-			}
-
-			vddlog("i", "Starting monitor creation");
-
-			// Parse GUID and HDR luminance settings from parameter
-			// Format: "{GUID}:[maxNits,minNits,maxFALL][widthCm,heightCm]" or multiple space-separated entries
-			struct MonitorParams
-			{
-				GUID guid;
-				bool hasGuid = false;
-				float maxNits = 1000.0f;
-				float minNits = 0.0001f;
-				float maxFALL = 1000.0f;
-				float widthCm = 0.0f;  // 0 means use EDID default
-				float heightCm = 0.0f; // 0 means use EDID default
-			};
-			vector<MonitorParams> monitorParams;
-
-			if (param && wcslen(param) > 0)
-			{
-				wstringstream wss(param);
-				wstring token;
-
-				while (wss >> token)
-				{
-					MonitorParams mp;
-					size_t colonPos = token.find(L':');
-					wstring guidStr = (colonPos != wstring::npos) ? token.substr(0, colonPos) : token;
-
-					// Parse settings after colon: [maxNits,minNits,maxFALL][widthCm,heightCm]
-					if (colonPos != wstring::npos)
-					{
-						wstring settingsStr = token.substr(colonPos + 1);
-
-						// Find all bracket pairs
-						size_t pos = 0;
-						int bracketIndex = 0;
-
-						while (pos < settingsStr.length())
-						{
-							size_t openBracket = settingsStr.find(L'[', pos);
-							if (openBracket == wstring::npos)
-								break;
-
-							size_t closeBracket = settingsStr.find(L']', openBracket);
-							if (closeBracket == wstring::npos)
-								break;
-
-							wstring innerStr = settingsStr.substr(openBracket + 1, closeBracket - openBracket - 1);
-							wstringstream valueStream(innerStr);
-							wstring val;
-							vector<float> values;
-
-							while (getline(valueStream, val, L','))
-							{
-								try
-								{
-									values.push_back(std::stof(val));
-								}
-								catch (...)
-								{
-									break;
-								}
-							}
-
-							if (bracketIndex == 0)
-							{
-								// First bracket: [maxNits,minNits,maxFALL]
-								if (values.size() >= 2)
-								{
-									mp.maxNits = values[0];
-									mp.minNits = values[1];
-									mp.maxFALL = (values.size() >= 3) ? values[2] : values[0];
-
-									stringstream ss;
-									ss << "Parsed luminance - MaxNits: " << mp.maxNits
-									   << ", MinNits: " << mp.minNits << ", MaxFALL: " << mp.maxFALL;
-									vddlog("d", ss.str().c_str());
-								}
-							}
-							else if (bracketIndex == 1)
-							{
-								// Second bracket: [widthCm,heightCm]
-								if (values.size() >= 2)
-								{
-									mp.widthCm = values[0];
-									mp.heightCm = values[1];
-
-									stringstream ss;
-									ss << "Parsed dimensions - Width: " << mp.widthCm
-									   << " cm, Height: " << mp.heightCm << " cm";
-									vddlog("d", ss.str().c_str());
-								}
-							}
-
-							bracketIndex++;
-							pos = closeBracket + 1;
-						}
-					}
-
-					// Parse GUID
-					if (!guidStr.empty())
-					{
-						wstring guidWithBraces = guidStr;
-						if (guidWithBraces.front() != L'{')
-							guidWithBraces = L"{" + guidWithBraces;
-						if (guidWithBraces.back() != L'}')
-							guidWithBraces += L"}";
-
-						if (SUCCEEDED(CLSIDFromString(guidWithBraces.c_str(), &mp.guid)))
-						{
-							mp.hasGuid = true;
-							vddlog("d", ("Parsed client GUID: " + WStringToString(guidWithBraces)).c_str());
-						}
-						else
-						{
-							vddlog("w", ("Failed to parse GUID: " + WStringToString(guidStr)).c_str());
-						}
-					}
-
-					monitorParams.push_back(mp);
-				}
-			}
-
-			for (unsigned int i = 0; i < numVirtualDisplays; i++)
-			{
-				const GUID *pGuid = nullptr;
-				float maxNits = 1000.0f, minNits = 0.0001f, maxFALL = 1000.0f;
-				float widthCm = 0.0f, heightCm = 0.0f;
-
-				if (i < monitorParams.size())
-				{
-					const auto &mp = monitorParams[i];
-					if (mp.hasGuid)
-						pGuid = &mp.guid;
-					maxNits = mp.maxNits;
-					minNits = mp.minNits;
-					maxFALL = mp.maxFALL;
-					widthCm = mp.widthCm;
-					heightCm = mp.heightCm;
-				}
-				pContext->pContext->CreateMonitor(i, pGuid, maxNits, minNits, maxFALL, widthCm, heightCm);
-			}
-		};
-
-		auto handleDestroyMonitor = [](HANDLE, wchar_t *)
-		{
-			if (g_GlobalDevice != nullptr)
-			{
-				lock_guard<mutex> lock(g_Mutex);
-				auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
-				if (pContext && pContext->pContext)
-				{
-					vddlog("i", "Starting monitor destruction process");
-
-					vddlog("d", "Preparing system for monitor destruction");
-					Sleep(50);
-
-					try
-					{
-						pContext->pContext->DestroyAllMonitors();
-
-						vddlog("d", "Allowing system to stabilize after monitor destruction");
-						Sleep(100);
-
-						vddlog("i", "All monitors destroyed successfully");
-					}
-					catch (const std::exception &e)
-					{
-						stringstream errorStream;
-						errorStream << "Exception during monitor destruction: " << e.what();
-						vddlog("e", errorStream.str().c_str());
-
-						Sleep(200);
-					}
-					catch (...)
-					{
-						vddlog("e", "Unknown exception during monitor destruction");
-
-						Sleep(200);
-					}
-				}
-				else
-				{
-					vddlog("e", "Failed to get device context for monitor destruction");
-				}
-			}
-			else
-			{
-				vddlog("e", "Global device not initialized for monitor destruction");
-			}
-		};
-
-		auto handleUnknownCommand = [](HANDLE, wchar_t *buffer)
-		{
-			vddlog("e", "Unknown command");
-
-			std::string narrowString = WStringToString(buffer);
-			vddlog("e", narrowString.c_str());
-		};
-
-		Command commands[] = {
-			{L"RELOAD_DRIVER", 13, handleReloadDriver},
-			{L"LOG_DEBUG", 9, handleLogDebug},
-			{L"LOGGING", 7, handleLogging},
-			{L"HDRPLUS", 7, handleHDRPlus},
-			{L"SDR10", 5, handleSDR10},
-			{L"CUSTOMEDID", 10, handleCustomEdid},
-			{L"PREVENTSPOOF", 12, handlePreventSpoof},
-			{L"CEAOVERRIDE", 11, handleCeaOverride},
-			{L"HARDWARECURSOR", 14, handleHardwareCursor},
-			{L"D3DDEVICEGPU", 12, handleD3DDeviceGPU},
-			{L"IDDCXVERSION", 12, handleIddCxVersion},
-			{L"GETASSIGNEDGPU", 14, handleGetAssignedGPU},
-			{L"GETALLGPUS", 10, handleGetAllGPUs},
-			{L"SETGPU", 6, handleSetGPU},
-			{L"SETDISPLAYCOUNT", 15, handleSetDisplayCount},
-			{L"GETSETTINGS", 11, handleGetSettings},
-			{L"PING", 4, handlePing},
-			{L"CREATEMONITOR", 13, handleCreateMonitor},
-			{L"DESTROYMONITOR", 14, handleDestroyMonitor},
-			{nullptr, 0, handleUnknownCommand}};
-
-		for (const auto &cmd : commands)
-		{
-			if (cmd.name && wcsncmp(buffer, cmd.name, cmd.length) == 0)
-			{
-				// Parse parameter: skip command name and optional space
-				wchar_t *param = buffer + cmd.length;
-				// Skip space if present
-				if (*param == L' ')
-				{
-					param++;
-				}
-				// If param points to null terminator, it means no parameter was provided
-				cmd.action(hPipe, param);
-				break;
-			}
-		}
+		DispatchVddCommandBuffer(hPipe, buffer);
 	}
 	DisconnectNamedPipe(hPipe);
 	CloseHandle(hPipe);
 	g_pipeHandle = INVALID_HANDLE_VALUE;
 }
 
+// IddCx redirects every IRP_MJ_DEVICE_CONTROL into its own internal queue
+// before any default WDF queue ever sees it. The only way to receive a
+// custom IOCTL in an IddCx driver is through this callback registered via
+// IDD_CX_CLIENT_CONFIG.EvtIddCxDeviceIoControl. IddCx invokes this hook
+// for IOCTLs it does not own; we recognise IOCTL_VDD_PING and
+// IOCTL_VDD_COMMAND, and fall through with STATUS_NOT_SUPPORTED for
+// everything else so unknown control codes don't hang the request queue.
+_Use_decl_annotations_
+VOID VirtualDisplayDriverIoDeviceControl(
+	WDFDEVICE Device,
+	WDFREQUEST Request,
+	size_t OutputBufferLength,
+	size_t InputBufferLength,
+	ULONG IoControlCode)
+{
+	UNREFERENCED_PARAMETER(Device);
+	UNREFERENCED_PARAMETER(OutputBufferLength);
+
+	switch (IoControlCode)
+	{
+	case IOCTL_VDD_PING:
+	{
+		// Cheap "is the driver alive" probe used by Sunshine to decide
+		// whether to short-circuit to disable_enable instead of waiting on
+		// a slow command IOCTL.
+		WdfRequestComplete(Request, STATUS_SUCCESS);
+		return;
+	}
+
+	case IOCTL_VDD_COMMAND:
+	{
+		if (InputBufferLength == 0 || (InputBufferLength % sizeof(wchar_t)) != 0)
+		{
+			WdfRequestComplete(Request, STATUS_INVALID_BUFFER_SIZE);
+			return;
+		}
+
+		// Mirror the legacy named-pipe HandleClient buffer (2048 wchar_t).
+		// Anything larger is almost certainly malformed input.
+		if (InputBufferLength > 2048 * sizeof(wchar_t))
+		{
+			WdfRequestComplete(Request, STATUS_BUFFER_OVERFLOW);
+			return;
+		}
+
+		PVOID pInBuffer = nullptr;
+		size_t inBufferLen = 0;
+		NTSTATUS status = WdfRequestRetrieveInputBuffer(Request, sizeof(wchar_t), &pInBuffer, &inBufferLen);
+		if (!NT_SUCCESS(status))
+		{
+			WdfRequestComplete(Request, status);
+			return;
+		}
+
+		// Copy into a writable, NUL-terminated local buffer. METHOD_BUFFERED
+		// already gives us a kernel-owned copy but the dispatch helpers
+		// expect a wchar_t array they can scribble on (e.g. swscanf_s).
+		wchar_t buffer[2048] = { 0 };
+		size_t copyLen = inBufferLen;
+		if (copyLen > sizeof(buffer) - sizeof(wchar_t))
+		{
+			copyLen = sizeof(buffer) - sizeof(wchar_t);
+		}
+		RtlCopyMemory(buffer, pInBuffer, copyLen);
+		buffer[copyLen / sizeof(wchar_t)] = L'\0';
+
+		try
+		{
+			wstring bufferwstr(buffer);
+			string bufferstr = WStringToString(bufferwstr);
+			vddlog("p", ("[IOCTL] " + bufferstr).c_str());
+
+			// Pass INVALID_HANDLE_VALUE so response-emitting handlers
+			// (GETSETTINGS / PING) silently skip their WriteFile path.
+			// Sunshine never observes those responses anyway.
+			DispatchVddCommandBuffer(INVALID_HANDLE_VALUE, buffer);
+		}
+		catch (const std::exception &e)
+		{
+			stringstream errorStream;
+			errorStream << "Exception during IOCTL command dispatch: " << e.what();
+			vddlog("e", errorStream.str().c_str());
+		}
+		catch (...)
+		{
+			vddlog("e", "Unknown exception during IOCTL command dispatch");
+		}
+
+		WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+		return;
+	}
+
+	default:
+		WdfRequestComplete(Request, STATUS_NOT_SUPPORTED);
+		return;
+	}
+}
+
+
+// [LEGACY-PIPE] entire function -- accept-loop thread for the named pipe
 DWORD WINAPI NamedPipeServer(LPVOID lpParam)
 {
 	UNREFERENCED_PARAMETER(lpParam);
@@ -1900,6 +2052,7 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam)
 	return 0;
 }
 
+// [LEGACY-PIPE] entire function
 void StartNamedPipeServer()
 {
 	vddlog("p", "Starting Pipe");
@@ -1916,6 +2069,7 @@ void StartNamedPipeServer()
 	}
 }
 
+// [LEGACY-PIPE] entire function
 void StopNamedPipeServer()
 {
 	vddlog("p", "Stopping Pipe");
@@ -2044,7 +2198,7 @@ VOID EvtDriverUnload(
 		Sleep(100);
 	}
 
-	// Stop the named pipe server
+	// [LEGACY-PIPE] Stop the named pipe server
 	StopNamedPipeServer();
 
 	vddlog("i", "Driver unload completed");
@@ -2070,6 +2224,7 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	customEdid = EnabledQuery(L"CustomEdidEnabled");
 	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
 	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
+	// [LEGACY-PIPE]
 	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
 
 	// colour
@@ -2114,6 +2269,7 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 		return Status;
 	}
 
+	// [LEGACY-PIPE]
 	StartNamedPipeServer();
 
 	return Status;
@@ -2461,8 +2617,8 @@ _Use_decl_annotations_
 	vddlog("d", logStream.str().c_str());
 
 	// If the driver wishes to handle custom IoDeviceControl requests, it's necessary to use this callback since IddCx
-	// redirects IoDeviceControl requests to an internal queue. This sample does not need this.
-	// IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
+	// redirects IoDeviceControl requests to an internal queue.
+	IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
 
 	IddConfig.EvtIddCxAdapterInitFinished = VirtualDisplayDriverAdapterInitFinished;
 
@@ -2584,6 +2740,26 @@ _Use_decl_annotations_
 		logStream << "IddCxDeviceInitialize failed with status: " << Status;
 		vddlog("e", logStream.str().c_str());
 		return Status;
+	}
+
+	// Expose a custom device interface so external callers (Sunshine) can
+	// reach us via DeviceIoControl over CreateFile(\\?\GUID...). This is the
+	// transport that survives WUDFHost recycling: opening the interface
+	// PnP-wakes the driver back into D0 transparently. The legacy named pipe
+	// transport remains active in parallel for backwards compatibility but
+	// is now only the fallback path.
+	Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
+	if (!NT_SUCCESS(Status))
+	{
+		logStream.str("");
+		logStream << "WdfDeviceCreateDeviceInterface failed with status: " << Status
+		          << " - IOCTL transport will be unavailable, pipe transport still works";
+		vddlog("e", logStream.str().c_str());
+		// Non-fatal: pipe transport remains usable, so don't abort device add.
+	}
+	else
+	{
+		vddlog("d", "Registered Zako VDD control device interface");
 	}
 
 	// Create a new device context object and attach it to the WDF device object

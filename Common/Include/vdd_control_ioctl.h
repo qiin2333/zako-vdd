@@ -14,6 +14,10 @@
 
 #pragma once
 
+#if !defined(_WIN32) && !defined(_WIN64)
+#error "vdd_control_ioctl.h targets Windows-only consumers (UMDF driver / Sunshine display_device)."
+#endif
+
 #include <initguid.h>
 #include <Windows.h>
 

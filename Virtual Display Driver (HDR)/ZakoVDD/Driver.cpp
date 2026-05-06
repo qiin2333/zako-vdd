@@ -1946,6 +1946,26 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		vddlog("e", narrowString.c_str());
 	};
 
+	auto handleRefreshModes = [](HANDLE, wchar_t *)
+	{
+		if (g_GlobalDevice == nullptr)
+		{
+			vddlog("e", "REFRESHMODES: global device not initialized");
+			return;
+		}
+		lock_guard<mutex> lock(g_Mutex);
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+		if (!pContext || !pContext->pContext)
+		{
+			vddlog("e", "REFRESHMODES: invalid device context");
+			return;
+		}
+		int n = pContext->pContext->RefreshMonitorModes();
+		stringstream ss;
+		ss << "REFRESHMODES: refreshed " << n << " monitor(s) without departure";
+		vddlog("i", ss.str().c_str());
+	};
+
 	Command commands[] = {
 		{L"RELOAD_DRIVER", 13, handleReloadDriver},
 		{L"LOG_DEBUG", 9, handleLogDebug},
@@ -1966,6 +1986,7 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		{L"SETDISPLAYCOUNT", 15, handleSetDisplayCount},
 		{L"GETSETTINGS", 11, handleGetSettings},
 		{L"PING", 4, handlePing},
+		{L"REFRESHMODES", 12, handleRefreshModes},
 		{L"CREATEMONITOR", 13, handleCreateMonitor},
 		{L"DESTROYMONITOR", 14, handleDestroyMonitor},
 		{nullptr, 0, handleUnknownCommand}};
@@ -5321,6 +5342,90 @@ void IndirectDeviceContext::DestroyAllMonitors()
 			Sleep(50);
 		}
 	}
+}
+
+int IndirectDeviceContext::RefreshMonitorModes()
+{
+	// Push the current monitorModes snapshot to all live IDDCX_MONITOR objects
+	// via IddCxMonitorUpdateModes2. This avoids the DWM window rearrangement
+	// triggered by full monitor departure + arrival when only the mode list
+	// (resolution / refresh rate set) changes.
+	//
+	// Returns: number of monitors successfully refreshed, or -1 if the IddCx
+	// runtime does not export IddCxMonitorUpdateModes2 (older OS / SDK).
+	if (!IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorUpdateModes2))
+	{
+		vddlog("w", "RefreshMonitorModes: IddCxMonitorUpdateModes2 not available on this OS");
+		return -1;
+	}
+
+	// Snapshot mode list under data lock and rebuild s_KnownMonitorModes2
+	vector<tuple<int, int, int, int>> localModes;
+	{
+		lock_guard<mutex> dataLock(g_DataMutex);
+		localModes = monitorModes;
+		s_KnownMonitorModes2.clear();
+		for (size_t i = 0; i < localModes.size(); ++i)
+		{
+			s_KnownMonitorModes2.push_back(dispinfo(
+				std::get<0>(localModes[i]),
+				std::get<1>(localModes[i]),
+				std::get<2>(localModes[i]),
+				std::get<3>(localModes[i])));
+		}
+	}
+
+	if (localModes.empty())
+	{
+		vddlog("w", "RefreshMonitorModes: monitorModes is empty, refusing to push");
+		return 0;
+	}
+
+	// Build IDDCX_TARGET_MODE2 array once - same payload for every monitor.
+	vector<IDDCX_TARGET_MODE2> targetModes(localModes.size());
+	for (size_t i = 0; i < localModes.size(); ++i)
+	{
+		CreateTargetMode2(targetModes[i],
+			static_cast<UINT>(std::get<0>(localModes[i])),
+			static_cast<UINT>(std::get<1>(localModes[i])),
+			static_cast<UINT>(std::get<2>(localModes[i])),
+			static_cast<UINT>(std::get<3>(localModes[i])));
+	}
+
+	// Iterate live monitors under monitor lock and push the new mode list.
+	int refreshed = 0;
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+	for (const auto &pair : m_Monitors)
+	{
+		IDDCX_MONITOR hMonitor = pair.second;
+		if (hMonitor == nullptr)
+			continue;
+
+		IDARG_IN_UPDATEMODES2 inArgs = {};
+		inArgs.Reason = IDDCX_UPDATE_REASON_OTHER;
+		inArgs.TargetModeCount = static_cast<UINT>(targetModes.size());
+		inArgs.pTargetModes = targetModes.data();
+
+		NTSTATUS status = IddCxMonitorUpdateModes2(hMonitor, &inArgs);
+		stringstream ss;
+		ss << "RefreshMonitorModes: monitor index=" << pair.first
+		   << " status=0x" << std::hex << status << " modeCount=" << std::dec << targetModes.size();
+		if (NT_SUCCESS(status))
+		{
+			++refreshed;
+			vddlog("d", ss.str().c_str());
+		}
+		else
+		{
+			vddlog("w", ss.str().c_str());
+		}
+	}
+
+	stringstream summary;
+	summary << "RefreshMonitorModes: pushed " << refreshed << "/" << m_Monitors.size()
+	        << " monitors with " << targetModes.size() << " modes (no departure)";
+	vddlog("i", summary.str().c_str());
+	return refreshed;
 }
 
 #pragma endregion

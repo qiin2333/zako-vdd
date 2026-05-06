@@ -1966,6 +1966,73 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		vddlog("i", ss.str().c_str());
 	};
 
+	// SETMODES <W>x<H>x<R>[,<W>x<H>x<R>...]
+	// Replaces the live monitorModes list (in-memory only; not persisted to XML)
+	// and immediately pushes it to all live monitors via RefreshMonitorModes().
+	// Allows clients (Sunshine etc.) to negotiate exact session resolution
+	// without triggering monitor departure / DWM window rearrangement.
+	auto handleSetModes = [](HANDLE, wchar_t *param)
+	{
+		if (param == nullptr || *param == L'\0')
+		{
+			vddlog("e", "SETMODES: empty parameter");
+			return;
+		}
+
+		// Parse comma-separated list of WxHxR tokens
+		std::vector<std::tuple<int, int, int, int>> parsed;
+		std::wstring input(param);
+		size_t pos = 0;
+		while (pos < input.size())
+		{
+			size_t comma = input.find(L',', pos);
+			std::wstring token = input.substr(pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos);
+			pos = (comma == std::wstring::npos) ? input.size() : comma + 1;
+
+			int w = 0, h = 0, r = 0;
+			if (swscanf_s(token.c_str(), L"%dx%dx%d", &w, &h, &r) == 3 && w > 0 && h > 0 && r > 0)
+			{
+				int vnum = 0, vden = 0;
+				float_to_vsync(static_cast<float>(r), vnum, vden);
+				parsed.emplace_back(w, h, vnum, vden);
+			}
+			else
+			{
+				stringstream ss;
+				ss << "SETMODES: skipping malformed token '" << WStringToString(token) << "'";
+				vddlog("w", ss.str().c_str());
+			}
+		}
+
+		if (parsed.empty())
+		{
+			vddlog("e", "SETMODES: no valid modes parsed; aborting");
+			return;
+		}
+
+		{
+			lock_guard<mutex> dataLock(g_DataMutex);
+			monitorModes = parsed;
+		}
+		stringstream ss;
+		ss << "SETMODES: applied " << parsed.size() << " modes (in-memory only)";
+		vddlog("i", ss.str().c_str());
+
+		// Push to live monitors without departure
+		if (g_GlobalDevice != nullptr)
+		{
+			lock_guard<mutex> lock(g_Mutex);
+			auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+			if (pContext && pContext->pContext)
+			{
+				int n = pContext->pContext->RefreshMonitorModes();
+				stringstream s2;
+				s2 << "SETMODES: pushed to " << n << " live monitor(s)";
+				vddlog("i", s2.str().c_str());
+			}
+		}
+	};
+
 	Command commands[] = {
 		{L"RELOAD_DRIVER", 13, handleReloadDriver},
 		{L"LOG_DEBUG", 9, handleLogDebug},
@@ -1987,6 +2054,7 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		{L"GETSETTINGS", 11, handleGetSettings},
 		{L"PING", 4, handlePing},
 		{L"REFRESHMODES", 12, handleRefreshModes},
+		{L"SETMODES", 8, handleSetModes},
 		{L"CREATEMONITOR", 13, handleCreateMonitor},
 		{L"DESTROYMONITOR", 14, handleDestroyMonitor},
 		{nullptr, 0, handleUnknownCommand}};

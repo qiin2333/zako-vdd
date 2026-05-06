@@ -15,6 +15,7 @@ Environment:
 #include "Driver.h"
 // #include "Driver.tmh"
 #include "DefaultEdid.h"
+#include "EtwTrace.h"
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -160,6 +161,20 @@ static wstring GetFallbackLogDir()
 std::atomic<bool> HDRPlus{false};
 std::atomic<bool> SDR10{false};
 std::atomic<bool> customEdid{false};
+
+// EDID profile resolved at DriverEntry (Auto -> Legacy/Modern based on host
+// OS) and re-read whenever the IOCTL EDIDPROFILE command lands. New monitors
+// pick up the latest value via GetHardcodedEdid(); existing monitors keep
+// the bytes they were created with until they are recreated.
+std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Modern)};
+
+// Variable Refresh Rate (FreeSync / G-Sync compatible) toggle. When enabled,
+// the adapter caps include IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
+// (added in IddCx 1.4); IddCx silently ignores unknown flag bits on older
+// hosts so this is safe to declare unconditionally, but the user-facing
+// toggle still defaults to OFF until we also publish the EDID FreeSync
+// Range Block (see ROADMAP P1).
+std::atomic<bool> vrrEnabled{false};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
 std::atomic<bool> edidCeaOverride{false};
@@ -197,6 +212,8 @@ std::map<std::wstring, std::pair<std::wstring, std::wstring>> SettingsQueryMap =
 	{L"HDRPlusEnabled", {L"HDRPLUS", L"HDRPlus"}},
 	{L"SDR10Enabled", {L"SDR10BIT", L"SDR10bit"}},
 	{L"ColourFormat", {L"COLOURFORMAT", L"ColourFormat"}},
+	{L"EdidProfile", {L"EDIDPROFILE", L"EdidProfile"}},
+	{L"VrrEnabled", {L"VRR", L"Vrr"}},
 	// Colour End
 };
 
@@ -215,6 +232,65 @@ const char *XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level)
 	default:
 		return "Unknown";
 	}
+}
+
+// Resolve Auto EDID profile by querying the host OS build number via
+// ntdll!RtlGetVersion. We avoid GetVersionExW because it lies on Win10+
+// without an explicit application manifest. Build < 22000 is treated as
+// Win10 (or older) and routed to the Legacy profile to dodge issue #612.
+// Anything else (including any future Windows release) gets the Modern
+// profile so HDR / wide gamut declarations stay enabled.
+static VddEdid::Profile DetectAutoEdidProfile()
+{
+	typedef LONG (NTAPI *RtlGetVersionFn)(PRTL_OSVERSIONINFOW);
+	HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+	if (!ntdll)
+	{
+		vddlog("w", "DetectAutoEdidProfile: ntdll handle missing, defaulting to Modern");
+		return VddEdid::Profile::Modern;
+	}
+	auto pRtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+	if (!pRtlGetVersion)
+	{
+		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion missing, defaulting to Modern");
+		return VddEdid::Profile::Modern;
+	}
+	RTL_OSVERSIONINFOW info{};
+	info.dwOSVersionInfoSize = sizeof(info);
+	if (pRtlGetVersion(&info) != 0)
+	{
+		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion failed, defaulting to Modern");
+		return VddEdid::Profile::Modern;
+	}
+	// Win11 starts at build 22000.
+	const bool isWin10OrOlder = (info.dwMajorVersion < 10) ||
+		(info.dwMajorVersion == 10 && info.dwBuildNumber < 22000);
+	stringstream ss;
+	ss << "DetectAutoEdidProfile: build=" << info.dwBuildNumber
+	   << " -> " << (isWin10OrOlder ? "Legacy" : "Modern");
+	vddlog("i", ss.str().c_str());
+	return isWin10OrOlder ? VddEdid::Profile::Legacy : VddEdid::Profile::Modern;
+}
+
+// Apply an EdidProfile setting value (Auto/Legacy/Modern, case-insensitive)
+// to the global gEdidProfile. Auto is resolved here so callers further down
+// can read gEdidProfile without having to repeat OS detection.
+static void ApplyEdidProfileSetting(const std::wstring& settingValue)
+{
+	// Forward declaration: WStringToString is defined later in this TU.
+	extern std::string WStringToString(const std::wstring &wstr);
+
+	auto requested = VddEdid::ProfileFromString(settingValue);
+	auto effective = (requested == VddEdid::Profile::Auto)
+		? DetectAutoEdidProfile()
+		: requested;
+	gEdidProfile.store(static_cast<int>(effective));
+	stringstream ss;
+	ss << "EDID profile applied: requested=";
+	ss << WStringToString(VddEdid::ProfileToString(requested));
+	ss << " effective=";
+	ss << WStringToString(VddEdid::ProfileToString(effective));
+	vddlog("i", ss.str().c_str());
 }
 
 vector<unsigned char> Microsoft::IndirectDisp::IndirectDeviceContext::s_KnownMonitorEdid; // Changed to support static vector
@@ -628,6 +704,11 @@ void SendToPipe(const std::string &logMessage)
 
 void vddlog(const char *type, const char *message)
 {
+	// Emit to ETW first - independent of file-logging toggle. TraceLogging
+	// becomes a no-op when no listening session is enabled, so this is
+	// effectively free in steady state.
+	VddEtwLog(type, message);
+
 	// Early return if logging is disabled - check before any string operations
 	if (!logsEnabled)
 	{
@@ -869,6 +950,102 @@ void InitializeD3DDeviceAndLogGPU()
 // This macro creates the methods for accessing an IndirectDeviceContextWrapper as a context for a WDF object
 WDF_DECLARE_CONTEXT_TYPE(IndirectDeviceContextWrapper);
 
+// =====================================================================
+// TraceLogging ETW provider (modern, header-only path).
+// Defined exactly once in this TU.
+// Provider: ZakoTech.VDD  GUID: {B254994F-46E6-4719-80A0-0A3AA50D6CE5}
+// =====================================================================
+TRACELOGGING_DEFINE_PROVIDER(
+	g_VddEtwProvider,
+	"ZakoTech.VDD",
+	(0xb254994f, 0x46e6, 0x4719, 0x80, 0xa0, 0x0a, 0x3a, 0xa5, 0x0d, 0x6c, 0xe5));
+
+void VddEtwRegister()
+{
+	TraceLoggingRegister(g_VddEtwProvider);
+}
+
+void VddEtwUnregister()
+{
+	TraceLoggingUnregister(g_VddEtwProvider);
+}
+
+// Map vddlog single-char type code to ETW level.
+// e:Error  w:Warning  i/c:Info  d/p/t:Verbose  default:Info
+static UCHAR VddTypeToEtwLevel(const char *type)
+{
+	if (type == nullptr || type[0] == '\0') return WINEVENT_LEVEL_INFO;
+	switch (type[0])
+	{
+	case 'e': return WINEVENT_LEVEL_ERROR;
+	case 'w': return WINEVENT_LEVEL_WARNING;
+	case 'i':
+	case 'c': return WINEVENT_LEVEL_INFO;
+	case 'd':
+	case 'p':
+	case 't': return WINEVENT_LEVEL_VERBOSE;
+	default: return WINEVENT_LEVEL_INFO;
+	}
+}
+
+static const char *VddTypeToCategory(const char *type)
+{
+	if (type == nullptr || type[0] == '\0') return "log";
+	switch (type[0])
+	{
+	case 'e': return "error";
+	case 'w': return "warning";
+	case 'i': return "info";
+	case 'c': return "companion";
+	case 'd': return "debug";
+	case 'p': return "pipe";
+	case 't': return "test";
+	default:  return "log";
+	}
+}
+
+void VddEtwLog(const char *type, const char *message)
+{
+	if (message == nullptr) return;
+
+	// Cheap fast path: no consumer => entire write is a no-op.
+	if (!TraceLoggingProviderEnabled(g_VddEtwProvider, 0, 0))
+		return;
+
+	const UCHAR level = VddTypeToEtwLevel(type);
+	const char *category = VddTypeToCategory(type);
+
+	// TraceLoggingLevel() requires a compile-time constant, so dispatch
+	// to one TraceLoggingWrite call per supported level.
+	switch (level)
+	{
+	case WINEVENT_LEVEL_ERROR:
+		TraceLoggingWrite(g_VddEtwProvider, "VddLog",
+			TraceLoggingLevel(WINEVENT_LEVEL_ERROR),
+			TraceLoggingString(category, "Category"),
+			TraceLoggingString(message, "Message"));
+		break;
+	case WINEVENT_LEVEL_WARNING:
+		TraceLoggingWrite(g_VddEtwProvider, "VddLog",
+			TraceLoggingLevel(WINEVENT_LEVEL_WARNING),
+			TraceLoggingString(category, "Category"),
+			TraceLoggingString(message, "Message"));
+		break;
+	case WINEVENT_LEVEL_VERBOSE:
+		TraceLoggingWrite(g_VddEtwProvider, "VddLog",
+			TraceLoggingLevel(WINEVENT_LEVEL_VERBOSE),
+			TraceLoggingString(category, "Category"),
+			TraceLoggingString(message, "Message"));
+		break;
+	default:
+		TraceLoggingWrite(g_VddEtwProvider, "VddLog",
+			TraceLoggingLevel(WINEVENT_LEVEL_INFO),
+			TraceLoggingString(category, "Category"),
+			TraceLoggingString(message, "Message"));
+		break;
+	}
+}
+
 extern "C" BOOL WINAPI DllMain(
 	_In_ HINSTANCE hInstance,
 	_In_ UINT dwReason,
@@ -876,7 +1053,16 @@ extern "C" BOOL WINAPI DllMain(
 {
 	UNREFERENCED_PARAMETER(hInstance);
 	UNREFERENCED_PARAMETER(lpReserved);
-	UNREFERENCED_PARAMETER(dwReason);
+
+	switch (dwReason)
+	{
+	case DLL_PROCESS_ATTACH:
+		VddEtwRegister();
+		break;
+	case DLL_PROCESS_DETACH:
+		VddEtwUnregister();
+		break;
+	}
 
 	return TRUE;
 }
@@ -1515,6 +1701,43 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		toggleSettingImpl(hPipe, param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
 	};
 
+	// VRR adapter flag toggle. Persists via the existing toggleSettingImpl
+	// path (writes to vdd_settings.xml) and triggers a driver reload so the
+	// new adapter caps take effect.
+	auto handleVrr = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"Vrr", "VRR Enabled", "VRR Disabled");
+	};
+
+	// Hot-switch the EDID profile (Auto / Legacy / Modern). Updates the
+	// vdd_settings.xml on disk so the choice survives driver reloads, then
+	// re-applies the new value (resolving Auto via host OS detection). Newly
+	// created monitors will pick up the new EDID bytes via GetHardcodedEdid;
+	// existing monitors keep their current bytes until recreated.
+	auto handleEdidProfile = [](HANDLE /*hPipe*/, wchar_t *param)
+	{
+		if (!param || *param == 0)
+		{
+			vddlog("e", "EDIDPROFILE requires a value: auto | legacy | modern");
+			return;
+		}
+		std::wstring requested(param);
+		// Validate by parse; reject unknown spellings to surface typos.
+		auto parsed = VddEdid::ProfileFromString(requested);
+		if (parsed == VddEdid::Profile::Auto && requested.find(L"auto") == std::wstring::npos &&
+		    requested.find(L"AUTO") == std::wstring::npos && requested.find(L"Auto") == std::wstring::npos)
+		{
+			vddlog("e", "EDIDPROFILE: unknown value (expected auto | legacy | modern)");
+			return;
+		}
+		// In-memory only: persisting requires a string-valued XML writer
+		// which the codebase does not yet expose (UpdateXmlToggleSetting
+		// is bool-only). Set vdd_settings.xml manually if you want the
+		// choice to survive a driver reload.
+		ApplyEdidProfileSetting(requested);
+		vddlog("c", "EDID profile updated; recreate monitors to take effect");
+	};
+
 	auto handleHardwareCursor = [](HANDLE hPipe, wchar_t *param)
 	{
 		toggleSettingImpl(hPipe, param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
@@ -1837,6 +2060,93 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		vddlog("e", narrowString.c_str());
 	};
 
+	auto handleRefreshModes = [](HANDLE, wchar_t *)
+	{
+		if (g_GlobalDevice == nullptr)
+		{
+			vddlog("e", "REFRESHMODES: global device not initialized");
+			return;
+		}
+		lock_guard<mutex> lock(g_Mutex);
+		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+		if (!pContext || !pContext->pContext)
+		{
+			vddlog("e", "REFRESHMODES: invalid device context");
+			return;
+		}
+		int n = pContext->pContext->RefreshMonitorModes();
+		stringstream ss;
+		ss << "REFRESHMODES: refreshed " << n << " monitor(s) without departure";
+		vddlog("i", ss.str().c_str());
+	};
+
+	// SETMODES <W>x<H>x<R>[,<W>x<H>x<R>...]
+	// Replaces the live monitorModes list (in-memory only; not persisted to XML)
+	// and immediately pushes it to all live monitors via RefreshMonitorModes().
+	// Allows clients (Sunshine etc.) to negotiate exact session resolution
+	// without triggering monitor departure / DWM window rearrangement.
+	auto handleSetModes = [](HANDLE, wchar_t *param)
+	{
+		if (param == nullptr || *param == L'\0')
+		{
+			vddlog("e", "SETMODES: empty parameter");
+			return;
+		}
+
+		// Parse comma-separated list of WxHxR tokens
+		std::vector<std::tuple<int, int, int, int>> parsed;
+		std::wstring input(param);
+		size_t pos = 0;
+		while (pos < input.size())
+		{
+			size_t comma = input.find(L',', pos);
+			std::wstring token = input.substr(pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos);
+			pos = (comma == std::wstring::npos) ? input.size() : comma + 1;
+
+			int w = 0, h = 0, r = 0;
+			if (swscanf_s(token.c_str(), L"%dx%dx%d", &w, &h, &r) == 3 && w > 0 && h > 0 && r > 0)
+			{
+				int vnum = 0, vden = 0;
+				float_to_vsync(static_cast<float>(r), vnum, vden);
+				parsed.emplace_back(w, h, vnum, vden);
+			}
+			else
+			{
+				stringstream ss;
+				ss << "SETMODES: skipping malformed token '" << WStringToString(token) << "'";
+				vddlog("w", ss.str().c_str());
+			}
+		}
+
+		if (parsed.empty())
+		{
+			vddlog("e", "SETMODES: no valid modes parsed; aborting");
+			return;
+		}
+
+		{
+			lock_guard<mutex> dataLock(g_DataMutex);
+			monitorModes = parsed;
+		}
+		stringstream ss;
+		ss << "SETMODES: applied " << parsed.size() << " modes (in-memory only)";
+		vddlog("i", ss.str().c_str());
+
+		// Push to live monitors without departure
+		if (g_GlobalDevice != nullptr)
+		{
+			lock_guard<mutex> lock(g_Mutex);
+			auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+			if (pContext && pContext->pContext)
+			{
+				int n = pContext->pContext->RefreshMonitorModes();
+				stringstream s2;
+				s2 << "SETMODES: pushed to " << n << " live monitor(s)";
+				vddlog("i", s2.str().c_str());
+			}
+		}
+	};
+
 	Command commands[] = {
 		{L"RELOAD_DRIVER", 13, handleReloadDriver},
 		{L"LOG_DEBUG", 9, handleLogDebug},
@@ -1846,6 +2156,8 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		{L"CUSTOMEDID", 10, handleCustomEdid},
 		{L"PREVENTSPOOF", 12, handlePreventSpoof},
 		{L"CEAOVERRIDE", 11, handleCeaOverride},
+		{L"EDIDPROFILE", 11, handleEdidProfile},
+		{L"VRR", 3, handleVrr},
 		{L"HARDWARECURSOR", 14, handleHardwareCursor},
 		{L"D3DDEVICEGPU", 12, handleD3DDeviceGPU},
 		{L"IDDCXVERSION", 12, handleIddCxVersion},
@@ -1855,6 +2167,8 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		{L"SETDISPLAYCOUNT", 15, handleSetDisplayCount},
 		{L"GETSETTINGS", 11, handleGetSettings},
 		{L"PING", 4, handlePing},
+		{L"REFRESHMODES", 12, handleRefreshModes},
+		{L"SETMODES", 8, handleSetModes},
 		{L"CREATEMONITOR", 13, handleCreateMonitor},
 		{L"DESTROYMONITOR", 14, handleDestroyMonitor},
 		{nullptr, 0, handleUnknownCommand}};
@@ -2233,6 +2547,13 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
 	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
 	ColourFormat = GetStringSetting(L"ColourFormat");
+
+	// EDID profile: Auto -> resolved via host OS build number (issue #612).
+	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));
+
+	// VRR / FreeSync: behavioural change, default OFF until EDID FreeSync
+	// Range Block also lands (see ROADMAP P1).
+	vrrEnabled = EnabledQuery(L"VrrEnabled");
 
 	// Cursor
 	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
@@ -3817,12 +4138,14 @@ constexpr DISPLAYCONFIG_VIDEO_SIGNAL_INFO dispinfo(UINT32 h, UINT32 v, UINT32 rn
 		DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE};
 }
 
-// Get default EDID from external header file
-// This function returns a cached copy to avoid repeated allocations
+// Get default EDID from external header file.
+// Returns a fresh copy keyed on the currently selected profile so a runtime
+// EDIDPROFILE switch takes effect on the next monitor creation without
+// requiring driver reload.
 vector<BYTE> GetHardcodedEdid()
 {
-	static vector<BYTE> cachedEdid = GetDefaultEdid();
-	return cachedEdid;
+	auto profile = static_cast<VddEdid::Profile>(gEdidProfile.load());
+	return VddEdid::GetDefaultEdid(profile);
 }
 
 void modifyEdid(vector<BYTE> &edid)
@@ -4029,6 +4352,67 @@ void updateEdidHdrMetadata(vector<BYTE> &edid, float maxNits, float minNits, flo
 	}
 
 	vddlog("w", "HDR Static Metadata block not found in EDID");
+}
+
+// Update AMD FreeSync VSDB rate range in EDID CEA extension.
+// AMD FreeSync VSDB layout (after CEA tag/length header byte):
+//   OUI bytes 0..2 = 0x1A, 0x00, 0x00 (little-endian 0x00001A = AMD)
+//   payload[0] = version (e.g. 0x01)
+//   payload[1] = caps (bit0 = FreeSync supported)
+//   payload[2] = min refresh rate (Hz)
+//   payload[3] = max refresh rate (Hz)
+//   payload[4] = flags
+// Both min and max are clamped to [1, 255]; min<=max enforced.
+// Updates CEA extension checksum on success.
+void updateEdidFreeSyncRange(vector<BYTE> &edid, BYTE minHz, BYTE maxHz)
+{
+	if (edid.size() < 256)
+	{
+		vddlog("w", "EDID too small to update FreeSync range");
+		return;
+	}
+	if (minHz < 1) minHz = 1;
+	if (maxHz < minHz) maxHz = minHz;
+
+	const int ceaStart = 128;
+	int dtdOffset = edid[ceaStart + 2];
+	if (dtdOffset == 0)
+		dtdOffset = 4;
+	const int endPos = ceaStart + dtdOffset;
+
+	for (int pos = ceaStart + 4; pos < endPos && pos < 256;)
+	{
+		const BYTE header = edid[pos];
+		const int tag = (header >> 5) & 0x07;
+		const int length = header & 0x1F;
+
+		// Vendor-Specific Data Block (tag 0x03), need at least 3 OUI bytes
+		if (tag == 0x03 && length >= 3 && (pos + 3) < 256)
+		{
+			// OUI is little-endian in EDID stream: bytes 1..3 = LSB..MSB
+			if (edid[pos + 1] == 0x1A && edid[pos + 2] == 0x00 && edid[pos + 3] == 0x00)
+			{
+				// AMD FreeSync VSDB: need payload bytes 0..3 (min/max at +6/+7)
+				if (length >= 7 && (pos + 7) < 256)
+				{
+					BYTE oldMin = edid[pos + 6];
+					BYTE oldMax = edid[pos + 7];
+					edid[pos + 6] = minHz;
+					edid[pos + 7] = maxHz;
+					edid[255] = calculateCeaChecksum(edid);
+					stringstream ss;
+					ss << "FreeSync VSDB rate range " << (int)oldMin << "-" << (int)oldMax
+					   << " Hz -> " << (int)minHz << "-" << (int)maxHz << " Hz";
+					vddlog("d", ss.str().c_str());
+					return;
+				}
+				vddlog("w", "AMD FreeSync VSDB found but length too small for rate range");
+				return;
+			}
+		}
+		pos += length + 1;
+	}
+	vddlog("w", "AMD FreeSync VSDB not found in EDID");
 }
 
 vector<BYTE> loadEdid(const string &filePath)
@@ -4336,6 +4720,23 @@ void IndirectDeviceContext::InitAdapter()
 		logStream << "FP16 processing capability detected.";
 	}
 
+	// VRR / FreeSync support flag (IddCx >= 1.4). The flag value 0x4 is
+	// stable across SDK versions; older WDKs that don't ship the macro fall
+	// back to the literal so the build stays portable. IddCx hosts that
+	// don't understand the bit just ignore it, so this is safe.
+	if (vrrEnabled.load())
+	{
+#ifdef IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
+		AdapterCaps.Flags = static_cast<IDDCX_ADAPTER_FLAGS>(
+			static_cast<UINT>(AdapterCaps.Flags) |
+			static_cast<UINT>(IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED));
+#else
+		AdapterCaps.Flags = static_cast<IDDCX_ADAPTER_FLAGS>(
+			static_cast<UINT>(AdapterCaps.Flags) | 0x4u); // VARIABLE_REFRESH_RATE_SUPPORTED
+#endif
+		logStream << " VRR adapter flag enabled.";
+	}
+
 	// Validate and set monitor count with bounds checking
 	if (numVirtualDisplays == 0 || numVirtualDisplays > 16)
 	{
@@ -4475,6 +4876,29 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	WDF_OBJECT_ATTRIBUTES Attr;
 	WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectDeviceContextWrapper);
 
+	// Compute current max refresh rate from monitorModes for FreeSync VSDB rate range.
+	// Min stays at 48 Hz (typical FreeSync floor; OS LFC handles below).
+	BYTE freeSyncMinHz = 48;
+	BYTE freeSyncMaxHz = 60;
+	{
+		lock_guard<mutex> dataLock(g_DataMutex);
+		float maxHz = 0.0f;
+		for (const auto &m : monitorModes)
+		{
+			int num = std::get<2>(m);
+			int den = std::get<3>(m);
+			if (den > 0)
+			{
+				float hz = static_cast<float>(num) / static_cast<float>(den);
+				if (hz > maxHz) maxHz = hz;
+			}
+		}
+		int rounded = static_cast<int>(maxHz + 0.5f);
+		if (rounded < freeSyncMinHz) rounded = freeSyncMinHz;
+		if (rounded > 255) rounded = 255;
+		freeSyncMaxHz = static_cast<BYTE>(rounded);
+	}
+
 	// Get or create EDID for this client GUID
 	// Use static storage to ensure EDID data persists for the lifetime of the monitor
 	vector<BYTE> *pMonitorEdid = nullptr;
@@ -4492,6 +4916,9 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 
 			// Update HDR metadata in EDID with new luminance values
 			updateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
+
+			// Update FreeSync VSDB rate range to match current mode list
+			updateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
 
 			// Update physical size in EDID if provided
 			if (widthCm > 0 || heightCm > 0)
@@ -4514,6 +4941,9 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			// Update HDR metadata in EDID with luminance values
 			updateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
 
+			// Update FreeSync VSDB rate range to match current mode list
+			updateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
+
 			// Update physical size in EDID if provided
 			if (widthCm > 0 || heightCm > 0)
 			{
@@ -4535,6 +4965,9 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		// Note: For monitors without GUID, we update the shared EDID
 		// This might affect other monitors using the same EDID
 		updateEdidHdrMetadata(s_KnownMonitorEdid, maxNits, minNits, maxFALL);
+
+		// Update FreeSync VSDB rate range to match current mode list
+		updateEdidFreeSyncRange(s_KnownMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
 
 		// Update physical size in EDID if provided
 		if (widthCm > 0 || heightCm > 0)
@@ -5094,6 +5527,93 @@ void IndirectDeviceContext::DestroyAllMonitors()
 			Sleep(50);
 		}
 	}
+}
+
+int IndirectDeviceContext::RefreshMonitorModes()
+{
+	// Forward declaration: defined later in this TU.
+	void CreateTargetMode2(IDDCX_TARGET_MODE2 & Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen);
+
+	// Push the current monitorModes snapshot to all live IDDCX_MONITOR objects
+	// via IddCxMonitorUpdateModes2. This avoids the DWM window rearrangement
+	// triggered by full monitor departure + arrival when only the mode list
+	// (resolution / refresh rate set) changes.
+	//
+	// Returns: number of monitors successfully refreshed, or -1 if the IddCx
+	// runtime does not export IddCxMonitorUpdateModes2 (older OS / SDK).
+	if (!IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorUpdateModes2))
+	{
+		vddlog("w", "RefreshMonitorModes: IddCxMonitorUpdateModes2 not available on this OS");
+		return -1;
+	}
+
+	// Snapshot mode list under data lock and rebuild s_KnownMonitorModes2
+	vector<tuple<int, int, int, int>> localModes;
+	{
+		lock_guard<mutex> dataLock(g_DataMutex);
+		localModes = monitorModes;
+		s_KnownMonitorModes2.clear();
+		for (size_t i = 0; i < localModes.size(); ++i)
+		{
+			s_KnownMonitorModes2.push_back(dispinfo(
+				std::get<0>(localModes[i]),
+				std::get<1>(localModes[i]),
+				std::get<2>(localModes[i]),
+				std::get<3>(localModes[i])));
+		}
+	}
+
+	if (localModes.empty())
+	{
+		vddlog("w", "RefreshMonitorModes: monitorModes is empty, refusing to push");
+		return 0;
+	}
+
+	// Build IDDCX_TARGET_MODE2 array once - same payload for every monitor.
+	vector<IDDCX_TARGET_MODE2> targetModes(localModes.size());
+	for (size_t i = 0; i < localModes.size(); ++i)
+	{
+		CreateTargetMode2(targetModes[i],
+			static_cast<UINT>(std::get<0>(localModes[i])),
+			static_cast<UINT>(std::get<1>(localModes[i])),
+			static_cast<UINT>(std::get<2>(localModes[i])),
+			static_cast<UINT>(std::get<3>(localModes[i])));
+	}
+
+	// Iterate live monitors under monitor lock and push the new mode list.
+	int refreshed = 0;
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+	for (const auto &pair : m_Monitors)
+	{
+		IDDCX_MONITOR hMonitor = pair.second;
+		if (hMonitor == nullptr)
+			continue;
+
+		IDARG_IN_UPDATEMODES2 inArgs = {};
+		inArgs.Reason = IDDCX_UPDATE_REASON_OTHER;
+		inArgs.TargetModeCount = static_cast<UINT>(targetModes.size());
+		inArgs.pTargetModes = targetModes.data();
+
+		NTSTATUS status = IddCxMonitorUpdateModes2(hMonitor, &inArgs);
+		stringstream ss;
+		ss << "RefreshMonitorModes: monitor index=" << pair.first
+		   << " status=0x" << std::hex << status << " modeCount=" << std::dec << targetModes.size();
+		if (NT_SUCCESS(status))
+		{
+			++refreshed;
+			vddlog("d", ss.str().c_str());
+		}
+		else
+		{
+			vddlog("w", ss.str().c_str());
+		}
+	}
+
+	stringstream summary;
+	summary << "RefreshMonitorModes: pushed " << refreshed << "/" << m_Monitors.size()
+	        << " monitors with " << targetModes.size() << " modes (no departure)";
+	vddlog("i", summary.str().c_str());
+	return refreshed;
 }
 
 #pragma endregion

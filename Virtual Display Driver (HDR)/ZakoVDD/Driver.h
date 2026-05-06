@@ -117,6 +117,11 @@ namespace Microsoft
             void UnassignAllSwapChains();
             void DestroyAllMonitors();
 
+            // Push current monitorModes to all live monitors via IddCxMonitorUpdateModes2,
+            // avoiding monitor departure/arrival (DWM window rearrangement).
+            // Returns number of monitors successfully refreshed; -1 if API unavailable.
+            int RefreshMonitorModes();
+
         private:
             bool WaitForSystemStabilization(int timeoutMs, const char *operation);
             bool ValidateMonitorState(const char *operation);

@@ -43,6 +43,7 @@
     </ClInclude>
     <ClInclude Include="Driver.h" />
     <ClInclude Include="Trace.h" />
+    <ClInclude Include="EtwTrace.h" />
   </ItemGroup>
   <ItemGroup>
     <Inf Include="ZakoVDD.inf" />

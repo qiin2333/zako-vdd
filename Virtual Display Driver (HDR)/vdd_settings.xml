@@ -101,5 +101,12 @@
 		  modern  -> EDID 1.4 + 10bpc + BT.2020 + Colorimetry CDB (full HDR)
 		Ignored when CustomEdid is enabled.
 		-->
+		<Vrr>false</Vrr>
+		<!--
+		VRR / FreeSync / G-Sync compatible support. When enabled the
+		adapter advertises IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
+		(IddCx >= 1.4). Default OFF until the EDID FreeSync Range Block
+		also lands; some hosts will refuse to enable VRR without it.
+		-->
 	</edid>
 </vdd_settings>

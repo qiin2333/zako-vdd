@@ -166,6 +166,14 @@ std::atomic<bool> customEdid{false};
 // pick up the latest value via GetHardcodedEdid(); existing monitors keep
 // the bytes they were created with until they are recreated.
 std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Modern)};
+
+// Variable Refresh Rate (FreeSync / G-Sync compatible) toggle. When enabled,
+// the adapter caps include IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
+// (added in IddCx 1.4); IddCx silently ignores unknown flag bits on older
+// hosts so this is safe to declare unconditionally, but the user-facing
+// toggle still defaults to OFF until we also publish the EDID FreeSync
+// Range Block (see ROADMAP P1).
+std::atomic<bool> vrrEnabled{false};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
 std::atomic<bool> edidCeaOverride{false};
@@ -204,6 +212,7 @@ std::map<std::wstring, std::pair<std::wstring, std::wstring>> SettingsQueryMap =
 	{L"SDR10Enabled", {L"SDR10BIT", L"SDR10bit"}},
 	{L"ColourFormat", {L"COLOURFORMAT", L"ColourFormat"}},
 	{L"EdidProfile", {L"EDIDPROFILE", L"EdidProfile"}},
+	{L"VrrEnabled", {L"VRR", L"Vrr"}},
 	// Colour End
 };
 
@@ -1578,6 +1587,14 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		toggleSettingImpl(hPipe, param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
 	};
 
+	// VRR adapter flag toggle. Persists via the existing toggleSettingImpl
+	// path (writes to vdd_settings.xml) and triggers a driver reload so the
+	// new adapter caps take effect.
+	auto handleVrr = [](HANDLE hPipe, wchar_t *param)
+	{
+		toggleSettingImpl(hPipe, param, L"Vrr", "VRR Enabled", "VRR Disabled");
+	};
+
 	// Hot-switch the EDID profile (Auto / Legacy / Modern). Updates the
 	// vdd_settings.xml on disk so the choice survives driver reloads, then
 	// re-applies the new value (resolving Auto via host OS detection). Newly
@@ -1939,6 +1956,7 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		{L"PREVENTSPOOF", 12, handlePreventSpoof},
 		{L"CEAOVERRIDE", 11, handleCeaOverride},
 		{L"EDIDPROFILE", 11, handleEdidProfile},
+		{L"VRR", 3, handleVrr},
 		{L"HARDWARECURSOR", 14, handleHardwareCursor},
 		{L"D3DDEVICEGPU", 12, handleD3DDeviceGPU},
 		{L"IDDCXVERSION", 12, handleIddCxVersion},
@@ -2329,6 +2347,10 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 
 	// EDID profile: Auto -> resolved via host OS build number (issue #612).
 	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));
+
+	// VRR / FreeSync: behavioural change, default OFF until EDID FreeSync
+	// Range Block also lands (see ROADMAP P1).
+	vrrEnabled = EnabledQuery(L"VrrEnabled");
 
 	// Cursor
 	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
@@ -4432,6 +4454,20 @@ void IndirectDeviceContext::InitAdapter()
 	{
 		AdapterCaps.Flags = IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16;
 		logStream << "FP16 processing capability detected.";
+	}
+
+	// VRR / FreeSync support flag (IddCx >= 1.4). The flag value 0x4 is
+	// stable across SDK versions; older WDKs that don't ship the macro fall
+	// back to the literal so the build stays portable. IddCx hosts that
+	// don't understand the bit just ignore it, so this is safe.
+	if (vrrEnabled.load())
+	{
+#ifdef IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
+		AdapterCaps.Flags |= IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED;
+#else
+		AdapterCaps.Flags |= 0x4; // VARIABLE_REFRESH_RATE_SUPPORTED
+#endif
+		logStream << " VRR adapter flag enabled.";
 	}
 
 	// Validate and set monitor count with bounds checking

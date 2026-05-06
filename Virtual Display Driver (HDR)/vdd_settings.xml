@@ -93,5 +93,13 @@
 		<!--Enable this to prevent manufacturer spoofing when using custom edid. Please only do so if you need to!-->
 		<EdidCeaOverride>false</EdidCeaOverride>
 		<!--Enable this to override or add hard coded cea-extension block to custom Edid support allowing you to enable HDR-->
+		<EdidProfile>auto</EdidProfile>
+		<!--
+		EDID profile for the built-in default EDID:
+		  auto    -> pick by host OS (Win10 22H2 -> legacy, Win11+ -> modern)
+		  legacy  -> EDID 1.3 base block, broadest compatibility (issue #612)
+		  modern  -> EDID 1.4 + 10bpc + BT.2020 + Colorimetry CDB (full HDR)
+		Ignored when CustomEdid is enabled.
+		-->
 	</edid>
 </vdd_settings>

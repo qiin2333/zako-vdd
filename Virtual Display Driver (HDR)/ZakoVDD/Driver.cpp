@@ -160,6 +160,12 @@ static wstring GetFallbackLogDir()
 std::atomic<bool> HDRPlus{false};
 std::atomic<bool> SDR10{false};
 std::atomic<bool> customEdid{false};
+
+// EDID profile resolved at DriverEntry (Auto -> Legacy/Modern based on host
+// OS) and re-read whenever the IOCTL EDIDPROFILE command lands. New monitors
+// pick up the latest value via GetHardcodedEdid(); existing monitors keep
+// the bytes they were created with until they are recreated.
+std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Modern)};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
 std::atomic<bool> edidCeaOverride{false};
@@ -197,6 +203,7 @@ std::map<std::wstring, std::pair<std::wstring, std::wstring>> SettingsQueryMap =
 	{L"HDRPlusEnabled", {L"HDRPLUS", L"HDRPlus"}},
 	{L"SDR10Enabled", {L"SDR10BIT", L"SDR10bit"}},
 	{L"ColourFormat", {L"COLOURFORMAT", L"ColourFormat"}},
+	{L"EdidProfile", {L"EDIDPROFILE", L"EdidProfile"}},
 	// Colour End
 };
 
@@ -215,6 +222,62 @@ const char *XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level)
 	default:
 		return "Unknown";
 	}
+}
+
+// Resolve Auto EDID profile by querying the host OS build number via
+// ntdll!RtlGetVersion. We avoid GetVersionExW because it lies on Win10+
+// without an explicit application manifest. Build < 22000 is treated as
+// Win10 (or older) and routed to the Legacy profile to dodge issue #612.
+// Anything else (including any future Windows release) gets the Modern
+// profile so HDR / wide gamut declarations stay enabled.
+static VddEdid::Profile DetectAutoEdidProfile()
+{
+	typedef LONG (NTAPI *RtlGetVersionFn)(PRTL_OSVERSIONINFOW);
+	HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+	if (!ntdll)
+	{
+		vddlog("w", "DetectAutoEdidProfile: ntdll handle missing, defaulting to Modern");
+		return VddEdid::Profile::Modern;
+	}
+	auto pRtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+	if (!pRtlGetVersion)
+	{
+		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion missing, defaulting to Modern");
+		return VddEdid::Profile::Modern;
+	}
+	RTL_OSVERSIONINFOW info{};
+	info.dwOSVersionInfoSize = sizeof(info);
+	if (pRtlGetVersion(&info) != 0)
+	{
+		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion failed, defaulting to Modern");
+		return VddEdid::Profile::Modern;
+	}
+	// Win11 starts at build 22000.
+	const bool isWin10OrOlder = (info.dwMajorVersion < 10) ||
+		(info.dwMajorVersion == 10 && info.dwBuildNumber < 22000);
+	stringstream ss;
+	ss << "DetectAutoEdidProfile: build=" << info.dwBuildNumber
+	   << " -> " << (isWin10OrOlder ? "Legacy" : "Modern");
+	vddlog("i", ss.str().c_str());
+	return isWin10OrOlder ? VddEdid::Profile::Legacy : VddEdid::Profile::Modern;
+}
+
+// Apply an EdidProfile setting value (Auto/Legacy/Modern, case-insensitive)
+// to the global gEdidProfile. Auto is resolved here so callers further down
+// can read gEdidProfile without having to repeat OS detection.
+static void ApplyEdidProfileSetting(const std::wstring& settingValue)
+{
+	auto requested = VddEdid::ProfileFromString(settingValue);
+	auto effective = (requested == VddEdid::Profile::Auto)
+		? DetectAutoEdidProfile()
+		: requested;
+	gEdidProfile.store(static_cast<int>(effective));
+	stringstream ss;
+	ss << "EDID profile applied: requested=";
+	ss << WStringToString(VddEdid::ProfileToString(requested));
+	ss << " effective=";
+	ss << WStringToString(VddEdid::ProfileToString(effective));
+	vddlog("i", ss.str().c_str());
 }
 
 vector<unsigned char> Microsoft::IndirectDisp::IndirectDeviceContext::s_KnownMonitorEdid; // Changed to support static vector
@@ -1515,6 +1578,35 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		toggleSettingImpl(hPipe, param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
 	};
 
+	// Hot-switch the EDID profile (Auto / Legacy / Modern). Updates the
+	// vdd_settings.xml on disk so the choice survives driver reloads, then
+	// re-applies the new value (resolving Auto via host OS detection). Newly
+	// created monitors will pick up the new EDID bytes via GetHardcodedEdid;
+	// existing monitors keep their current bytes until recreated.
+	auto handleEdidProfile = [](HANDLE /*hPipe*/, wchar_t *param)
+	{
+		if (!param || *param == 0)
+		{
+			vddlog("e", "EDIDPROFILE requires a value: auto | legacy | modern");
+			return;
+		}
+		std::wstring requested(param);
+		// Validate by parse; reject unknown spellings to surface typos.
+		auto parsed = VddEdid::ProfileFromString(requested);
+		if (parsed == VddEdid::Profile::Auto && requested.find(L"auto") == std::wstring::npos &&
+		    requested.find(L"AUTO") == std::wstring::npos && requested.find(L"Auto") == std::wstring::npos)
+		{
+			vddlog("e", "EDIDPROFILE: unknown value (expected auto | legacy | modern)");
+			return;
+		}
+		// In-memory only: persisting requires a string-valued XML writer
+		// which the codebase does not yet expose (UpdateXmlToggleSetting
+		// is bool-only). Set vdd_settings.xml manually if you want the
+		// choice to survive a driver reload.
+		ApplyEdidProfileSetting(requested);
+		vddlog("c", "EDID profile updated; recreate monitors to take effect");
+	};
+
 	auto handleHardwareCursor = [](HANDLE hPipe, wchar_t *param)
 	{
 		toggleSettingImpl(hPipe, param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
@@ -1846,6 +1938,7 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		{L"CUSTOMEDID", 10, handleCustomEdid},
 		{L"PREVENTSPOOF", 12, handlePreventSpoof},
 		{L"CEAOVERRIDE", 11, handleCeaOverride},
+		{L"EDIDPROFILE", 11, handleEdidProfile},
 		{L"HARDWARECURSOR", 14, handleHardwareCursor},
 		{L"D3DDEVICEGPU", 12, handleD3DDeviceGPU},
 		{L"IDDCXVERSION", 12, handleIddCxVersion},
@@ -2233,6 +2326,9 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
 	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
 	ColourFormat = GetStringSetting(L"ColourFormat");
+
+	// EDID profile: Auto -> resolved via host OS build number (issue #612).
+	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));
 
 	// Cursor
 	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
@@ -3817,12 +3913,14 @@ constexpr DISPLAYCONFIG_VIDEO_SIGNAL_INFO dispinfo(UINT32 h, UINT32 v, UINT32 rn
 		DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE};
 }
 
-// Get default EDID from external header file
-// This function returns a cached copy to avoid repeated allocations
+// Get default EDID from external header file.
+// Returns a fresh copy keyed on the currently selected profile so a runtime
+// EDIDPROFILE switch takes effect on the next monitor creation without
+// requiring driver reload.
 vector<BYTE> GetHardcodedEdid()
 {
-	static vector<BYTE> cachedEdid = GetDefaultEdid();
-	return cachedEdid;
+	auto profile = static_cast<VddEdid::Profile>(gEdidProfile.load());
+	return VddEdid::GetDefaultEdid(profile);
 }
 
 void modifyEdid(vector<BYTE> &edid)

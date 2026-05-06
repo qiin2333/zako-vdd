@@ -4151,6 +4151,67 @@ void updateEdidHdrMetadata(vector<BYTE> &edid, float maxNits, float minNits, flo
 	vddlog("w", "HDR Static Metadata block not found in EDID");
 }
 
+// Update AMD FreeSync VSDB rate range in EDID CEA extension.
+// AMD FreeSync VSDB layout (after CEA tag/length header byte):
+//   OUI bytes 0..2 = 0x1A, 0x00, 0x00 (little-endian 0x00001A = AMD)
+//   payload[0] = version (e.g. 0x01)
+//   payload[1] = caps (bit0 = FreeSync supported)
+//   payload[2] = min refresh rate (Hz)
+//   payload[3] = max refresh rate (Hz)
+//   payload[4] = flags
+// Both min and max are clamped to [1, 255]; min<=max enforced.
+// Updates CEA extension checksum on success.
+void updateEdidFreeSyncRange(vector<BYTE> &edid, BYTE minHz, BYTE maxHz)
+{
+	if (edid.size() < 256)
+	{
+		vddlog("w", "EDID too small to update FreeSync range");
+		return;
+	}
+	if (minHz < 1) minHz = 1;
+	if (maxHz < minHz) maxHz = minHz;
+
+	const int ceaStart = 128;
+	int dtdOffset = edid[ceaStart + 2];
+	if (dtdOffset == 0)
+		dtdOffset = 4;
+	const int endPos = ceaStart + dtdOffset;
+
+	for (int pos = ceaStart + 4; pos < endPos && pos < 256;)
+	{
+		const BYTE header = edid[pos];
+		const int tag = (header >> 5) & 0x07;
+		const int length = header & 0x1F;
+
+		// Vendor-Specific Data Block (tag 0x03), need at least 3 OUI bytes
+		if (tag == 0x03 && length >= 3 && (pos + 3) < 256)
+		{
+			// OUI is little-endian in EDID stream: bytes 1..3 = LSB..MSB
+			if (edid[pos + 1] == 0x1A && edid[pos + 2] == 0x00 && edid[pos + 3] == 0x00)
+			{
+				// AMD FreeSync VSDB: need payload bytes 0..3 (min/max at +6/+7)
+				if (length >= 7 && (pos + 7) < 256)
+				{
+					BYTE oldMin = edid[pos + 6];
+					BYTE oldMax = edid[pos + 7];
+					edid[pos + 6] = minHz;
+					edid[pos + 7] = maxHz;
+					edid[255] = calculateCeaChecksum(edid);
+					stringstream ss;
+					ss << "FreeSync VSDB rate range " << (int)oldMin << "-" << (int)oldMax
+					   << " Hz -> " << (int)minHz << "-" << (int)maxHz << " Hz";
+					vddlog("d", ss.str().c_str());
+					return;
+				}
+				vddlog("w", "AMD FreeSync VSDB found but length too small for rate range");
+				return;
+			}
+		}
+		pos += length + 1;
+	}
+	vddlog("w", "AMD FreeSync VSDB not found in EDID");
+}
+
 vector<BYTE> loadEdid(const string &filePath)
 {
 	vector<BYTE> hardcodedEdid = GetHardcodedEdid();
@@ -4609,6 +4670,29 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	WDF_OBJECT_ATTRIBUTES Attr;
 	WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectDeviceContextWrapper);
 
+	// Compute current max refresh rate from monitorModes for FreeSync VSDB rate range.
+	// Min stays at 48 Hz (typical FreeSync floor; OS LFC handles below).
+	BYTE freeSyncMinHz = 48;
+	BYTE freeSyncMaxHz = 60;
+	{
+		lock_guard<mutex> dataLock(g_DataMutex);
+		float maxHz = 0.0f;
+		for (const auto &m : monitorModes)
+		{
+			int num = std::get<2>(m);
+			int den = std::get<3>(m);
+			if (den > 0)
+			{
+				float hz = static_cast<float>(num) / static_cast<float>(den);
+				if (hz > maxHz) maxHz = hz;
+			}
+		}
+		int rounded = static_cast<int>(maxHz + 0.5f);
+		if (rounded < freeSyncMinHz) rounded = freeSyncMinHz;
+		if (rounded > 255) rounded = 255;
+		freeSyncMaxHz = static_cast<BYTE>(rounded);
+	}
+
 	// Get or create EDID for this client GUID
 	// Use static storage to ensure EDID data persists for the lifetime of the monitor
 	vector<BYTE> *pMonitorEdid = nullptr;
@@ -4626,6 +4710,9 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 
 			// Update HDR metadata in EDID with new luminance values
 			updateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
+
+			// Update FreeSync VSDB rate range to match current mode list
+			updateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
 
 			// Update physical size in EDID if provided
 			if (widthCm > 0 || heightCm > 0)
@@ -4648,6 +4735,9 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			// Update HDR metadata in EDID with luminance values
 			updateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
 
+			// Update FreeSync VSDB rate range to match current mode list
+			updateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
+
 			// Update physical size in EDID if provided
 			if (widthCm > 0 || heightCm > 0)
 			{
@@ -4669,6 +4759,9 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		// Note: For monitors without GUID, we update the shared EDID
 		// This might affect other monitors using the same EDID
 		updateEdidHdrMetadata(s_KnownMonitorEdid, maxNits, minNits, maxFALL);
+
+		// Update FreeSync VSDB rate range to match current mode list
+		updateEdidFreeSyncRange(s_KnownMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
 
 		// Update physical size in EDID if provided
 		if (widthCm > 0 || heightCm > 0)

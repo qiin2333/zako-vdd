@@ -15,6 +15,7 @@ Environment:
 #include "Driver.h"
 // #include "Driver.tmh"
 #include "DefaultEdid.h"
+#include "EtwTrace.h"
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -276,6 +277,9 @@ static VddEdid::Profile DetectAutoEdidProfile()
 // can read gEdidProfile without having to repeat OS detection.
 static void ApplyEdidProfileSetting(const std::wstring& settingValue)
 {
+	// Forward declaration: WStringToString is defined later in this TU.
+	extern std::string WStringToString(const std::wstring &wstr);
+
 	auto requested = VddEdid::ProfileFromString(settingValue);
 	auto effective = (requested == VddEdid::Profile::Auto)
 		? DetectAutoEdidProfile()
@@ -700,6 +704,11 @@ void SendToPipe(const std::string &logMessage)
 
 void vddlog(const char *type, const char *message)
 {
+	// Emit to ETW first - independent of file-logging toggle. TraceLogging
+	// becomes a no-op when no listening session is enabled, so this is
+	// effectively free in steady state.
+	VddEtwLog(type, message);
+
 	// Early return if logging is disabled - check before any string operations
 	if (!logsEnabled)
 	{
@@ -941,6 +950,102 @@ void InitializeD3DDeviceAndLogGPU()
 // This macro creates the methods for accessing an IndirectDeviceContextWrapper as a context for a WDF object
 WDF_DECLARE_CONTEXT_TYPE(IndirectDeviceContextWrapper);
 
+// =====================================================================
+// TraceLogging ETW provider (modern, header-only path).
+// Defined exactly once in this TU.
+// Provider: ZakoTech.VDD  GUID: {B254994F-46E6-4719-80A0-0A3AA50D6CE5}
+// =====================================================================
+TRACELOGGING_DEFINE_PROVIDER(
+	g_VddEtwProvider,
+	"ZakoTech.VDD",
+	(0xb254994f, 0x46e6, 0x4719, 0x80, 0xa0, 0x0a, 0x3a, 0xa5, 0x0d, 0x6c, 0xe5));
+
+void VddEtwRegister()
+{
+	TraceLoggingRegister(g_VddEtwProvider);
+}
+
+void VddEtwUnregister()
+{
+	TraceLoggingUnregister(g_VddEtwProvider);
+}
+
+// Map vddlog single-char type code to ETW level.
+// e:Error  w:Warning  i/c:Info  d/p/t:Verbose  default:Info
+static UCHAR VddTypeToEtwLevel(const char *type)
+{
+	if (type == nullptr || type[0] == '\0') return WINEVENT_LEVEL_INFO;
+	switch (type[0])
+	{
+	case 'e': return WINEVENT_LEVEL_ERROR;
+	case 'w': return WINEVENT_LEVEL_WARNING;
+	case 'i':
+	case 'c': return WINEVENT_LEVEL_INFO;
+	case 'd':
+	case 'p':
+	case 't': return WINEVENT_LEVEL_VERBOSE;
+	default: return WINEVENT_LEVEL_INFO;
+	}
+}
+
+static const char *VddTypeToCategory(const char *type)
+{
+	if (type == nullptr || type[0] == '\0') return "log";
+	switch (type[0])
+	{
+	case 'e': return "error";
+	case 'w': return "warning";
+	case 'i': return "info";
+	case 'c': return "companion";
+	case 'd': return "debug";
+	case 'p': return "pipe";
+	case 't': return "test";
+	default:  return "log";
+	}
+}
+
+void VddEtwLog(const char *type, const char *message)
+{
+	if (message == nullptr) return;
+
+	// Cheap fast path: no consumer => entire write is a no-op.
+	if (!TraceLoggingProviderEnabled(g_VddEtwProvider, 0, 0))
+		return;
+
+	const UCHAR level = VddTypeToEtwLevel(type);
+	const char *category = VddTypeToCategory(type);
+
+	// TraceLoggingLevel() requires a compile-time constant, so dispatch
+	// to one TraceLoggingWrite call per supported level.
+	switch (level)
+	{
+	case WINEVENT_LEVEL_ERROR:
+		TraceLoggingWrite(g_VddEtwProvider, "VddLog",
+			TraceLoggingLevel(WINEVENT_LEVEL_ERROR),
+			TraceLoggingString(category, "Category"),
+			TraceLoggingString(message, "Message"));
+		break;
+	case WINEVENT_LEVEL_WARNING:
+		TraceLoggingWrite(g_VddEtwProvider, "VddLog",
+			TraceLoggingLevel(WINEVENT_LEVEL_WARNING),
+			TraceLoggingString(category, "Category"),
+			TraceLoggingString(message, "Message"));
+		break;
+	case WINEVENT_LEVEL_VERBOSE:
+		TraceLoggingWrite(g_VddEtwProvider, "VddLog",
+			TraceLoggingLevel(WINEVENT_LEVEL_VERBOSE),
+			TraceLoggingString(category, "Category"),
+			TraceLoggingString(message, "Message"));
+		break;
+	default:
+		TraceLoggingWrite(g_VddEtwProvider, "VddLog",
+			TraceLoggingLevel(WINEVENT_LEVEL_INFO),
+			TraceLoggingString(category, "Category"),
+			TraceLoggingString(message, "Message"));
+		break;
+	}
+}
+
 extern "C" BOOL WINAPI DllMain(
 	_In_ HINSTANCE hInstance,
 	_In_ UINT dwReason,
@@ -948,7 +1053,16 @@ extern "C" BOOL WINAPI DllMain(
 {
 	UNREFERENCED_PARAMETER(hInstance);
 	UNREFERENCED_PARAMETER(lpReserved);
-	UNREFERENCED_PARAMETER(dwReason);
+
+	switch (dwReason)
+	{
+	case DLL_PROCESS_ATTACH:
+		VddEtwRegister();
+		break;
+	case DLL_PROCESS_DETACH:
+		VddEtwUnregister();
+		break;
+	}
 
 	return TRUE;
 }
@@ -4613,9 +4727,12 @@ void IndirectDeviceContext::InitAdapter()
 	if (vrrEnabled.load())
 	{
 #ifdef IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
-		AdapterCaps.Flags |= IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED;
+		AdapterCaps.Flags = static_cast<IDDCX_ADAPTER_FLAGS>(
+			static_cast<UINT>(AdapterCaps.Flags) |
+			static_cast<UINT>(IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED));
 #else
-		AdapterCaps.Flags |= 0x4; // VARIABLE_REFRESH_RATE_SUPPORTED
+		AdapterCaps.Flags = static_cast<IDDCX_ADAPTER_FLAGS>(
+			static_cast<UINT>(AdapterCaps.Flags) | 0x4u); // VARIABLE_REFRESH_RATE_SUPPORTED
 #endif
 		logStream << " VRR adapter flag enabled.";
 	}
@@ -5414,6 +5531,9 @@ void IndirectDeviceContext::DestroyAllMonitors()
 
 int IndirectDeviceContext::RefreshMonitorModes()
 {
+	// Forward declaration: defined later in this TU.
+	void CreateTargetMode2(IDDCX_TARGET_MODE2 & Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen);
+
 	// Push the current monitorModes snapshot to all live IDDCX_MONITOR objects
 	// via IddCxMonitorUpdateModes2. This avoids the DWM window rearrangement
 	// triggered by full monitor departure + arrival when only the mode list

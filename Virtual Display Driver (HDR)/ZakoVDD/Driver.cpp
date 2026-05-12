@@ -166,7 +166,7 @@ std::atomic<bool> customEdid{false};
 // OS) and re-read whenever the IOCTL EDIDPROFILE command lands. New monitors
 // pick up the latest value via GetHardcodedEdid(); existing monitors keep
 // the bytes they were created with until they are recreated.
-std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Modern)};
+std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Legacy)};
 
 // Variable Refresh Rate (FreeSync / G-Sync compatible) toggle. When enabled,
 // the adapter caps include IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
@@ -238,29 +238,30 @@ const char *XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level)
 // ntdll!RtlGetVersion. We avoid GetVersionExW because it lies on Win10+
 // without an explicit application manifest. Build < 22000 is treated as
 // Win10 (or older) and routed to the Legacy profile to dodge issue #612.
-// Anything else (including any future Windows release) gets the Modern
-// profile so HDR / wide gamut declarations stay enabled.
+// Successful detection of Win11+ keeps the Modern profile for full HDR /
+// wide-gamut declarations, but any probe failure falls back to Legacy so
+// unknown hosts land on the compatibility-safe side.
 static VddEdid::Profile DetectAutoEdidProfile()
 {
 	typedef LONG (NTAPI *RtlGetVersionFn)(PRTL_OSVERSIONINFOW);
 	HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
 	if (!ntdll)
 	{
-		vddlog("w", "DetectAutoEdidProfile: ntdll handle missing, defaulting to Modern");
-		return VddEdid::Profile::Modern;
+		vddlog("w", "DetectAutoEdidProfile: ntdll handle missing, defaulting to Legacy");
+		return VddEdid::Profile::Legacy;
 	}
 	auto pRtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
 	if (!pRtlGetVersion)
 	{
-		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion missing, defaulting to Modern");
-		return VddEdid::Profile::Modern;
+		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion missing, defaulting to Legacy");
+		return VddEdid::Profile::Legacy;
 	}
 	RTL_OSVERSIONINFOW info{};
 	info.dwOSVersionInfoSize = sizeof(info);
 	if (pRtlGetVersion(&info) != 0)
 	{
-		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion failed, defaulting to Modern");
-		return VddEdid::Profile::Modern;
+		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion failed, defaulting to Legacy");
+		return VddEdid::Profile::Legacy;
 	}
 	// Win11 starts at build 22000.
 	const bool isWin10OrOlder = (info.dwMajorVersion < 10) ||

@@ -96,7 +96,8 @@
 		<EdidProfile>auto</EdidProfile>
 		<!--
 		EDID profile for the built-in default EDID:
-		  auto    -> pick by host OS (Win10 22H2 -> legacy, Win11+ -> modern)
+		  auto    -> pick by host OS (Win10 22H2 -> legacy, Win11+ -> modern,
+		             detection failures also fall back to legacy)
 		  legacy  -> EDID 1.3 base block, broadest compatibility (issue #612)
 		  modern  -> EDID 1.4 + 10bpc + BT.2020 + Colorimetry CDB (full HDR)
 		Ignored when CustomEdid is enabled.

@@ -119,9 +119,9 @@ inline const wchar_t* ProfileToString(Profile p) {
 // ---- Backwards-compatible globals (legacy callers) ----------------------
 // Preserved so out-of-tree forks keep compiling. New code should call
 // VddEdid::GetDefaultEdid(profile) explicitly.
-constexpr const BYTE* DEFAULT_EDID_DATA = VddEdid::DEFAULT_EDID_DATA_MODERN;
+constexpr const BYTE* DEFAULT_EDID_DATA = VddEdid::DEFAULT_EDID_DATA_LEGACY;
 
 inline std::vector<BYTE> GetDefaultEdid() {
-    return VddEdid::GetDefaultEdid(VddEdid::Profile::Modern);
+    return VddEdid::GetDefaultEdid(VddEdid::Profile::Legacy);
 }
 

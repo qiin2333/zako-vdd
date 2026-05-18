@@ -3716,14 +3716,423 @@ private:
     float m_PendingMaxFALL = 0.0f;
 };
 
+// =============================================================================
+// CursorExporter
+// -----------------------------------------------------------------------------
+// Mirrors the IddCx hardware cursor (which lives in an out-of-band overlay
+// channel on the display path, NOT in the framebuffer surface that
+// SharedFrameExporter copies) into a named shared-memory block so that
+// external consumers (Sunshine display_vdd backend, vdd_capture_test) can
+// composite the cursor onto each captured frame themselves.
+//
+// Per-monitor named objects:
+//   Metadata mapping     : Global\ZakoVDD_CursorMeta_<idx>
+//   Cursor-update event  : Global\ZakoVDD_CursorReady_<idx>
+//
+// The metadata mapping is laid out as one CursorSharedMetadata header
+// followed by up to MAX_CURSOR_BYTES of cursor shape pixels (BGRA premul or
+// 1-bit AND/XOR mask depending on ShapeType).
+//
+// The driver-side worker thread waits on the IddCx-provided
+// hNewCursorDataAvailable event (the same handle that was passed to
+// IddCxMonitorSetupHardwareCursor) plus a short fallback timeout. When woken
+// it queries IddCxMonitorQueryHardwareCursor3 (HDR-aware variant) and writes
+// the latest position / shape to the shared metadata. ShapeId / PositionId
+// counters let consumers detect whether they need to re-upload the shape
+// texture or just move the cursor.
+// =============================================================================
+
+static constexpr UINT32 ZAKO_CURSOR_MAGIC      = 0x5A564355u; // 'ZVCU'
+static constexpr UINT32 ZAKO_CURSOR_VERSION    = 1u;
+static constexpr UINT32 ZAKO_CURSOR_MAX_WIDTH  = 256u;
+static constexpr UINT32 ZAKO_CURSOR_MAX_HEIGHT = 256u;
+static constexpr UINT32 ZAKO_CURSOR_MAX_BYTES  = ZAKO_CURSOR_MAX_WIDTH * ZAKO_CURSOR_MAX_HEIGHT * 4u; // 256 KiB
+
+#pragma pack(push, 4)
+struct CursorSharedMetadata
+{
+    UINT32 Magic;            // ZAKO_CURSOR_MAGIC
+    UINT32 Version;          // ZAKO_CURSOR_VERSION
+    UINT32 IsVisible;        // 0/1
+    INT32  PositionX;        // desktop-relative top-left of cursor image (already hot-spot adjusted by OS, same semantics as DXGI PointerPosition.Position.x)
+    INT32  PositionY;        // desktop-relative top-left of cursor image (same semantics as DXGI PointerPosition.Position.y)
+    UINT32 PositionId;       // monotonic, increments on position change
+    UINT32 ShapeId;          // monotonic, increments on shape change
+    UINT32 ShapeType;        // IDDCX_CURSOR_SHAPE_TYPE value (0/1/2)
+    UINT32 Width;
+    UINT32 Height;
+    UINT32 Pitch;            // bytes per row of shape buffer
+    INT32  XHot;
+    INT32  YHot;
+    UINT32 SdrWhiteLevelX1000; // SDR white level multiplied by 1000 (e.g. 80000 = 80 nits)
+    UINT32 ShapeBufferSize;  // bytes valid in shape buffer (<= ZAKO_CURSOR_MAX_BYTES)
+    UINT32 Reserved0;
+    UINT64 LastUpdateQpc;    // QueryPerformanceCounter at last successful update
+    // Followed by ZAKO_CURSOR_MAX_BYTES of shape pixels.
+};
+#pragma pack(pop)
+
+static_assert(sizeof(CursorSharedMetadata) % 4 == 0, "CursorSharedMetadata must be 4-byte aligned");
+
+class CursorExporter
+{
+public:
+    CursorExporter(unsigned int monitorIndex, IDDCX_MONITOR monitor, HANDLE hNewCursorDataAvailable)
+        : m_MonitorIndex(monitorIndex), m_Monitor(monitor), m_hCursorDataAvailable(hNewCursorDataAvailable)
+    {
+    }
+
+    ~CursorExporter()
+    {
+        Stop();
+        Teardown();
+    }
+
+    // Start the worker thread. Safe to call once.
+    bool Start()
+    {
+        if (!m_Monitor || !m_hCursorDataAvailable)
+        {
+            vddlog("w", "[VddCursor] Start skipped: monitor or cursor event not provided");
+            return false;
+        }
+
+        if (!EnsureSharedObjects())
+        {
+            vddlog("e", "[VddCursor] Failed to create cursor shared-memory objects");
+            return false;
+        }
+
+        m_hTerminateEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!m_hTerminateEvent)
+        {
+            vddlog("e", "[VddCursor] CreateEvent (terminate) failed");
+            return false;
+        }
+
+        m_hThread = CreateThread(nullptr, 0, &CursorExporter::ThreadProc, this, 0, nullptr);
+        if (!m_hThread)
+        {
+            vddlog("e", "[VddCursor] CreateThread failed");
+            CloseHandle(m_hTerminateEvent);
+            m_hTerminateEvent = nullptr;
+            return false;
+        }
+
+        std::stringstream ss;
+        ss << "[VddCursor] Started monitor=" << m_MonitorIndex;
+        vddlog("i", ss.str().c_str());
+        return true;
+    }
+
+    void Stop()
+    {
+        if (m_hTerminateEvent)
+        {
+            SetEvent(m_hTerminateEvent);
+        }
+        if (m_hThread)
+        {
+            // Worker is event-driven with short fallback timeout, so a 2s wait is generous.
+            if (WaitForSingleObject(m_hThread, 2000) == WAIT_TIMEOUT)
+            {
+                vddlog("w", "[VddCursor] Worker thread join timed out; abandoning");
+            }
+            CloseHandle(m_hThread);
+            m_hThread = nullptr;
+        }
+        if (m_hTerminateEvent)
+        {
+            CloseHandle(m_hTerminateEvent);
+            m_hTerminateEvent = nullptr;
+        }
+    }
+
+private:
+    static DWORD WINAPI ThreadProc(LPVOID arg)
+    {
+        static_cast<CursorExporter*>(arg)->Run();
+        return 0;
+    }
+
+    void Run()
+    {
+        // Reusable buffer for shape pixel data passed to IddCx.
+        std::vector<BYTE> shapeBuffer(ZAKO_CURSOR_MAX_BYTES);
+
+        UINT lastShapeId = 0;
+        UINT lastPositionId = 0;
+        UINT publishedPositionId = 0;
+
+        HANDLE waits[2] = { m_hCursorDataAvailable, m_hTerminateEvent };
+
+        for (;;)
+        {
+            // 33 ms fallback poll (~30 Hz) so we still pick up visibility flips
+            // even if the IddCx event somehow stops firing during idle periods.
+            DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 33);
+
+            if (wait == WAIT_OBJECT_0 + 1)
+            {
+                // terminate
+                break;
+            }
+
+            // Whether woken or timed out, attempt a query. Cheap when nothing changed.
+            IDARG_IN_QUERY_HWCURSOR inArgs = {};
+            inArgs.LastShapeId = lastShapeId;
+            inArgs.ShapeBufferSizeInBytes = static_cast<UINT>(shapeBuffer.size());
+            inArgs.pShapeBuffer = shapeBuffer.data();
+
+            IDARG_OUT_QUERY_HWCURSOR3 outArgs = {};
+
+            NTSTATUS status = IddCxMonitorQueryHardwareCursor3(m_Monitor, &inArgs, &outArgs);
+            if (!NT_SUCCESS(status))
+            {
+                // STATUS_GRAPHICS_PATH_NOT_IN_TOPOLOGY is a common, transient,
+                // expected condition between mode commits / reloads. Don't spam.
+                continue;
+            }
+
+            const bool shapeUpdated = (outArgs.IsCursorShapeUpdated != FALSE);
+
+            if (shapeUpdated)
+            {
+                lastShapeId = outArgs.CursorShapeInfo.ShapeId;
+                m_CachedShape.ShapeId = outArgs.CursorShapeInfo.ShapeId;
+                m_CachedShape.Type = static_cast<UINT32>(outArgs.CursorShapeInfo.CursorType);
+                m_CachedShape.Width = outArgs.CursorShapeInfo.Width;
+                m_CachedShape.Height = outArgs.CursorShapeInfo.Height;
+                m_CachedShape.Pitch = outArgs.CursorShapeInfo.Pitch;
+                m_CachedShape.XHot = static_cast<INT32>(outArgs.CursorShapeInfo.XHot);
+                m_CachedShape.YHot = static_cast<INT32>(outArgs.CursorShapeInfo.YHot);
+
+                const UINT32 needed = static_cast<UINT32>(outArgs.CursorShapeInfo.Pitch) * outArgs.CursorShapeInfo.Height;
+                m_CachedShape.BufferSize = (needed <= ZAKO_CURSOR_MAX_BYTES) ? needed : 0;
+                if (m_CachedShape.BufferSize > 0)
+                {
+                    m_CachedShape.Buffer.assign(shapeBuffer.begin(),
+                                                shapeBuffer.begin() + m_CachedShape.BufferSize);
+                }
+                else
+                {
+                    m_CachedShape.Buffer.clear();
+                }
+            }
+
+            // outArgs.X / Y are documented as "screen coordinates of the
+            // top-left hand pixel in the cursor image" -- i.e. already
+            // hot-spot adjusted. Do NOT subtract XHot/YHot again.
+            bool positionUpdated = false;
+            if (outArgs.PositionValid)
+            {
+                if (outArgs.PositionId != lastPositionId)
+                {
+                    lastPositionId = outArgs.PositionId;
+                    positionUpdated = true;
+                }
+                m_LastX = outArgs.X;
+                m_LastY = outArgs.Y;
+            }
+
+            // Suppress redundant updates: if nothing has changed since last
+            // publish, don't even pulse the consumer event.
+            const bool visibilityChanged = (m_LastVisibility != (outArgs.IsCursorVisible ? 1u : 0u));
+            if (!shapeUpdated && !positionUpdated && !visibilityChanged)
+            {
+                continue;
+            }
+            m_LastVisibility = outArgs.IsCursorVisible ? 1u : 0u;
+
+            // Write into the shared memory block.
+            if (!m_MetaView)
+            {
+                continue;
+            }
+
+            CursorSharedMetadata snap = {};
+            snap.Magic = ZAKO_CURSOR_MAGIC;
+            snap.Version = ZAKO_CURSOR_VERSION;
+            snap.IsVisible = outArgs.IsCursorVisible ? 1u : 0u;
+            snap.SdrWhiteLevelX1000 = static_cast<UINT32>(outArgs.SdrWhiteLevel);
+            snap.ShapeId = m_CachedShape.ShapeId;
+            snap.ShapeType = m_CachedShape.Type;
+            snap.Width = m_CachedShape.Width;
+            snap.Height = m_CachedShape.Height;
+            snap.Pitch = m_CachedShape.Pitch;
+            snap.XHot = m_CachedShape.XHot;
+            snap.YHot = m_CachedShape.YHot;
+            snap.ShapeBufferSize = m_CachedShape.BufferSize;
+            snap.PositionX = m_LastX;
+            snap.PositionY = m_LastY;
+            ++publishedPositionId;
+            snap.PositionId = publishedPositionId;
+
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            snap.LastUpdateQpc = static_cast<UINT64>(qpc.QuadPart);
+
+            // Store header (Version stays as a publication barrier: zero-out then write payload then set magic).
+            // Use atomics-ish: write everything except Magic, then write Magic last.
+            CursorSharedMetadata* dst = m_MetaView;
+
+            // Update shape buffer first if needed.
+            if (shapeUpdated && m_CachedShape.BufferSize > 0)
+            {
+                BYTE* shapeDst = reinterpret_cast<BYTE*>(dst + 1);
+                memcpy(shapeDst, m_CachedShape.Buffer.data(), m_CachedShape.BufferSize);
+            }
+
+            // Volatile write of header fields. Not a full memory barrier but adequate
+            // for a single-producer / multi-consumer same-machine scenario where
+            // consumers re-read on signal anyway.
+            dst->Version = snap.Version;
+            dst->IsVisible = snap.IsVisible;
+            dst->PositionX = snap.PositionX;
+            dst->PositionY = snap.PositionY;
+            dst->PositionId = snap.PositionId;
+            dst->ShapeId = snap.ShapeId;
+            dst->ShapeType = snap.ShapeType;
+            dst->Width = snap.Width;
+            dst->Height = snap.Height;
+            dst->Pitch = snap.Pitch;
+            dst->XHot = snap.XHot;
+            dst->YHot = snap.YHot;
+            dst->SdrWhiteLevelX1000 = snap.SdrWhiteLevelX1000;
+            dst->ShapeBufferSize = snap.ShapeBufferSize;
+            dst->Reserved0 = 0;
+            dst->LastUpdateQpc = snap.LastUpdateQpc;
+            dst->Magic = snap.Magic;
+
+            if (m_hCursorReadyEvent)
+            {
+                SetEvent(m_hCursorReadyEvent);
+            }
+        }
+
+        std::stringstream ss;
+        ss << "[VddCursor] Worker exiting monitor=" << m_MonitorIndex;
+        vddlog("d", ss.str().c_str());
+    }
+
+    bool EnsureSharedObjects()
+    {
+        SECURITY_ATTRIBUTES sa = {};
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"D:(A;;GA;;;BA)(A;;GA;;;IU)", SDDL_REVISION_1, &sd, nullptr))
+        {
+            return false;
+        }
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = sd;
+        sa.bInheritHandle = FALSE;
+
+        const SIZE_T mapSize = sizeof(CursorSharedMetadata) + ZAKO_CURSOR_MAX_BYTES;
+
+        std::wstring mapName = L"Global\\ZakoVDD_CursorMeta_" + std::to_wstring(m_MonitorIndex);
+        m_MetaMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa,
+                                           PAGE_READWRITE, 0,
+                                           static_cast<DWORD>(mapSize),
+                                           mapName.c_str());
+        if (!m_MetaMapping)
+        {
+            std::stringstream ss;
+            ss << "[VddCursor] CreateFileMappingW failed: " << GetLastError();
+            vddlog("e", ss.str().c_str());
+            LocalFree(sd);
+            return false;
+        }
+
+        m_MetaView = static_cast<CursorSharedMetadata*>(
+            MapViewOfFile(m_MetaMapping, FILE_MAP_WRITE, 0, 0, mapSize));
+        if (!m_MetaView)
+        {
+            LocalFree(sd);
+            return false;
+        }
+        ZeroMemory(m_MetaView, mapSize);
+        m_MetaView->Magic = ZAKO_CURSOR_MAGIC;
+        m_MetaView->Version = ZAKO_CURSOR_VERSION;
+
+        std::wstring evName = L"Global\\ZakoVDD_CursorReady_" + std::to_wstring(m_MonitorIndex);
+        m_hCursorReadyEvent = CreateEventW(&sa, FALSE, FALSE, evName.c_str());
+        if (!m_hCursorReadyEvent)
+        {
+            std::stringstream ss;
+            ss << "[VddCursor] CreateEventW (cursor ready) failed: " << GetLastError();
+            vddlog("e", ss.str().c_str());
+            LocalFree(sd);
+            return false;
+        }
+
+        LocalFree(sd);
+
+        std::stringstream ss;
+        ss << "[VddCursor] Shared objects ready monitor=" << m_MonitorIndex
+           << " bytes=" << mapSize;
+        vddlog("i", ss.str().c_str());
+        return true;
+    }
+
+    void Teardown()
+    {
+        if (m_MetaView)
+        {
+            UnmapViewOfFile(m_MetaView);
+            m_MetaView = nullptr;
+        }
+        if (m_MetaMapping)
+        {
+            CloseHandle(m_MetaMapping);
+            m_MetaMapping = nullptr;
+        }
+        if (m_hCursorReadyEvent)
+        {
+            CloseHandle(m_hCursorReadyEvent);
+            m_hCursorReadyEvent = nullptr;
+        }
+        // m_hCursorDataAvailable is owned by IndirectDeviceContext::m_MouseEvents,
+        // not by us -- do NOT close.
+    }
+
+    struct CachedShape
+    {
+        UINT32 ShapeId = 0;
+        UINT32 Type = 0;
+        UINT32 Width = 0;
+        UINT32 Height = 0;
+        UINT32 Pitch = 0;
+        INT32  XHot = 0;
+        INT32  YHot = 0;
+        UINT32 BufferSize = 0;
+        std::vector<BYTE> Buffer;
+    };
+
+    unsigned int m_MonitorIndex = 0;
+    IDDCX_MONITOR m_Monitor = nullptr;
+    HANDLE m_hCursorDataAvailable = nullptr; // not owned
+    HANDLE m_hTerminateEvent = nullptr;
+    HANDLE m_hThread = nullptr;
+    HANDLE m_MetaMapping = nullptr;
+    CursorSharedMetadata* m_MetaView = nullptr;
+    HANDLE m_hCursorReadyEvent = nullptr;
+
+    INT32 m_LastX = 0;
+    INT32 m_LastY = 0;
+    UINT32 m_LastVisibility = 0xFFFFFFFFu; // sentinel != 0/1 so first iteration always publishes
+    CachedShape m_CachedShape;
+};
+
 }} // namespace Microsoft::IndirectDisp
 
 #pragma endregion
 
 #pragma region SwapChainProcessor
 
-SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex)
-	: m_hSwapChain(hSwapChain), m_Device(Device), m_hAvailableBufferEvent(NewFrameEvent), m_MonitorIndex(MonitorIndex)
+SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex,
+                                       IDDCX_MONITOR Monitor, HANDLE hMouseEvent)
+	: m_hSwapChain(hSwapChain), m_Device(Device), m_hAvailableBufferEvent(NewFrameEvent), m_MonitorIndex(MonitorIndex), m_Monitor(Monitor)
 {
 	stringstream logStream;
 
@@ -3731,7 +4140,9 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Di
 			  << "\n  SwapChain Handle: " << static_cast<void *>(hSwapChain)
 			  << "\n  Device Pointer: " << static_cast<void *>(Device.get())
 			  << "\n  NewFrameEvent Handle: " << NewFrameEvent
-			  << "\n  Monitor Index: " << MonitorIndex;
+			  << "\n  Monitor Index: " << MonitorIndex
+			  << "\n  Monitor Handle: " << static_cast<void *>(Monitor)
+			  << "\n  MouseEvent Handle: " << hMouseEvent;
 	vddlog("d", logStream.str().c_str());
 
 	// Initialize the VDD->external consumer frame exporter (best effort).
@@ -3743,6 +4154,30 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Di
 	{
 		vddlog("e", "[VddExport] Failed to construct SharedFrameExporter (non-fatal)");
 		m_Exporter.reset();
+	}
+
+	// Cursor exporter: only spin up when the IddCx cursor event is available
+	// (i.e. HardwareCursor is enabled and SetupHardwareCursor succeeded).
+	if (Monitor && hMouseEvent)
+	{
+		try
+		{
+			m_CursorExporter = std::make_unique<CursorExporter>(MonitorIndex, Monitor, hMouseEvent);
+			if (!m_CursorExporter->Start())
+			{
+				vddlog("w", "[VddCursor] Start() failed; cursor will not be exported for this monitor");
+				m_CursorExporter.reset();
+			}
+		}
+		catch (...)
+		{
+			vddlog("e", "[VddCursor] Failed to construct CursorExporter (non-fatal)");
+			m_CursorExporter.reset();
+		}
+	}
+	else
+	{
+		vddlog("d", "[VddCursor] Skipping CursorExporter (no monitor handle or hardware cursor disabled)");
 	}
 
 	m_hTerminateEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
@@ -5282,28 +5717,10 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 			}
 		}
 
-		m_ProcessingThreads[Monitor] = std::unique_ptr<SwapChainProcessor>(new SwapChainProcessor(SwapChain, Device, NewFrameEvent, monitorIndex));
-
-		auto procIt = m_ProcessingThreads.find(Monitor);
-		if (procIt != m_ProcessingThreads.end() && procIt->second)
-		{
-			auto modeIt = m_CommittedTargetModes.find(Monitor);
-			if (modeIt != m_CommittedTargetModes.end())
-			{
-				procIt->second->PublishModeMetadata(modeIt->second);
-			}
-
-			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
-			auto hdrIt = s_MonitorHdrSettingsMap.find(Monitor);
-			if (hdrIt != s_MonitorHdrSettingsMap.end())
-			{
-				procIt->second->UpdateHdrMetadata(hdrIt->second.isHdr,
-				                                hdrIt->second.maxNits,
-				                                hdrIt->second.minNits,
-				                                hdrIt->second.maxFALL);
-			}
-		}
-
+		// Set up the IddCx hardware-cursor event BEFORE constructing the
+		// SwapChainProcessor so that we can hand the event to the cursor
+		// exporter that lives inside the processor.
+		HANDLE hMouseEventForProcessor = nullptr;
 		if (hardwareCursor)
 		{
 			// Clean up any existing mouse event handle for this monitor
@@ -5327,40 +5744,65 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 			if (!hMouseEvent)
 			{
 				vddlog("e", "Failed to create mouse event. No hardware cursor supported!");
-				return;
 			}
-
-			m_MouseEvents[Monitor] = hMouseEvent;
-
-			IDDCX_CURSOR_CAPS cursorInfo = {};
-			cursorInfo.Size = sizeof(cursorInfo);
-			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
-			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
-
-			cursorInfo.MaxX = CursorMaxX;
-			cursorInfo.MaxY = CursorMaxY;
-
-			IDARG_IN_SETUP_HWCURSOR hwCursor = {};
-			hwCursor.CursorInfo = cursorInfo;
-			hwCursor.hNewCursorDataAvailable = hMouseEvent;
-
-			NTSTATUS Status = IddCxMonitorSetupHardwareCursor(
-				Monitor,
-				&hwCursor);
-
-			if (FAILED(Status))
+			else
 			{
-				CloseHandle(hMouseEvent);
-				m_MouseEvents.erase(Monitor);
-				vddlog("e", "Failed to setup hardware cursor");
-				return;
-			}
+				m_MouseEvents[Monitor] = hMouseEvent;
 
-			vddlog("d", "Hardware cursor setup completed successfully.");
+				IDDCX_CURSOR_CAPS cursorInfo = {};
+				cursorInfo.Size = sizeof(cursorInfo);
+				cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
+				cursorInfo.AlphaCursorSupport = alphaCursorSupport;
+
+				cursorInfo.MaxX = CursorMaxX;
+				cursorInfo.MaxY = CursorMaxY;
+
+				IDARG_IN_SETUP_HWCURSOR hwCursor = {};
+				hwCursor.CursorInfo = cursorInfo;
+				hwCursor.hNewCursorDataAvailable = hMouseEvent;
+
+				NTSTATUS Status = IddCxMonitorSetupHardwareCursor(
+					Monitor,
+					&hwCursor);
+
+				if (FAILED(Status))
+				{
+					CloseHandle(hMouseEvent);
+					m_MouseEvents.erase(Monitor);
+					vddlog("e", "Failed to setup hardware cursor");
+				}
+				else
+				{
+					hMouseEventForProcessor = hMouseEvent;
+					vddlog("d", "Hardware cursor setup completed successfully.");
+				}
+			}
 		}
 		else
 		{
 			vddlog("d", "Hardware cursor is disabled, Skipped creation.");
+		}
+
+		m_ProcessingThreads[Monitor] = std::unique_ptr<SwapChainProcessor>(new SwapChainProcessor(SwapChain, Device, NewFrameEvent, monitorIndex, Monitor, hMouseEventForProcessor));
+
+		auto procIt = m_ProcessingThreads.find(Monitor);
+		if (procIt != m_ProcessingThreads.end() && procIt->second)
+		{
+			auto modeIt = m_CommittedTargetModes.find(Monitor);
+			if (modeIt != m_CommittedTargetModes.end())
+			{
+				procIt->second->PublishModeMetadata(modeIt->second);
+			}
+
+			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
+			auto hdrIt = s_MonitorHdrSettingsMap.find(Monitor);
+			if (hdrIt != s_MonitorHdrSettingsMap.end())
+			{
+				procIt->second->UpdateHdrMetadata(hdrIt->second.isHdr,
+				                                hdrIt->second.maxNits,
+				                                hdrIt->second.minNits,
+				                                hdrIt->second.maxFALL);
+			}
 		}
 	}
 }

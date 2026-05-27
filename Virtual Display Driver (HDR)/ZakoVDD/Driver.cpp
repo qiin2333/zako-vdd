@@ -1532,6 +1532,8 @@ void logAvailableGPUs()
 	}
 }
 
+void LoadDriverSettings();
+
 void ReloadDriver(HANDLE hPipe)
 {
 	UNREFERENCED_PARAMETER(hPipe);
@@ -1546,11 +1548,17 @@ void ReloadDriver(HANDLE hPipe)
 		{
 			try
 			{
-				// Step 1: Save current numVirtualDisplays before configuration reload
+				// Step 1: Reload runtime knobs before touching swapchains. IddCx may
+				// immediately assign a replacement swapchain while existing monitors
+				// are being torn down, so settings such as HardwareCursor must already
+				// reflect the new XML/registry value before UnassignAllSwapChains().
+				LoadDriverSettings();
+
+				// Step 2: Save current numVirtualDisplays before configuration reload
 				UINT oldNumVirtualDisplays = numVirtualDisplays;
 				vddlog("d", ("Saving current monitor count for cleanup: " + std::to_string(oldNumVirtualDisplays)).c_str());
 
-				// Step 2: Clean up existing monitors first
+				// Step 3: Clean up existing monitors first
 				vddlog("d", "Cleaning up existing monitors before reload");
 
 				// Stop any active SwapChain processing
@@ -1568,15 +1576,15 @@ void ReloadDriver(HANDLE hPipe)
 					pContext->pContext->DestroyAllMonitors();
 				}
 
-				// Step 3: Wait for system stabilization after cleanup
+				// Step 4: Wait for system stabilization after cleanup
 				vddlog("d", "Waiting for system stabilization after cleanup");
 				Sleep(200);
 
-				// Step 4: Reinitialize the adapter (this will reload XML configuration)
+				// Step 5: Reinitialize the adapter using the freshly-loaded settings
 				vddlog("d", "Reinitializing adapter with new configuration");
 				pContext->pContext->InitAdapter();
 
-				// Step 5: Post-initialization stabilization
+				// Step 6: Post-initialization stabilization
 				vddlog("d", "Waiting for adapter initialization to stabilize");
 				Sleep(100);
 
@@ -1591,6 +1599,7 @@ void ReloadDriver(HANDLE hPipe)
 				// Try to continue with initialization anyway
 				try
 				{
+					LoadDriverSettings();
 					pContext->pContext->InitAdapter();
 					vddlog("w", "Adapter reinitialized after exception");
 				}
@@ -1606,6 +1615,7 @@ void ReloadDriver(HANDLE hPipe)
 				// Try to continue with initialization anyway
 				try
 				{
+					LoadDriverSettings();
 					pContext->pContext->InitAdapter();
 					vddlog("w", "Adapter reinitialized after unknown exception");
 				}
@@ -2453,6 +2463,62 @@ bool initpath()
 	return true;
 }
 
+// Keep the in-memory runtime knobs in sync with registry/XML settings.
+// DriverEntry calls this once at process startup, while RELOAD_DRIVER and
+// toggle commands call it before recreating monitors so changes such as
+// HARDWARECURSOR true affect the next swapchain without requiring an adapter
+// disable/enable cycle.
+void LoadDriverSettings()
+{
+	initpath();
+	logsEnabled = EnabledQuery(L"LoggingEnabled");
+	debugLogs = EnabledQuery(L"DebugLoggingEnabled");
+
+	customEdid = EnabledQuery(L"CustomEdidEnabled");
+	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
+	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
+	// [LEGACY-PIPE]
+	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
+
+	// colour
+	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
+	SDR10 = EnabledQuery(L"SDR10Enabled");
+	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
+	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
+	ColourFormat = GetStringSetting(L"ColourFormat");
+
+	// EDID profile: Auto -> resolved via host OS build number (issue #612).
+	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));
+
+	// VRR / FreeSync: behavioural change, default OFF until EDID FreeSync
+	// Range Block also lands (see ROADMAP P1).
+	vrrEnabled = EnabledQuery(L"VrrEnabled");
+
+	// Cursor
+	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
+	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport");
+	CursorMaxX = GetIntegerSetting(L"CursorMaxX");
+	CursorMaxY = GetIntegerSetting(L"CursorMaxY");
+
+	int xorCursorSupportLevelInt = GetIntegerSetting(L"XorCursorSupportLevel");
+	std::string xorCursorSupportLevelName;
+
+	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3)
+	{
+		vddlog("w", "Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
+		XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
+	}
+	else
+	{
+		XorCursorSupportLevel = static_cast<IDDCX_XOR_CURSOR_SUPPORT>(xorCursorSupportLevelInt);
+	}
+
+	xorCursorSupportLevelName = XorCursorSupportLevelToString(XorCursorSupportLevel);
+
+	vddlog("i", ("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
+	vddlog("i", (std::string("Hardware cursor runtime setting: ") + (hardwareCursor ? "enabled" : "disabled")).c_str());
+}
+
 extern "C" EVT_WDF_DRIVER_UNLOAD EvtDriverUnload;
 
 VOID EvtDriverUnload(
@@ -2532,52 +2598,7 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	WDF_DRIVER_CONFIG_INIT(&Config, VirtualDisplayDriverDeviceAdd);
 
 	Config.EvtDriverUnload = EvtDriverUnload;
-	initpath();
-	logsEnabled = EnabledQuery(L"LoggingEnabled");
-	debugLogs = EnabledQuery(L"DebugLoggingEnabled");
-
-	customEdid = EnabledQuery(L"CustomEdidEnabled");
-	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
-	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
-	// [LEGACY-PIPE]
-	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
-
-	// colour
-	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
-	SDR10 = EnabledQuery(L"SDR10Enabled");
-	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
-	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
-	ColourFormat = GetStringSetting(L"ColourFormat");
-
-	// EDID profile: Auto -> resolved via host OS build number (issue #612).
-	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));
-
-	// VRR / FreeSync: behavioural change, default OFF until EDID FreeSync
-	// Range Block also lands (see ROADMAP P1).
-	vrrEnabled = EnabledQuery(L"VrrEnabled");
-
-	// Cursor
-	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
-	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport");
-	CursorMaxX = GetIntegerSetting(L"CursorMaxX");
-	CursorMaxY = GetIntegerSetting(L"CursorMaxY");
-
-	int xorCursorSupportLevelInt = GetIntegerSetting(L"XorCursorSupportLevel");
-	std::string xorCursorSupportLevelName;
-
-	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3)
-	{
-		vddlog("w", "Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
-		XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
-	}
-	else
-	{
-		XorCursorSupportLevel = static_cast<IDDCX_XOR_CURSOR_SUPPORT>(xorCursorSupportLevelInt);
-	}
-
-	xorCursorSupportLevelName = XorCursorSupportLevelToString(XorCursorSupportLevel);
-
-	vddlog("i", ("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
+	LoadDriverSettings();
 
 	vddlog("i", "Driver Starting");
 	string utf8_confpath = WStringToString(confpath);
@@ -4156,10 +4177,12 @@ void modifyEdid(vector<BYTE> &edid)
 		return;
 	}
 
-	edid[8] = 0x36;
-	edid[9] = 0x94;
-	edid[10] = 0x37;
-	edid[11] = 0x13;
+	// EDID manufacturer/product ID exposed by Windows as DISPLAY\ZAK2333.
+	// Manufacturer "ZAK" is encoded as 0x682b; product 0x2333 is little-endian.
+	edid[8] = 0x68;
+	edid[9] = 0x2b;
+	edid[10] = 0x33;
+	edid[11] = 0x23;
 }
 
 // Modify EDID serial number based on client GUID to ensure consistency

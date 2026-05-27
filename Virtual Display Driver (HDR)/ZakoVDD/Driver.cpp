@@ -1532,6 +1532,8 @@ void logAvailableGPUs()
 	}
 }
 
+void LoadDriverSettings();
+
 void ReloadDriver(HANDLE hPipe)
 {
 	UNREFERENCED_PARAMETER(hPipe);
@@ -1574,6 +1576,7 @@ void ReloadDriver(HANDLE hPipe)
 
 				// Step 4: Reinitialize the adapter (this will reload XML configuration)
 				vddlog("d", "Reinitializing adapter with new configuration");
+				LoadDriverSettings();
 				pContext->pContext->InitAdapter();
 
 				// Step 5: Post-initialization stabilization
@@ -1591,6 +1594,7 @@ void ReloadDriver(HANDLE hPipe)
 				// Try to continue with initialization anyway
 				try
 				{
+					LoadDriverSettings();
 					pContext->pContext->InitAdapter();
 					vddlog("w", "Adapter reinitialized after exception");
 				}
@@ -1606,6 +1610,7 @@ void ReloadDriver(HANDLE hPipe)
 				// Try to continue with initialization anyway
 				try
 				{
+					LoadDriverSettings();
 					pContext->pContext->InitAdapter();
 					vddlog("w", "Adapter reinitialized after unknown exception");
 				}
@@ -2453,6 +2458,62 @@ bool initpath()
 	return true;
 }
 
+// Keep the in-memory runtime knobs in sync with registry/XML settings.
+// DriverEntry calls this once at process startup, while RELOAD_DRIVER and
+// toggle commands call it before recreating monitors so changes such as
+// HARDWARECURSOR true affect the next swapchain without requiring an adapter
+// disable/enable cycle.
+void LoadDriverSettings()
+{
+	initpath();
+	logsEnabled = EnabledQuery(L"LoggingEnabled");
+	debugLogs = EnabledQuery(L"DebugLoggingEnabled");
+
+	customEdid = EnabledQuery(L"CustomEdidEnabled");
+	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
+	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
+	// [LEGACY-PIPE]
+	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
+
+	// colour
+	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
+	SDR10 = EnabledQuery(L"SDR10Enabled");
+	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
+	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
+	ColourFormat = GetStringSetting(L"ColourFormat");
+
+	// EDID profile: Auto -> resolved via host OS build number (issue #612).
+	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));
+
+	// VRR / FreeSync: behavioural change, default OFF until EDID FreeSync
+	// Range Block also lands (see ROADMAP P1).
+	vrrEnabled = EnabledQuery(L"VrrEnabled");
+
+	// Cursor
+	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
+	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport");
+	CursorMaxX = GetIntegerSetting(L"CursorMaxX");
+	CursorMaxY = GetIntegerSetting(L"CursorMaxY");
+
+	int xorCursorSupportLevelInt = GetIntegerSetting(L"XorCursorSupportLevel");
+	std::string xorCursorSupportLevelName;
+
+	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3)
+	{
+		vddlog("w", "Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
+		XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
+	}
+	else
+	{
+		XorCursorSupportLevel = static_cast<IDDCX_XOR_CURSOR_SUPPORT>(xorCursorSupportLevelInt);
+	}
+
+	xorCursorSupportLevelName = XorCursorSupportLevelToString(XorCursorSupportLevel);
+
+	vddlog("i", ("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
+	vddlog("i", (std::string("Hardware cursor runtime setting: ") + (hardwareCursor ? "enabled" : "disabled")).c_str());
+}
+
 extern "C" EVT_WDF_DRIVER_UNLOAD EvtDriverUnload;
 
 VOID EvtDriverUnload(
@@ -2532,52 +2593,7 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	WDF_DRIVER_CONFIG_INIT(&Config, VirtualDisplayDriverDeviceAdd);
 
 	Config.EvtDriverUnload = EvtDriverUnload;
-	initpath();
-	logsEnabled = EnabledQuery(L"LoggingEnabled");
-	debugLogs = EnabledQuery(L"DebugLoggingEnabled");
-
-	customEdid = EnabledQuery(L"CustomEdidEnabled");
-	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
-	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
-	// [LEGACY-PIPE]
-	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
-
-	// colour
-	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
-	SDR10 = EnabledQuery(L"SDR10Enabled");
-	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
-	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
-	ColourFormat = GetStringSetting(L"ColourFormat");
-
-	// EDID profile: Auto -> resolved via host OS build number (issue #612).
-	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));
-
-	// VRR / FreeSync: behavioural change, default OFF until EDID FreeSync
-	// Range Block also lands (see ROADMAP P1).
-	vrrEnabled = EnabledQuery(L"VrrEnabled");
-
-	// Cursor
-	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
-	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport");
-	CursorMaxX = GetIntegerSetting(L"CursorMaxX");
-	CursorMaxY = GetIntegerSetting(L"CursorMaxY");
-
-	int xorCursorSupportLevelInt = GetIntegerSetting(L"XorCursorSupportLevel");
-	std::string xorCursorSupportLevelName;
-
-	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3)
-	{
-		vddlog("w", "Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
-		XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
-	}
-	else
-	{
-		XorCursorSupportLevel = static_cast<IDDCX_XOR_CURSOR_SUPPORT>(xorCursorSupportLevelInt);
-	}
-
-	xorCursorSupportLevelName = XorCursorSupportLevelToString(XorCursorSupportLevel);
-
-	vddlog("i", ("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
+	LoadDriverSettings();
 
 	vddlog("i", "Driver Starting");
 	string utf8_confpath = WStringToString(confpath);

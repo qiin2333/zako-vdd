@@ -4172,10 +4172,12 @@ void modifyEdid(vector<BYTE> &edid)
 		return;
 	}
 
-	edid[8] = 0x36;
-	edid[9] = 0x94;
-	edid[10] = 0x37;
-	edid[11] = 0x13;
+	// EDID manufacturer/product ID exposed by Windows as DISPLAY\ZAK2333.
+	// Manufacturer "ZAK" is encoded as 0x682b; product 0x2333 is little-endian.
+	edid[8] = 0x68;
+	edid[9] = 0x2b;
+	edid[10] = 0x33;
+	edid[11] = 0x23;
 }
 
 // Modify EDID serial number based on client GUID to ensure consistency

@@ -77,10 +77,20 @@ jobs:
 
           $infPath = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf"
 
-          # Extract version from tag (e.g. v0.13 -> 100.13.0.0) or use date-based version
+          # Extract numeric version from tag (e.g. v0.13 -> 100.0.13.0,
+          # v0.15.3-zak2333 -> 100.0.15.3) or use date-based version.
+          # DriverVer must be numeric dotted-quad. Keep release labels in the
+          # Git tag name only; suffixes such as "-zak2333" make Windows unable
+          # to parse/display the installed driver version correctly.
           $ref = "${{ github.ref }}"
           if ($ref -match '^refs/tags/v(.+)$') {
-            $ver = $Matches[1]
+            $tagVersion = $Matches[1]
+            $numericMatch = [regex]::Match($tagVersion, '^\d+(?:\.\d+){0,3}')
+            if (-not $numericMatch.Success) {
+              Write-Error "Tag '$tagVersion' does not start with a numeric version"
+              exit 1
+            }
+            $ver = $numericMatch.Value
             # Prefix with 100 to ensure CI builds always outrank local builds
             # v0.13 -> 100.0.13.0, v1.2.3 -> 100.1.2.3
             $parts = $ver.Split('.')

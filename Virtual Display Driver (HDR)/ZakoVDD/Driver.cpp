@@ -168,12 +168,10 @@ std::atomic<bool> customEdid{false};
 // the bytes they were created with until they are recreated.
 std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Legacy)};
 
-// Variable Refresh Rate (FreeSync / G-Sync compatible) toggle. When enabled,
-// the adapter caps include IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
-// (added in IddCx 1.4); IddCx silently ignores unknown flag bits on older
-// hosts so this is safe to declare unconditionally, but the user-facing
-// toggle still defaults to OFF until we also publish the EDID FreeSync
-// Range Block (see ROADMAP P1).
+// Variable Refresh Rate (FreeSync / G-Sync compatible) toggle. Keep the
+// setting for UI/IOCTL compatibility, but do not infer adapter capability
+// flags from it on the current IddCx0102 compatibility path. Some hosts
+// reject unknown or mismatched adapter flag bits during adapter init.
 std::atomic<bool> vrrEnabled{false};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
@@ -4744,21 +4742,17 @@ void IndirectDeviceContext::InitAdapter()
 		logStream << "FP16 processing capability detected.";
 	}
 
-	// VRR / FreeSync support flag (IddCx >= 1.4). The flag value 0x4 is
-	// stable across SDK versions; older WDKs that don't ship the macro fall
-	// back to the literal so the build stays portable. IddCx hosts that
-	// don't understand the bit just ignore it, so this is safe.
+	// Do not advertise a VRR adapter flag on the IddCx0102 compatibility
+	// path. The old literal fallback used 0x4, which is not a portable VRR
+	// capability bit and can make IddCxAdapterInitAsync fail with
+	// STATUS_NOT_SUPPORTED on some systems.
 	if (vrrEnabled.load())
 	{
-#ifdef IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
-		AdapterCaps.Flags = static_cast<IDDCX_ADAPTER_FLAGS>(
-			static_cast<UINT>(AdapterCaps.Flags) |
-			static_cast<UINT>(IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED));
-#else
-		AdapterCaps.Flags = static_cast<IDDCX_ADAPTER_FLAGS>(
-			static_cast<UINT>(AdapterCaps.Flags) | 0x4u); // VARIABLE_REFRESH_RATE_SUPPORTED
-#endif
-		logStream << " VRR adapter flag enabled.";
+		if (!logStream.str().empty())
+		{
+			logStream << " ";
+		}
+		logStream << "VRR setting enabled; adapter flag not advertised.";
 	}
 
 	// Validate and set monitor count with bounds checking

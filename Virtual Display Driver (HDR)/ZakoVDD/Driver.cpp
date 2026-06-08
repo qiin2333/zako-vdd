@@ -3365,11 +3365,13 @@ namespace Microsoft { namespace IndirectDisp {
 //   Metadata mapping    : Global\ZakoVDD_Meta_<idx>
 //
 // Texture is keyed-mutex protected:
-//   Producer (this driver): acquire key 0 with 0ms timeout, on success
-//                            CopyResource then release key 1.
+//   Producer (this driver): acquire key 0 with 0ms timeout, or acquire key 1
+//                            to overwrite an unread frame, then CopyResource,
+//                            update metadata, and release key 1.
 //   Consumer (Sunshine)   : acquire key 1, copy/encode, release key 0.
-// If the producer can't acquire (consumer slow), the frame is skipped and the
-// previous frame remains visible to the consumer (no stall on producer side).
+// If the producer can't acquire because the consumer is actively holding the
+// texture, the frame is skipped (no stall on producer side). If the previous
+// frame is merely unread, it is replaced so Sunshine consumes the latest frame.
 // =============================================================================
 
 struct SharedFrameMetadata
@@ -3384,7 +3386,15 @@ struct SharedFrameMetadata
     float  MinNits;
     float  MaxFALL;
     UINT64 FrameCounter;   // Incremented per pushed frame
-    UINT64 LastPresentQpc; // QueryPerformanceCounter at producer-side push
+    UINT64 LastPresentQpc; // IddCx present-display QPC if available, otherwise producer publish QPC
+    // Optional fields appended for newer consumers. Version remains 1 so older
+    // Sunshine builds can keep mapping only the original prefix above.
+    UINT64 LastPublishQpc;             // QueryPerformanceCounter at producer-side publish
+    UINT32 LastPresentationFrameNumber;
+    UINT32 LastDirtyRectCount;
+    UINT64 ReplacedUnreadFrames;       // Producer overwrote a published frame before it was consumed
+    UINT64 DroppedConsumerHeldFrames;  // Consumer held the slot while producer wanted to publish
+    UINT64 DroppedAcquireFailures;     // Non-timeout keyed mutex acquire failures
 };
 
 class SharedFrameExporter
@@ -3401,7 +3411,10 @@ public:
     }
 
     // Push one acquired surface to the consumer. Best-effort. Never throws.
-    void PushFrame(IDXGIResource* acquired)
+    void PushFrame(IDXGIResource* acquired,
+                   UINT64 presentDisplayQpc = 0,
+                   UINT presentationFrameNumber = 0,
+                   UINT dirtyRectCount = 0)
     {
 		std::lock_guard<std::mutex> lock(m_ExportMutex);
 
@@ -3424,15 +3437,34 @@ public:
             return;
         }
 
-        // Best-effort acquire with 0 timeout. If consumer holds key 0 the
-        // producer will simply skip this frame (do not stall the IddCx loop).
+        // Best-effort acquire with 0 timeout. First try the normal empty-slot
+        // key (0). If the previous frame is still published but unread (key 1),
+        // reclaim and overwrite it. That gives the export path WGC-like
+        // "latest frame wins" mailbox semantics without stalling the IddCx loop.
+        bool replacedUnreadFrame = false;
         HRESULT hr = m_KeyedMutex->AcquireSync(0, 0);
         if (hr == static_cast<HRESULT>(WAIT_TIMEOUT))
         {
+            hr = m_KeyedMutex->AcquireSync(1, 0);
+            if (SUCCEEDED(hr))
+            {
+                replacedUnreadFrame = true;
+            }
+        }
+        if (hr == static_cast<HRESULT>(WAIT_TIMEOUT))
+        {
+            if (m_MetaView)
+            {
+                m_MetaView->DroppedConsumerHeldFrames++;
+            }
             return;
         }
         if (FAILED(hr))
         {
+            if (m_MetaView)
+            {
+                m_MetaView->DroppedAcquireFailures++;
+            }
             return;
         }
 
@@ -3441,16 +3473,24 @@ public:
         ctx->CopyResource(m_SharedTex.Get(), srcTex.Get());
         ctx->Flush();
 
-        m_KeyedMutex->ReleaseSync(1);
-
-        // Update metadata block (frame counter / present timestamp).
+        // Update metadata before releasing key 1 so the consumer sees metadata
+        // that matches the texture contents it acquires.
         if (m_MetaView)
         {
             LARGE_INTEGER qpc{};
             QueryPerformanceCounter(&qpc);
             m_MetaView->FrameCounter++;
-            m_MetaView->LastPresentQpc = static_cast<UINT64>(qpc.QuadPart);
+            m_MetaView->LastPresentQpc = presentDisplayQpc ? presentDisplayQpc : static_cast<UINT64>(qpc.QuadPart);
+            m_MetaView->LastPublishQpc = static_cast<UINT64>(qpc.QuadPart);
+            m_MetaView->LastPresentationFrameNumber = presentationFrameNumber;
+            m_MetaView->LastDirtyRectCount = dirtyRectCount;
+            if (replacedUnreadFrame)
+            {
+                m_MetaView->ReplacedUnreadFrames++;
+            }
         }
+
+        m_KeyedMutex->ReleaseSync(1);
 
         if (m_FrameReadyEvent)
         {
@@ -4046,19 +4086,28 @@ void SwapChainProcessor::RunCore()
 		// Ask for the next buffer from the producer
 		IDARG_IN_RELEASEANDACQUIREBUFFER2 BufferInArgs = {};
 		BufferInArgs.Size = sizeof(BufferInArgs);
-		IDXGIResource *pSurface;
+		IDXGIResource *pSurface = nullptr;
+		UINT64 presentDisplayQpc = 0;
+		UINT presentationFrameNumber = 0;
+		UINT dirtyRectCount = 0;
 
 		if (useBuffer2)
 		{
 			IDARG_OUT_RELEASEANDACQUIREBUFFER2 Buffer = {};
 			hr = IddCxSwapChainReleaseAndAcquireBuffer2(m_hSwapChain, &BufferInArgs, &Buffer);
 			pSurface = Buffer.MetaData.pSurface;
+			presentDisplayQpc = Buffer.MetaData.PresentDisplayQPCTime;
+			presentationFrameNumber = Buffer.MetaData.PresentationFrameNumber;
+			dirtyRectCount = Buffer.MetaData.DirtyRectCount;
 		}
 		else
 		{
 			IDARG_OUT_RELEASEANDACQUIREBUFFER Buffer = {};
 			hr = IddCxSwapChainReleaseAndAcquireBuffer(m_hSwapChain, &Buffer);
 			pSurface = Buffer.MetaData.pSurface;
+			presentDisplayQpc = Buffer.MetaData.PresentDisplayQPCTime;
+			presentationFrameNumber = Buffer.MetaData.PresentationFrameNumber;
+			dirtyRectCount = Buffer.MetaData.DirtyRectCount;
 		}
 		// AcquireBuffer immediately returns STATUS_PENDING if no buffer is yet available
 		if (hr == E_PENDING)
@@ -4102,7 +4151,10 @@ void SwapChainProcessor::RunCore()
 			// ==============================
 			if (m_Exporter)
 			{
-				m_Exporter->PushFrame(AcquiredBuffer.Get());
+				m_Exporter->PushFrame(AcquiredBuffer.Get(),
+				                      presentDisplayQpc,
+				                      presentationFrameNumber,
+				                      dirtyRectCount);
 			}
 
 			AcquiredBuffer.Reset();

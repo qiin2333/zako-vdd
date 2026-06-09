@@ -60,6 +60,7 @@ namespace Microsoft
 
         // Forward declaration for VDD->Sunshine direct-capture frame exporter
         class SharedFrameExporter;
+        class CursorExporter;
 
         /// <summary>
         /// Manages a thread that consumes buffers from an indirect display swap-chain object.
@@ -67,7 +68,8 @@ namespace Microsoft
         class SwapChainProcessor
         {
         public:
-            SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex);
+            SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex,
+                               IDDCX_MONITOR Monitor, HANDLE hMouseEvent);
             ~SwapChainProcessor();
 
             void PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO& mode);
@@ -86,7 +88,9 @@ namespace Microsoft
             Microsoft::WRL::Wrappers::Thread m_hThread;
             Microsoft::WRL::Wrappers::Event m_hTerminateEvent;
             unsigned int m_MonitorIndex;
+            IDDCX_MONITOR m_Monitor = nullptr;
             std::unique_ptr<SharedFrameExporter> m_Exporter;
+            std::unique_ptr<CursorExporter> m_CursorExporter;
         };
 
         /// <summary>

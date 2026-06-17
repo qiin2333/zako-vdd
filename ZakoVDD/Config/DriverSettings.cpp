@@ -53,7 +53,7 @@ vector<string> split(string &input, char delimiter)
 
 bool initpath()
 {
-	// 鍏堝皾璇曚粠鐜鍙橀噺璇诲彇
+	// Prefer an explicit config path provided by the environment.
 	wchar_t envPath[MAX_PATH] = {0};
 	DWORD envLen = GetEnvironmentVariableW(L"ZAKOVDDPATH", envPath, MAX_PATH);
 	if (envLen > 0 && envLen < MAX_PATH)
@@ -62,7 +62,7 @@ bool initpath()
 		return true;
 	}
 
-	// 鐜鍙橀噺鏈缃紝灏濊瘯浠庢敞鍐岃〃璇诲彇
+	// Fall back to the installer-written registry path.
 	HKEY hKey;
 	wchar_t szPath[MAX_PATH] = {0};
 	DWORD dwBufferSize = sizeof(szPath);
@@ -70,7 +70,7 @@ bool initpath()
 	lResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ZakoTech\\ZakoDisplayAdapter", 0, KEY_READ, &hKey);
 	if (lResult != ERROR_SUCCESS)
 	{
-		// 娉ㄥ唽琛ㄤ笉瀛樺湪锛岃繑鍥瀎alse
+		// Registry path is unavailable.
 		return false;
 	}
 

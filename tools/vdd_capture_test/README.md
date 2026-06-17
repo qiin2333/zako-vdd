@@ -62,7 +62,7 @@ build\vdd_capture_test.exe --monitor 0 --frames 5 --out .
   → 驱动没跑、未更新到带 exporter 的版本，或 monitor 没在工作（没在显示画面）
 
 - `OpenFileMappingW failed: 5 (Access denied)`  
-  → 当前用户既不是 admin 也不是 interactive user。检查 SDDL ACL（默认 `D:(A;;GA;;;BA)(A;;GA;;;IU)`）
+  → 当前用户既不是 admin 也不是 interactive user。检查 SDDL ACL（默认 `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)`）
 
 - `OpenSharedResourceByName failed: 0x80070057 (E_INVALIDARG)`  
   → 工具用的 D3D11 设备 LUID 和 VDD RenderAdapter LUID 不一致（笔记本 hybrid GPU）。后续 Sunshine 集成时会做 LUID 协商。

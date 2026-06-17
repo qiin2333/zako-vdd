@@ -91,8 +91,9 @@ SwapChainProcessor::~SwapChainProcessor()
 
 	if (m_hThread.Get())
 	{
-		// Wait for the thread to terminate with a timeout to avoid hanging
-		DWORD waitResult = WaitForSingleObject(m_hThread.Get(), 5000); // 5 second timeout
+		// The worker owns a raw this pointer, so the destructor must not return
+		// until the thread has stopped touching object state.
+		DWORD waitResult = WaitForSingleObject(m_hThread.Get(), INFINITE);
 		switch (waitResult)
 		{
 		case WAIT_OBJECT_0:
@@ -104,14 +105,6 @@ SwapChainProcessor::~SwapChainProcessor()
 			logStream.str("");
 			logStream << "Thread wait was abandoned. GetLastError: " << GetLastError();
 			vddlog("e", logStream.str().c_str());
-			break;
-		case WAIT_TIMEOUT:
-			logStream.str("");
-			logStream << "Thread wait timed out after 5 seconds. Thread will be abandoned (unsafe to force terminate).";
-			vddlog("w", logStream.str().c_str());
-			// Note: TerminateThread is not used here because it can corrupt the heap,
-			// leave locks held, and cause deadlocks. The thread handle will be closed
-			// when m_hThread is destroyed, but the thread itself may still be running.
 			break;
 		default:
 			logStream.str("");

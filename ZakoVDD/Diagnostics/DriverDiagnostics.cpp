@@ -26,7 +26,6 @@ void LogIddCxVersion()
 	{
 		vddlog("i", "Failed to get IDDCX version");
 	}
-	vddlog("d", "Testing Debug Log");
 }
 
 void InitializeD3DDeviceAndLogGPU()

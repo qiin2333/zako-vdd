@@ -53,6 +53,9 @@
     <Filter Include="Header Files\Adapter">
       <UniqueIdentifier>{C3BB8D0D-FE84-42F1-9DFE-2F949C6F5778}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\Callbacks">
+      <UniqueIdentifier>{466A76E1-21D4-43AB-A2F6-B841293BF880}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Header Files\Edid">
       <UniqueIdentifier>{EF57F871-E6F8-485C-8AC5-73E1B2A5A162}</UniqueIdentifier>
     </Filter>
@@ -157,9 +160,6 @@
       <Filter>Header Files\Rendering</Filter>
     </ClInclude>
     <ClInclude Include="Trace.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\..\Downloads\wudfwdm.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Util\RefreshRate.h">

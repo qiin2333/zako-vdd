@@ -150,8 +150,8 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam)
 	SECURITY_ATTRIBUTES sa;
 	sa.nLength = sizeof(SECURITY_ATTRIBUTES);
 	sa.bInheritHandle = FALSE;
-	const wchar_t *sddl = L"D:(A;;GA;;;WD)";
-	vddlog("d", "Starting pipe with parameters: D:(A;;GA;;;WD)");
+	const wchar_t *sddl = L"D:(A;;GA;;;SY)(A;;GA;;;BA)";
+	vddlog("d", "Starting pipe with parameters: D:(A;;GA;;;SY)(A;;GA;;;BA)");
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
 			sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
 	{

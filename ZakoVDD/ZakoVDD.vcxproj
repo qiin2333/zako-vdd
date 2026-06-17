@@ -62,9 +62,6 @@
     <ClCompile Include="Util\StringConversion.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\..\..\Downloads\wudfwdm.h">
-      <DeploymentContent>true</DeploymentContent>
-    </ClInclude>
     <ClInclude Include="Adapter\GpuAdapterSelection.h" />
     <ClInclude Include="Adapter\GpuStatus.h" />
     <ClInclude Include="Callbacks\IddCallbacks.h" />

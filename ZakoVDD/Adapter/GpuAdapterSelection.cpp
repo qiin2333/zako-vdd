@@ -27,7 +27,12 @@ static string WideToUtf8(const wstring &value)
 	}
 
 	string converted(sizeNeeded, 0);
-	WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), &converted[0], sizeNeeded, nullptr, nullptr);
+	int convertedSize = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), &converted[0], sizeNeeded, nullptr, nullptr);
+	if (convertedSize <= 0)
+	{
+		return "";
+	}
+
 	return converted;
 }
 

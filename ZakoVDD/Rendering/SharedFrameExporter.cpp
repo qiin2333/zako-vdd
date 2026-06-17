@@ -202,11 +202,12 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	// Recreate everything since dimensions / format changed.
 	TeardownTexture();
 
-	// Build SDDL: Built-in Admin (BA) + Interactive Users (IU), full access.
+	// Keep the Global namespace for cross-session Sunshine compatibility, but
+	// avoid granting WRITE_DAC/WRITE_OWNER/DELETE to consumers.
 	SECURITY_ATTRIBUTES sa = {};
 	PSECURITY_DESCRIPTOR sd = nullptr;
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-	        L"D:(A;;GA;;;BA)(A;;GA;;;IU)", SDDL_REVISION_1, &sd, nullptr))
+	        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)", SDDL_REVISION_1, &sd, nullptr))
 	{
 		vddlog("e", "[VddExport] Failed to build SDDL for shared texture");
 		return false;
@@ -298,7 +299,7 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 	SECURITY_ATTRIBUTES sa = {};
 	PSECURITY_DESCRIPTOR sd = nullptr;
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-	        L"D:(A;;GA;;;BA)(A;;GA;;;IU)", SDDL_REVISION_1, &sd, nullptr))
+	        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)", SDDL_REVISION_1, &sd, nullptr))
 	{
 		return false;
 	}

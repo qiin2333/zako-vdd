@@ -65,7 +65,12 @@ void LogQueries(const char *severity, const wstring &xmlName)
 	}
 
 	string strMessage(sizeNeeded, 0);
-	WideCharToMultiByte(CP_UTF8, 0, xmlName.c_str(), static_cast<int>(xmlName.size()), &strMessage[0], sizeNeeded, nullptr, nullptr);
+	int converted = WideCharToMultiByte(CP_UTF8, 0, xmlName.c_str(), static_cast<int>(xmlName.size()), &strMessage[0], sizeNeeded, nullptr, nullptr);
+	if (converted <= 0)
+	{
+		return;
+	}
+
 	vddlog(severity, strMessage.c_str());
 }
 

@@ -5,16 +5,18 @@ setlocal
 net session >nul 2>&1
 if errorlevel 1 (echo [ERROR] Run as Administrator. & exit /b 1)
 
-set "VDD_BIN=c:\Users\mohaha\Program\github\Virtual-Display-Driver\Virtual Display Driver (HDR)\x64\Release\ZakoVDD"
-set "TEST_DIR=c:\Users\mohaha\Program\github\Virtual-Display-Driver\tools\vdd_capture_test"
+for %%I in ("%~dp0..\..") do set "REPO_ROOT=%%~fI"
+set "VDD_BIN=%REPO_ROOT%\x64\Release\ZakoVDD"
+set "CERT_DIR=%REPO_ROOT%\x64\Release"
+set "TEST_DIR=%~dp0"
 set "OUT_DIR=C:\Temp\vdd_test_out"
 set "LOG=%TEST_DIR%\deploy.log"
 
 if exist "%LOG%" del "%LOG%"
 
 echo === [1/5] Trusting test cert === >>"%LOG%"
-certutil -addstore -f "TrustedPublisher" "%VDD_BIN%\ZakoVDD.cer" >>"%LOG%" 2>&1
-certutil -addstore -f "Root"             "%VDD_BIN%\ZakoVDD.cer" >>"%LOG%" 2>&1
+certutil -addstore -f "TrustedPublisher" "%CERT_DIR%\ZakoVDD.cer" >>"%LOG%" 2>&1
+certutil -addstore -f "Root"             "%CERT_DIR%\ZakoVDD.cer" >>"%LOG%" 2>&1
 
 echo === [2/5] enum-drivers (filtered) === >>"%LOG%"
 pnputil /enum-drivers >"%TEMP%\_pnpall.txt" 2>&1

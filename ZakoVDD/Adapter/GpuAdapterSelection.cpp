@@ -1,6 +1,7 @@
 #include "GpuAdapterSelection.h"
 
 #include "..\Driver.h"
+#include "..\Logging\Logger.h"
 
 #include <AdapterOption.h>
 #include <algorithm>
@@ -10,8 +11,6 @@
 
 using namespace std;
 using namespace Microsoft::WRL;
-
-void vddlog(const char *type, const char *message);
 
 static string WideToUtf8(const wstring &value)
 {
@@ -177,7 +176,7 @@ static bool SelectBestUsableRenderAdapter(AdapterOption &adapterOption, const LU
 				string logText = "Skipping GPU fallback candidate because D3D11 device creation failed: " +
 				                 FormatAdapterLogName(gpu.name, gpu.desc.AdapterLuid) +
 				                 ", HRESULT: " + to_string(hr);
-				vddlog("w", logText.c_str());
+				VDD_LOG_WARNING(logText.c_str());
 				continue;
 			}
 
@@ -187,7 +186,7 @@ static bool SelectBestUsableRenderAdapter(AdapterOption &adapterOption, const LU
 
 			string logText = string(allowSoftwareAdapter ? "Selected software GPU fallback: " : "Selected hardware GPU fallback: ") +
 			                 FormatAdapterLogName(adapterOption.target_name, adapterOption.adapterLuid);
-			vddlog(allowSoftwareAdapter ? "w" : "i", logText.c_str());
+			VDD_LOG(allowSoftwareAdapter ? VddLogLevel::Warning : VddLogLevel::Info, logText.c_str());
 			return true;
 		}
 	}
@@ -195,7 +194,7 @@ static bool SelectBestUsableRenderAdapter(AdapterOption &adapterOption, const LU
 	adapterOption.target_name = L"";
 	adapterOption.adapterLuid = {};
 	adapterOption.hasTargetAdapter = false;
-	vddlog("e", "No usable render adapter fallback was found.");
+	VDD_LOG_ERROR("No usable render adapter fallback was found.");
 	return false;
 }
 
@@ -213,7 +212,7 @@ void EnsureUsableRenderAdapter(AdapterOption &adapterOption, const wstring &requ
 				string logText = "Configured GPU is unavailable, using runtime fallback instead. Requested: " +
 				                 WideToUtf8(requestedGpuName) + ", selected: " +
 				                 FormatAdapterLogName(adapterOption.target_name, adapterOption.adapterLuid);
-				vddlog("w", logText.c_str());
+				VDD_LOG_WARNING(logText.c_str());
 			}
 			return;
 		}
@@ -221,7 +220,7 @@ void EnsureUsableRenderAdapter(AdapterOption &adapterOption, const wstring &requ
 		string logText = "Selected GPU cannot create a D3D11 device, attempting runtime fallback. Selected: " +
 		                 FormatAdapterLogName(adapterOption.target_name, adapterOption.adapterLuid) +
 		                 ", HRESULT: " + to_string(hr);
-		vddlog("w", logText.c_str());
+		VDD_LOG_WARNING(logText.c_str());
 
 		LUID rejectedLuid = adapterOption.adapterLuid;
 		SelectBestUsableRenderAdapter(adapterOption, &rejectedLuid);
@@ -232,7 +231,7 @@ void EnsureUsableRenderAdapter(AdapterOption &adapterOption, const wstring &requ
 	{
 		string logText = "Configured GPU is unavailable, attempting runtime fallback. Requested: " +
 		                 WideToUtf8(requestedGpuName);
-		vddlog("w", logText.c_str());
+		VDD_LOG_WARNING(logText.c_str());
 	}
 
 	SelectBestUsableRenderAdapter(adapterOption);
@@ -251,7 +250,7 @@ void LogAvailableGPUs()
 		string logText = WideToUtf8(logMessage + memorySize);
 		if (!logText.empty())
 		{
-			vddlog("c", logText.c_str());
+			VDD_LOG_INFO(logText.c_str());
 		}
 	}
 }

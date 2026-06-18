@@ -144,9 +144,6 @@
     <ClInclude Include="Edid\Edid.h">
       <Filter>Header Files\Edid</Filter>
     </ClInclude>
-    <ClInclude Include="Logging\EtwTrace.h">
-      <Filter>Header Files\Logging</Filter>
-    </ClInclude>
     <ClInclude Include="Logging\Logger.h">
       <Filter>Header Files\Logging</Filter>
     </ClInclude>
@@ -158,9 +155,6 @@
     </ClInclude>
     <ClInclude Include="Rendering\SwapChainProcessor.h">
       <Filter>Header Files\Rendering</Filter>
-    </ClInclude>
-    <ClInclude Include="Trace.h">
-      <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Util\RefreshRate.h">
       <Filter>Header Files\Util</Filter>
@@ -223,9 +217,6 @@
     </ClCompile>
     <ClCompile Include="Edid\Edid.cpp">
       <Filter>Source Files\Edid</Filter>
-    </ClCompile>
-    <ClCompile Include="Logging\EtwTrace.cpp">
-      <Filter>Source Files\Logging</Filter>
     </ClCompile>
     <ClCompile Include="Logging\Logger.cpp">
       <Filter>Source Files\Logging</Filter>

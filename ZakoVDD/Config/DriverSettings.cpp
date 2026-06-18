@@ -95,14 +95,10 @@ bool initpath()
 void LoadDriverSettings()
 {
 	initpath();
-	logsEnabled = EnabledQuery(L"LoggingEnabled");
-	debugLogs = EnabledQuery(L"DebugLoggingEnabled");
 
 	customEdid = EnabledQuery(L"CustomEdidEnabled");
 	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
 	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
-	// [LEGACY-PIPE]
-	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
 
 	// colour
 	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
@@ -129,7 +125,7 @@ void LoadDriverSettings()
 
 	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3)
 	{
-		vddlog("w", "Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
+		VDD_LOG_WARNING("Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
 		XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 	}
 	else
@@ -139,8 +135,8 @@ void LoadDriverSettings()
 
 	xorCursorSupportLevelName = XorCursorSupportLevelToString(XorCursorSupportLevel);
 
-	vddlog("i", ("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
-	vddlog("i", (string("Hardware cursor runtime setting: ") + (hardwareCursor ? "enabled" : "disabled")).c_str());
+	VDD_LOG_INFO(("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
+	VDD_LOG_INFO((string("Hardware cursor runtime setting: ") + (hardwareCursor ? "enabled" : "disabled")).c_str());
 }
 
 void loadSettings()
@@ -154,19 +150,19 @@ void loadSettings()
 		HRESULT hr = SHCreateStreamOnFileW(filename.c_str(), STGM_READ, &pStream);
 		if (FAILED(hr))
 		{
-			vddlog("e", "Loading Settings: Failed to create file stream.");
+			VDD_LOG_ERROR("Loading Settings: Failed to create file stream.");
 			return;
 		}
 		hr = CreateXmlReader(__uuidof(IXmlReader), (void **)&pReader, NULL);
 		if (FAILED(hr))
 		{
-			vddlog("e", "Loading Settings: Failed to create XmlReader.");
+			VDD_LOG_ERROR("Loading Settings: Failed to create XmlReader.");
 			return;
 		}
 		hr = pReader->SetInput(pStream);
 		if (FAILED(hr))
 		{
-			vddlog("e", "Loading Settings: Failed to set input stream.");
+			VDD_LOG_ERROR("Loading Settings: Failed to set input stream.");
 			return;
 		}
 
@@ -207,12 +203,12 @@ void loadSettings()
 						monitorcount = stoi(wstring(pwszValue, cwchValue));
 					} catch (const exception &) {
 						monitorcount = 1;
-						vddlog("w", "Failed to parse monitor count, defaulting to 1");
+						VDD_LOG_WARNING("Failed to parse monitor count, defaulting to 1");
 					}
 					if (monitorcount == 0)
 					{
 						monitorcount = 1;
-						vddlog("i", "Loading singular monitor (Monitor Count is not valid)");
+						VDD_LOG_INFO("Loading singular monitor (Monitor Count is not valid)");
 					}
 				}
 				else if (currentElement == L"friendlyname")
@@ -237,7 +233,7 @@ void loadSettings()
 					try {
 						resolutions.insert(make_tuple(stoi(width), stoi(height)));
 					} catch (const exception &) {
-						vddlog("w", "Failed to parse resolution width/height, skipping");
+						VDD_LOG_WARNING("Failed to parse resolution width/height, skipping");
 					}
 				}
 				else if (currentElement == L"refresh_rate")
@@ -252,11 +248,9 @@ void loadSettings()
 						float_to_vsync(stof(refreshRate), vsync_num, vsync_den);
 						int w = stoi(width), h = stoi(height);
 						res.push_back(make_tuple(w, h, vsync_num, vsync_den));
-						stringstream ss;
-						ss << "Added: " << w << "x" << h << " @ " << vsync_num << "/" << vsync_den << "Hz";
-						vddlog("d", ss.str().c_str());
+						VDD_LOG_DEBUG_STREAM("Added: " << w << "x" << h << " @ " << vsync_num << "/" << vsync_den << "Hz");
 					} catch (const exception &) {
-						vddlog("w", "Failed to parse refresh rate or resolution, skipping entry");
+						VDD_LOG_WARNING("Failed to parse refresh rate or resolution, skipping entry");
 					}
 				}
 				else if (currentElement == L"g_refresh_rate")
@@ -264,7 +258,7 @@ void loadSettings()
 					try {
 						globalRefreshRates.push_back(stof(wstring(pwszValue, cwchValue)));
 					} catch (const exception &) {
-						vddlog("w", "Failed to parse global refresh rate, skipping");
+						VDD_LOG_WARNING("Failed to parse global refresh rate, skipping");
 					}
 				}
 				break;
@@ -290,7 +284,7 @@ void loadSettings()
 			gpuname = gpuFriendlyName;
 			monitorModes = res;
 		}
-		vddlog("i", "Using vdd_settings.xml");
+		VDD_LOG_INFO("Using vdd_settings.xml");
 		return;
 	}
 	const wstring optionsname = confpath + L"\\option.txt";
@@ -304,7 +298,7 @@ void loadSettings()
 				numVirtualDisplays = stoi(line);
 			} catch (const exception &) {
 				numVirtualDisplays = 1;
-				vddlog("w", "Failed to parse display count from option.txt, defaulting to 1");
+				VDD_LOG_WARNING("Failed to parse display count from option.txt, defaulting to 1");
 			}
 			vector<tuple<int, int, int, int>> res;
 
@@ -318,12 +312,12 @@ void loadSettings()
 						float_to_vsync(stof(strvec[2]), vsync_num, vsync_den);
 						res.push_back({stoi(strvec[0]), stoi(strvec[1]), vsync_num, vsync_den});
 					} catch (const exception &) {
-						vddlog("w", "Failed to parse option.txt line, skipping");
+						VDD_LOG_WARNING("Failed to parse option.txt line, skipping");
 					}
 				}
 			}
 
-			vddlog("i", "Using option.txt");
+			VDD_LOG_INFO("Using option.txt");
 			{
 				lock_guard<mutex> dataLock(g_DataMutex);
 				monitorModes = res;
@@ -332,15 +326,13 @@ void loadSettings()
 			{
 				int width, height, vsync_num, vsync_den;
 				tie(width, height, vsync_num, vsync_den) = mode;
-				stringstream ss;
-				ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
-				vddlog("d", ss.str().c_str());
+				VDD_LOG_DEBUG_STREAM("Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz");
 			}
 			return;
 		}
 		else
 		{
-			vddlog("w", "option.txt is empty or the first line is invalid. Enabling Fallback");
+			VDD_LOG_WARNING("option.txt is empty or the first line is invalid. Enabling Fallback");
 		}
 	}
 
@@ -384,7 +376,7 @@ void loadSettings()
 		{3840, 2160, 144.0f},
 		{3840, 2160, 165.0f}};
 
-	vddlog("i", "Loading Fallback - no settings found");
+	VDD_LOG_INFO("Loading Fallback - no settings found");
 
 	for (const auto &mode : fallbackRes)
 	{
@@ -395,11 +387,9 @@ void loadSettings()
 		int vsync_num, vsync_den;
 		float_to_vsync(refreshRate, vsync_num, vsync_den);
 
-		stringstream ss;
 		res.push_back(make_tuple(width, height, vsync_num, vsync_den));
 
-		ss << "Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz";
-		vddlog("d", ss.str().c_str());
+		VDD_LOG_DEBUG_STREAM("Resolution: " << width << "x" << height << " @ " << vsync_num << "/" << vsync_den << "Hz");
 	}
 
 	{

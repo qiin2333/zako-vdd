@@ -11,5 +11,3 @@
 #include <d3d11_2.h>
 #include <avrt.h>
 #include <wrl.h>
-
-#include "Trace.h"

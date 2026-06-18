@@ -1,194 +1,163 @@
 #include "Logger.h"
 
-#include "EtwTrace.h"
-#include "..\Util\StringConversion.h"
-
-#include <atomic>
-#include <chrono>
-#include <cstdio>
-#include <iomanip>
-#include <mutex>
-#include <shlobj.h>
-#include <sstream>
-#include <string>
+#include <cstring>
 #include <windows.h>
+#include <winmeta.h>
+#include <TraceLoggingProvider.h>
 
-using namespace std;
+TRACELOGGING_DEFINE_PROVIDER(
+	g_VddLogProvider,
+	"ZakoTech.VDD",
+	(0xb254994f, 0x46e6, 0x4719, 0x80, 0xa0, 0x0a, 0x3a, 0xa5, 0x0d, 0x6c, 0xe5));
 
-extern std::wstring confpath;
-extern std::atomic<bool> logsEnabled;
-extern std::atomic<bool> debugLogs;
-extern std::atomic<bool> sendLogsThroughPipe;
-extern HANDLE g_pipeHandle;
-
-static FILE* s_cachedLogFile = nullptr;
-static wstring s_cachedLogDate;
-static mutex s_logFileMutex;
-
-static wstring GetFallbackLogDir()
+namespace
 {
-	wchar_t programDataPath[MAX_PATH];
-	if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_COMMON_APPDATA, NULL, SHGFP_TYPE_CURRENT, programDataPath)))
-	{
-		return wstring(programDataPath) + L"\\VirtualDisplayDriver\\Logs";
-	}
-
-	wchar_t tempPath[MAX_PATH];
-	DWORD len = GetTempPathW(MAX_PATH, tempPath);
-	if (len > 0 && len < MAX_PATH)
-	{
-		return wstring(tempPath) + L"VirtualDisplayDriver\\Logs";
-	}
-
-	return wstring(L"C:\\Windows\\Temp\\VirtualDisplayDriver\\Logs");
-}
-
-void SendToPipe(const std::string& logMessage)
+UCHAR ToTraceLoggingLevel(VddLogLevel level)
 {
-	if (g_pipeHandle != INVALID_HANDLE_VALUE)
+	switch (level)
 	{
-		DWORD bytesWritten;
-		DWORD logMessageSize = static_cast<DWORD>(logMessage.size());
-		WriteFile(g_pipeHandle, logMessage.c_str(), logMessageSize, &bytesWritten, NULL);
+	case VddLogLevel::Critical:
+		return WINEVENT_LEVEL_CRITICAL;
+	case VddLogLevel::Error:
+		return WINEVENT_LEVEL_ERROR;
+	case VddLogLevel::Warning:
+		return WINEVENT_LEVEL_WARNING;
+	case VddLogLevel::Debug:
+	case VddLogLevel::Verbose:
+		return WINEVENT_LEVEL_VERBOSE;
+	case VddLogLevel::Info:
+	default:
+		return WINEVENT_LEVEL_INFO;
 	}
 }
 
-void vddlog(const char* type, const char* message)
+const char *LevelName(VddLogLevel level)
 {
-	VddEtwLog(type, message);
-
-	if (!logsEnabled)
+	switch (level)
 	{
-		lock_guard<mutex> lock(s_logFileMutex);
-		if (s_cachedLogFile != nullptr)
+	case VddLogLevel::Critical:
+		return "critical";
+	case VddLogLevel::Error:
+		return "error";
+	case VddLogLevel::Warning:
+		return "warning";
+	case VddLogLevel::Debug:
+		return "debug";
+	case VddLogLevel::Verbose:
+		return "verbose";
+	case VddLogLevel::Info:
+	default:
+		return "info";
+	}
+}
+
+const char *SourceFileName(const char *sourceFile)
+{
+	if (sourceFile == nullptr || sourceFile[0] == '\0')
+	{
+		return "";
+	}
+
+	const char *fileName = sourceFile;
+	for (const char *p = sourceFile; *p != '\0'; ++p)
+	{
+		if (*p == '\\' || *p == '/')
 		{
-			fclose(s_cachedLogFile);
-			s_cachedLogFile = nullptr;
-			s_cachedLogDate.clear();
+			fileName = p + 1;
 		}
-		return;
+	}
+	return fileName;
+}
+
+const char *CategoryFromSource(const char *sourceFile)
+{
+	if (sourceFile == nullptr)
+	{
+		return "driver";
 	}
 
-	auto now = chrono::system_clock::now();
-	auto in_time_t = chrono::system_clock::to_time_t(now);
-	tm tm_buf;
-	localtime_s(&tm_buf, &in_time_t);
-	wchar_t date_str[11];
-	wcsftime(date_str, sizeof(date_str) / sizeof(wchar_t), L"%Y-%m-%d", &tm_buf);
-	wstring currentDate = date_str;
+	if (strstr(sourceFile, "\\Adapter\\") || strstr(sourceFile, "/Adapter/")) return "Adapter";
+	if (strstr(sourceFile, "\\Callbacks\\") || strstr(sourceFile, "/Callbacks/")) return "Callbacks";
+	if (strstr(sourceFile, "\\Config\\") || strstr(sourceFile, "/Config/")) return "Config";
+	if (strstr(sourceFile, "\\Control\\") || strstr(sourceFile, "/Control/")) return "Control";
+	if (strstr(sourceFile, "\\Core\\") || strstr(sourceFile, "/Core/")) return "Core";
+	if (strstr(sourceFile, "\\Device\\") || strstr(sourceFile, "/Device/")) return "Device";
+	if (strstr(sourceFile, "\\Diagnostics\\") || strstr(sourceFile, "/Diagnostics/")) return "Diagnostics";
+	if (strstr(sourceFile, "\\Edid\\") || strstr(sourceFile, "/Edid/")) return "Edid";
+	if (strstr(sourceFile, "\\Logging\\") || strstr(sourceFile, "/Logging/")) return "Logging";
+	if (strstr(sourceFile, "\\Rendering\\") || strstr(sourceFile, "/Rendering/")) return "Rendering";
+	if (strstr(sourceFile, "\\Util\\") || strstr(sourceFile, "/Util/")) return "Util";
+	return "Driver";
+}
+}
 
-	string logType;
-	switch (type[0])
+bool VddLogIsEnabled(VddLogLevel level)
+{
+	return TraceLoggingProviderEnabled(g_VddLogProvider, ToTraceLoggingLevel(level), 0) != FALSE;
+}
+
+void VddLogWrite(VddLogLevel level, const char *sourceFile, const char *functionName, unsigned int line, const char *message)
+{
+	const char *safeMessage = message != nullptr ? message : "";
+	const char *safeFunction = functionName != nullptr ? functionName : "";
+	const char *sourceName = SourceFileName(sourceFile);
+	const char *category = CategoryFromSource(sourceFile);
+
+#define VDD_TRACELOG_WRITE(constantLevel) \
+	TraceLoggingWrite( \
+		g_VddLogProvider, \
+		"Log", \
+		TraceLoggingLevel(constantLevel), \
+		TraceLoggingString(LevelName(level), "Level"), \
+		TraceLoggingString(category, "Category"), \
+		TraceLoggingString(safeMessage, "Message"), \
+		TraceLoggingString(sourceName, "SourceFile"), \
+		TraceLoggingString(safeFunction, "Function"), \
+		TraceLoggingUInt32(line, "Line"))
+
+	switch (level)
 	{
-	case 'e':
-		logType = "ERROR";
+	case VddLogLevel::Critical:
+		VDD_TRACELOG_WRITE(WINEVENT_LEVEL_CRITICAL);
 		break;
-	case 'i':
-		logType = "INFO";
+	case VddLogLevel::Error:
+		VDD_TRACELOG_WRITE(WINEVENT_LEVEL_ERROR);
 		break;
-	case 'p':
-		logType = "PIPE";
+	case VddLogLevel::Warning:
+		VDD_TRACELOG_WRITE(WINEVENT_LEVEL_WARNING);
 		break;
-	case 'd':
-		logType = "DEBUG";
+	case VddLogLevel::Debug:
+	case VddLogLevel::Verbose:
+		VDD_TRACELOG_WRITE(WINEVENT_LEVEL_VERBOSE);
 		break;
-	case 'w':
-		logType = "WARNING";
+	case VddLogLevel::Info:
+	default:
+		VDD_TRACELOG_WRITE(WINEVENT_LEVEL_INFO);
 		break;
-	case 't':
-		logType = "TESTING";
+	}
+
+#undef VDD_TRACELOG_WRITE
+}
+
+extern "C" BOOL WINAPI DllMain(
+	_In_ HINSTANCE hInstance,
+	_In_ UINT reason,
+	_In_opt_ LPVOID reserved)
+{
+	UNREFERENCED_PARAMETER(reserved);
+
+	switch (reason)
+	{
+	case DLL_PROCESS_ATTACH:
+		DisableThreadLibraryCalls(hInstance);
+		TraceLoggingRegister(g_VddLogProvider);
 		break;
-	case 'c':
-		logType = "COMPANION";
+	case DLL_PROCESS_DETACH:
+		TraceLoggingUnregister(g_VddLogProvider);
 		break;
 	default:
-		logType = "UNKNOWN";
 		break;
 	}
 
-	if (logType == "DEBUG" && !debugLogs)
-	{
-		return;
-	}
-
-	lock_guard<mutex> lock(s_logFileMutex);
-
-	if (s_cachedLogFile == nullptr || s_cachedLogDate != currentDate)
-	{
-		if (s_cachedLogFile != nullptr)
-		{
-			fclose(s_cachedLogFile);
-			s_cachedLogFile = nullptr;
-		}
-
-		wstring logsDir = confpath + L"\\Logs";
-		bool useFallback = false;
-
-		if (!CreateDirectoryW(confpath.c_str(), NULL))
-		{
-			DWORD err = GetLastError();
-			useFallback = (err != ERROR_ALREADY_EXISTS);
-		}
-
-		if (!useFallback && !CreateDirectoryW(logsDir.c_str(), NULL))
-		{
-			DWORD err = GetLastError();
-			useFallback = (err != ERROR_ALREADY_EXISTS);
-		}
-
-		if (useFallback)
-		{
-			logsDir = GetFallbackLogDir();
-			size_t lastSlash = logsDir.find_last_of(L"\\");
-			if (lastSlash != wstring::npos)
-			{
-				CreateDirectoryW(logsDir.substr(0, lastSlash).c_str(), NULL);
-			}
-			CreateDirectoryW(logsDir.c_str(), NULL);
-		}
-
-		wstring logPath = logsDir + L"\\log_" + currentDate + L".txt";
-		string narrow_logPath = WStringToString(logPath);
-		FILE* logFile = nullptr;
-		errno_t fileErr = fopen_s(&logFile, narrow_logPath.c_str(), "a");
-
-		if ((fileErr != 0 || logFile == nullptr) && !useFallback)
-		{
-			logsDir = GetFallbackLogDir();
-			size_t lastSlash = logsDir.find_last_of(L"\\");
-			if (lastSlash != wstring::npos)
-			{
-				CreateDirectoryW(logsDir.substr(0, lastSlash).c_str(), NULL);
-			}
-			CreateDirectoryW(logsDir.c_str(), NULL);
-
-			logPath = logsDir + L"\\log_" + currentDate + L".txt";
-			narrow_logPath = WStringToString(logPath);
-			fileErr = fopen_s(&logFile, narrow_logPath.c_str(), "a");
-		}
-
-		if (fileErr != 0 || logFile == nullptr)
-		{
-			return;
-		}
-
-		s_cachedLogFile = logFile;
-		s_cachedLogDate = currentDate;
-	}
-
-	FILE* logFile = s_cachedLogFile;
-
-	stringstream ss;
-	ss << put_time(&tm_buf, "%Y-%m-%d %X");
-
-	fprintf(logFile, "[%s] [%s] %s\n", ss.str().c_str(), logType.c_str(), message);
-	fflush(logFile);
-
-	if (sendLogsThroughPipe && g_pipeHandle != INVALID_HANDLE_VALUE)
-	{
-		string logMessage = ss.str() + " [" + logType + "] " + message + "\n";
-		DWORD bytesWritten;
-		DWORD logMessageSize = static_cast<DWORD>(logMessage.size());
-		WriteFile(g_pipeHandle, logMessage.c_str(), logMessageSize, &bytesWritten, NULL);
-	}
+	return TRUE;
 }

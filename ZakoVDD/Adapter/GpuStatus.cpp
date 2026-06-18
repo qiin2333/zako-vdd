@@ -18,7 +18,7 @@ LUID getSetAdapterLuid()
 
 	if (!adapterOption.hasTargetAdapter)
 	{
-		vddlog("e", "No Gpu Found/Selected");
+		VDD_LOG_ERROR("No Gpu Found/Selected");
 	}
 
 	return adapterOption.adapterLuid;
@@ -30,7 +30,7 @@ void GetGpuInfo()
 
 	if (!adapterOption.hasTargetAdapter)
 	{
-		vddlog("e", "No GPU found or set.");
+		VDD_LOG_ERROR("No GPU found or set.");
 		return;
 	}
 
@@ -40,10 +40,10 @@ void GetGpuInfo()
 		LUID luid = getSetAdapterLuid();
 		string logtext = "ASSIGNED GPU: " + utf8_desc +
 						 " (LUID: " + std::to_string(luid.LowPart) + "-" + std::to_string(luid.HighPart) + ")";
-		vddlog("i", logtext.c_str());
+		VDD_LOG_INFO(logtext.c_str());
 	}
 	catch (const exception &e)
 	{
-		vddlog("e", ("Error: " + string(e.what())).c_str());
+		VDD_LOG_ERROR(("Error: " + string(e.what())).c_str());
 	}
 }

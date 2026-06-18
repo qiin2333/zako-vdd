@@ -5,8 +5,6 @@
 using VddCommandAction = void (*)(HANDLE, wchar_t *);
 
 void HandleReloadDriverCommand(HANDLE hPipe, wchar_t *param);
-void HandleLogDebugCommand(HANDLE hPipe, wchar_t *param);
-void HandleLoggingCommand(HANDLE hPipe, wchar_t *param);
 void HandleHdrPlusCommand(HANDLE hPipe, wchar_t *param);
 void HandleSdr10Command(HANDLE hPipe, wchar_t *param);
 void HandleCustomEdidCommand(HANDLE hPipe, wchar_t *param);

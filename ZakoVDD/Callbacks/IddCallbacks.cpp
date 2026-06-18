@@ -32,15 +32,13 @@ _Use_decl_annotations_
 	if (NT_SUCCESS(pInArgs->AdapterInitStatus))
 	{
 		pContext->pContext->FinishInit();
-		vddlog("d", "Adapter initialization finished successfully.");
+		VDD_LOG_DEBUG("Adapter initialization finished successfully.");
 	}
 	else
 	{
-		stringstream ss;
-		ss << "Adapter initialization failed. Status: " << pInArgs->AdapterInitStatus;
-		vddlog("e", ss.str().c_str());
+		VDD_LOG_ERROR_STREAM("Adapter initialization failed. Status: " << pInArgs->AdapterInitStatus);
 	}
-	vddlog("i", "Finished Setting up adapter.");
+	VDD_LOG_INFO("Finished Setting up adapter.");
 
 	return STATUS_SUCCESS;
 }
@@ -61,9 +59,7 @@ _Use_decl_annotations_
 	NTSTATUS
 VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION *pInArgs, IDARG_OUT_PARSEMONITORDESCRIPTION *pOutArgs)
 {
-	stringstream logStream;
-	logStream << "Parsing monitor description. Input buffer count: " << pInArgs->MonitorModeBufferInputCount;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Parsing monitor description. Input buffer count: " << pInArgs->MonitorModeBufferInputCount);
 
 	// Take a local snapshot of monitorModes under lock to prevent data races
 	vector<tuple<int, int, int, int>> localModes;
@@ -81,15 +77,11 @@ VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTI
 	}
 	pOutArgs->MonitorModeBufferOutputCount = (UINT)localModes.size();
 
-	logStream.str("");
-	logStream << "Number of monitor modes generated: " << localModes.size();
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Number of monitor modes generated: " << localModes.size());
 
 	if (pInArgs->MonitorModeBufferInputCount < localModes.size())
 	{
-		logStream.str("");
-		logStream << "Buffer too small. Input count: " << pInArgs->MonitorModeBufferInputCount << ", Required: " << localModes.size();
-		vddlog("w", logStream.str().c_str());
+		VDD_LOG_WARNING_STREAM("Buffer too small. Input count: " << pInArgs->MonitorModeBufferInputCount << ", Required: " << localModes.size());
 		// Return success if there was no buffer, since the caller was only asking for a count of modes
 		return (pInArgs->MonitorModeBufferInputCount > 0) ? STATUS_BUFFER_TOO_SMALL : STATUS_SUCCESS;
 	}
@@ -98,7 +90,7 @@ VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTI
 		auto *monitorModesOutput = pInArgs->pMonitorModes;
 		if (monitorModesOutput == nullptr)
 		{
-			vddlog("e", "Monitor mode output buffer is null.");
+			VDD_LOG_ERROR("Monitor mode output buffer is null.");
 			return STATUS_INVALID_PARAMETER;
 		}
 
@@ -112,7 +104,7 @@ VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTI
 
 		// Set the preferred mode as represented in the EDID
 		pOutArgs->PreferredMonitorModeIdx = 0;
-		vddlog("d", "Monitor description parsed successfully.");
+		VDD_LOG_DEBUG("Monitor description parsed successfully.");
 		return STATUS_SUCCESS;
 	}
 }
@@ -135,12 +127,10 @@ _Use_decl_annotations_
 /// </summary>
 void CreateTargetMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
-	stringstream logStream;
-	logStream << "Creating target mode with Width: " << Width
-			  << ", Height: " << Height
-			  << ", VSyncNum: " << VSyncNum
-			  << ", VSyncDen: " << VSyncDen;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Creating target mode with Width: " << Width
+	                     << ", Height: " << Height
+	                     << ", VSyncNum: " << VSyncNum
+	                     << ", VSyncDen: " << VSyncDen);
 
 	Mode.totalSize.cx = Mode.activeSize.cx = Width;
 	Mode.totalSize.cy = Mode.activeSize.cy = Height;
@@ -153,15 +143,13 @@ void CreateTargetMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO &Mode, UINT Width, UINT He
 	Mode.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
 	Mode.pixelRate = static_cast<UINT64>(VSyncNum) * Width * Height / (VSyncDen > 0 ? VSyncDen : 1);
 
-	logStream.str("");
-	logStream << "Target mode configured with:"
-			  << "\n  Total Size: (" << Mode.totalSize.cx << ", " << Mode.totalSize.cy << ")"
-			  << "\n  Active Size: (" << Mode.activeSize.cx << ", " << Mode.activeSize.cy << ")"
-			  << "\n  vSync Frequency: " << Mode.vSyncFreq.Numerator << "/" << Mode.vSyncFreq.Denominator
-			  << "\n  hSync Frequency: " << Mode.hSyncFreq.Numerator << "/" << Mode.hSyncFreq.Denominator
-			  << "\n  Pixel Rate: " << Mode.pixelRate
-			  << "\n  Scan Line Ordering: " << Mode.scanLineOrdering;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Target mode configured with:"
+	                     << "\n  Total Size: (" << Mode.totalSize.cx << ", " << Mode.totalSize.cy << ")"
+	                     << "\n  Active Size: (" << Mode.activeSize.cx << ", " << Mode.activeSize.cy << ")"
+	                     << "\n  vSync Frequency: " << Mode.vSyncFreq.Numerator << "/" << Mode.vSyncFreq.Denominator
+	                     << "\n  hSync Frequency: " << Mode.hSyncFreq.Numerator << "/" << Mode.hSyncFreq.Denominator
+	                     << "\n  Pixel Rate: " << Mode.pixelRate
+	                     << "\n  Scan Line Ordering: " << Mode.scanLineOrdering);
 }
 
 void CreateTargetMode(IDDCX_TARGET_MODE &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
@@ -172,12 +160,10 @@ void CreateTargetMode(IDDCX_TARGET_MODE &Mode, UINT Width, UINT Height, UINT VSy
 
 void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
-	stringstream logStream;
-	logStream << "Creating IDDCX_TARGET_MODE2 with Width: " << Width
-			  << ", Height: " << Height
-			  << ", VSyncNum: " << VSyncNum
-			  << ", VSyncDen: " << VSyncDen;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Creating IDDCX_TARGET_MODE2 with Width: " << Width
+	                     << ", Height: " << Height
+	                     << ", VSyncNum: " << VSyncNum
+	                     << ", VSyncDen: " << VSyncDen);
 
 	Mode.Size = sizeof(Mode);
 
@@ -202,10 +188,8 @@ void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT V
 		Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
 	}
 
-	logStream.str("");
-	logStream << "IDDCX_TARGET_MODE2 configured with Size: " << Mode.Size
-			  << " and colour format " << WStringToString(ColourFormat);
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("IDDCX_TARGET_MODE2 configured with Size: " << Mode.Size
+	                     << " and colour format " << WStringToString(ColourFormat));
 
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
@@ -225,9 +209,7 @@ _Use_decl_annotations_
 
 	vector<IDDCX_TARGET_MODE> TargetModes(localModes.size());
 
-	stringstream logStream;
-	logStream << "Creating target modes. Number of monitor modes: " << localModes.size();
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Creating target modes. Number of monitor modes: " << localModes.size());
 
 	// Create a set of modes supported for frame processing and scan-out. These are typically not based on the
 	// monitor's descriptor and instead are based on the static processing capability of the device. The OS will
@@ -237,32 +219,24 @@ _Use_decl_annotations_
 	{
 		CreateTargetMode(TargetModes[i], std::get<0>(localModes[i]), std::get<1>(localModes[i]), std::get<2>(localModes[i]), std::get<3>(localModes[i]));
 
-		logStream.str("");
-		logStream << "Created target mode " << i << ": Width = " << std::get<0>(localModes[i])
-				  << ", Height = " << std::get<1>(localModes[i])
-				  << ", VSync = " << std::get<2>(localModes[i]);
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG_STREAM("Created target mode " << i << ": Width = " << std::get<0>(localModes[i])
+		                     << ", Height = " << std::get<1>(localModes[i])
+		                     << ", VSync = " << std::get<2>(localModes[i]));
 	}
 
 	pOutArgs->TargetModeBufferOutputCount = (UINT)TargetModes.size();
 
-	logStream.str("");
-	logStream << "Number of target modes to output: " << pOutArgs->TargetModeBufferOutputCount;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Number of target modes to output: " << pOutArgs->TargetModeBufferOutputCount);
 
 	if (pInArgs->TargetModeBufferInputCount >= TargetModes.size())
 	{
-		logStream.str("");
-		logStream << "Copying target modes to output buffer.";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("Copying target modes to output buffer.");
 		copy(TargetModes.begin(), TargetModes.end(), pInArgs->pTargetModes);
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Input buffer too small. Required: " << TargetModes.size()
-				  << ", Provided: " << pInArgs->TargetModeBufferInputCount;
-		vddlog("w", logStream.str().c_str());
+		VDD_LOG_WARNING_STREAM("Input buffer too small. Required: " << TargetModes.size()
+		                       << ", Provided: " << pInArgs->TargetModeBufferInputCount);
 	}
 
 	return STATUS_SUCCESS;
@@ -272,15 +246,13 @@ _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverMonitorAssignSwapChain(IDDCX_MONITOR MonitorObject, const IDARG_IN_SETSWAPCHAIN *pInArgs)
 {
-	stringstream logStream;
-	logStream << "Assigning swap chain:"
-			  << "\n  hSwapChain: " << pInArgs->hSwapChain
-			  << "\n  RenderAdapterLuid: " << pInArgs->RenderAdapterLuid.LowPart << "-" << pInArgs->RenderAdapterLuid.HighPart
-			  << "\n  hNextSurfaceAvailable: " << pInArgs->hNextSurfaceAvailable;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Assigning swap chain:"
+	                     << "\n  hSwapChain: " << pInArgs->hSwapChain
+	                     << "\n  RenderAdapterLuid: " << pInArgs->RenderAdapterLuid.LowPart << "-" << pInArgs->RenderAdapterLuid.HighPart
+	                     << "\n  hNextSurfaceAvailable: " << pInArgs->hNextSurfaceAvailable);
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
 	pContext->pContext->AssignSwapChain(MonitorObject, pInArgs->hSwapChain, pInArgs->RenderAdapterLuid, pInArgs->hNextSurfaceAvailable);
-	vddlog("d", "Swap chain assigned successfully.");
+	VDD_LOG_DEBUG("Swap chain assigned successfully.");
 	return STATUS_SUCCESS;
 }
 
@@ -288,12 +260,10 @@ _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverMonitorUnassignSwapChain(IDDCX_MONITOR MonitorObject)
 {
-	stringstream logStream;
-	logStream << "Unassigning swap chain for monitor object: " << MonitorObject;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Unassigning swap chain for monitor object: " << MonitorObject);
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
 	pContext->pContext->UnassignSwapChain(MonitorObject);
-	vddlog("d", "Swap chain unassigned successfully.");
+	VDD_LOG_DEBUG("Swap chain unassigned successfully.");
 	return STATUS_SUCCESS;
 }
 
@@ -304,9 +274,7 @@ _Use_decl_annotations_
 		IDARG_IN_QUERYTARGET_INFO *pInArgs,
 		IDARG_OUT_QUERYTARGET_INFO *pOutArgs)
 {
-	stringstream logStream;
-	logStream << "Querying target info for adapter object: " << AdapterObject;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Querying target info for adapter object: " << AdapterObject);
 
 	UNREFERENCED_PARAMETER(pInArgs);
 
@@ -333,10 +301,8 @@ _Use_decl_annotations_
 		pOutArgs->DitheringSupport.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
 	}
 
-	logStream.str("");
-	logStream << "Target capabilities set to: " << pOutArgs->TargetCaps
-			  << "\nDithering support colour format set to: " << WStringToString(ColourFormat);
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Target capabilities set to: " << pOutArgs->TargetCaps
+	                     << "\nDithering support colour format set to: " << WStringToString(ColourFormat));
 
 	return STATUS_SUCCESS;
 }
@@ -347,9 +313,7 @@ _Use_decl_annotations_
 		IDDCX_MONITOR MonitorObject,
 		const IDARG_IN_MONITOR_SET_DEFAULT_HDR_METADATA *pInArgs)
 {
-	stringstream logStream;
-	logStream << "Setting default HDR metadata for monitor object: " << MonitorObject;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Setting default HDR metadata for monitor object: " << MonitorObject);
 
 	// Get the HDR luminance settings for this monitor
 	float maxNits = 1000.0f; // Default max luminance
@@ -364,30 +328,24 @@ _Use_decl_annotations_
 			maxNits = it->second.maxNits;
 			minNits = it->second.minNits;
 			maxFALL = it->second.maxFALL;
-			logStream.str("");
-			logStream << "Retrieved HDR settings - MaxNits: " << maxNits
-			          << ", MinNits: " << minNits
-			          << ", MaxFALL: " << maxFALL;
-			vddlog("d", logStream.str().c_str());
+			VDD_LOG_DEBUG_STREAM("Retrieved HDR settings - MaxNits: " << maxNits
+			                     << ", MinNits: " << minNits
+			                     << ", MaxFALL: " << maxFALL);
 		}
 		else
 		{
-			vddlog("d", "Using default HDR luminance settings (monitor not found in settings map)");
+			VDD_LOG_DEBUG("Using default HDR luminance settings (monitor not found in settings map)");
 		}
 	}
 
 	// Log the incoming metadata type
 	if (pInArgs)
 	{
-		logStream.str("");
-		logStream << "HDR Metadata Type: " << static_cast<int>(pInArgs->Type);
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG_STREAM("HDR Metadata Type: " << static_cast<int>(pInArgs->Type));
 
 		// Log current luminance settings being applied
-		logStream.str("");
-		logStream << "Applying HDR10 metadata - MaxMasteringLuminance: " << maxNits
-				  << " nits, MinMasteringLuminance: " << (minNits * 10000.0f) << " (normalized)";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG_STREAM("Applying HDR10 metadata - MaxMasteringLuminance: " << maxNits
+		                     << " nits, MinMasteringLuminance: " << (minNits * 10000.0f) << " (normalized)");
 	}
 
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
@@ -396,7 +354,7 @@ _Use_decl_annotations_
 		pContext->pContext->UpdateMonitorHdrMetadata(MonitorObject, true, maxNits, minNits, maxFALL);
 	}
 
-	vddlog("d", "Default HDR metadata set successfully.");
+	VDD_LOG_DEBUG("Default HDR metadata set successfully.");
 
 	return STATUS_SUCCESS;
 }
@@ -414,21 +372,22 @@ _Use_decl_annotations_
 		localModes = monitorModes;
 	}
 
-	stringstream logStream;
-	logStream << "Parsing monitor description:"
-			  << "\n  MonitorModeBufferInputCount: " << pInArgs->MonitorModeBufferInputCount
-			  << "\n  pMonitorModes: " << (pInArgs->pMonitorModes ? "Valid" : "Null");
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Parsing monitor description:"
+	                     << "\n  MonitorModeBufferInputCount: " << pInArgs->MonitorModeBufferInputCount
+	                     << "\n  pMonitorModes: " << (pInArgs->pMonitorModes ? "Valid" : "Null"));
 
-	logStream.str("");
-	logStream << "Monitor Modes:";
-	for (const auto &mode : localModes)
+	VDD_LOG_DEBUG_LAZY([&]() -> string
 	{
-		logStream << "\n  Mode - Width: " << std::get<0>(mode)
-				  << ", Height: " << std::get<1>(mode)
-				  << ", RefreshRate: " << std::get<2>(mode);
-	}
-	vddlog("d", logStream.str().c_str());
+		stringstream logStream;
+		logStream << "Monitor Modes:";
+		for (const auto &mode : localModes)
+		{
+			logStream << "\n  Mode - Width: " << std::get<0>(mode)
+			          << ", Height: " << std::get<1>(mode)
+			          << ", RefreshRate: " << std::get<2>(mode);
+		}
+		return logStream.str();
+	});
 
 	// Clear previous monitor modes to prevent accumulation on reload
 	s_KnownMonitorModes2.clear();
@@ -449,13 +408,11 @@ _Use_decl_annotations_
 		auto *monitorModesOutput = pInArgs->pMonitorModes;
 		if (monitorModesOutput == nullptr)
 		{
-			vddlog("e", "Monitor mode output buffer is null.");
+			VDD_LOG_ERROR("Monitor mode output buffer is null.");
 			return STATUS_INVALID_PARAMETER;
 		}
 
 		// Copy the known modes to the output buffer
-		logStream.str(""); // Clear the stream
-		logStream << "Writing monitor modes to output buffer:";
 		for (DWORD ModeIndex = 0; ModeIndex < localModes.size(); ModeIndex++)
 		{
 			monitorModesOutput[ModeIndex].Size = sizeof(IDDCX_MONITOR_MODE2);
@@ -483,13 +440,21 @@ _Use_decl_annotations_
 				monitorModesOutput[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
 			}
 
-			logStream << "\n  ModeIndex: " << ModeIndex
-					  << "\n    Size: " << monitorModesOutput[ModeIndex].Size
-					  << "\n    Origin: " << monitorModesOutput[ModeIndex].Origin
-					  << "\n    Colour Format: " << WStringToString(ColourFormat);
 		}
 
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG_LAZY([&]() -> string
+		{
+			stringstream logStream;
+			logStream << "Writing monitor modes to output buffer:";
+			for (DWORD ModeIndex = 0; ModeIndex < localModes.size(); ModeIndex++)
+			{
+				logStream << "\n  ModeIndex: " << ModeIndex
+				          << "\n    Size: " << monitorModesOutput[ModeIndex].Size
+				          << "\n    Origin: " << monitorModesOutput[ModeIndex].Origin
+				          << "\n    Colour Format: " << WStringToString(ColourFormat);
+			}
+			return logStream.str();
+		});
 
 		// Set the preferred mode as represented in the EDID
 		pOutArgs->PreferredMonitorModeIdx = 0;
@@ -506,12 +471,9 @@ _Use_decl_annotations_
 		IDARG_OUT_QUERYTARGETMODES *pOutArgs)
 {
 	// UNREFERENCED_PARAMETER(MonitorObject);
-	stringstream logStream;
-
-	logStream << "Querying target modes:"
-			  << "\n  MonitorObject Handle: " << static_cast<void *>(MonitorObject)
-			  << "\n  TargetModeBufferInputCount: " << pInArgs->TargetModeBufferInputCount;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Querying target modes:"
+	                     << "\n  MonitorObject Handle: " << static_cast<void *>(MonitorObject)
+	                     << "\n  TargetModeBufferInputCount: " << pInArgs->TargetModeBufferInputCount);
 
 	// Take a local snapshot of monitorModes under lock to prevent data races
 	vector<tuple<int, int, int, int>> localModes;
@@ -526,42 +488,49 @@ _Use_decl_annotations_
 	// monitor's descriptor and instead are based on the static processing capability of the device. The OS will
 	// report the available set of modes for a given output as the intersection of monitor modes with target modes.
 
-	logStream.str(""); // Clear the stream
-	logStream << "Creating target modes:";
-
 	for (int i = 0; i < localModes.size(); i++)
 	{
 		CreateTargetMode2(TargetModes[i], std::get<0>(localModes[i]), std::get<1>(localModes[i]), std::get<2>(localModes[i]), std::get<3>(localModes[i]));
-		logStream << "\n  TargetModeIndex: " << i
-				  << "\n    Width: " << std::get<0>(localModes[i])
-				  << "\n    Height: " << std::get<1>(localModes[i])
-				  << "\n    RefreshRate: " << std::get<2>(localModes[i]);
 	}
-	vddlog("d", logStream.str().c_str());
+
+	VDD_LOG_DEBUG_LAZY([&]() -> string
+	{
+		stringstream logStream;
+		logStream << "Creating target modes:";
+		for (int i = 0; i < localModes.size(); i++)
+		{
+			logStream << "\n  TargetModeIndex: " << i
+			          << "\n    Width: " << std::get<0>(localModes[i])
+			          << "\n    Height: " << std::get<1>(localModes[i])
+			          << "\n    RefreshRate: " << std::get<2>(localModes[i]);
+		}
+		return logStream.str();
+	});
 
 	pOutArgs->TargetModeBufferOutputCount = (UINT)TargetModes.size();
 
-	logStream.str("");
-	logStream << "Output target modes count: " << pOutArgs->TargetModeBufferOutputCount;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Output target modes count: " << pOutArgs->TargetModeBufferOutputCount);
 
 	if (pInArgs->TargetModeBufferInputCount >= TargetModes.size())
 	{
 		copy(TargetModes.begin(), TargetModes.end(), pInArgs->pTargetModes);
 
-		logStream.str("");
-		logStream << "Target modes copied to output buffer:";
-		for (int i = 0; i < TargetModes.size(); i++)
+		VDD_LOG_DEBUG_LAZY([&]() -> string
 		{
-			logStream << "\n  TargetModeIndex: " << i
-					  << "\n    Size: " << TargetModes[i].Size
-					  << "\n    ColourFormat: " << WStringToString(ColourFormat);
-		}
-		vddlog("d", logStream.str().c_str());
+			stringstream logStream;
+			logStream << "Target modes copied to output buffer:";
+			for (int i = 0; i < TargetModes.size(); i++)
+			{
+				logStream << "\n  TargetModeIndex: " << i
+				          << "\n    Size: " << TargetModes[i].Size
+				          << "\n    ColourFormat: " << WStringToString(ColourFormat);
+			}
+			return logStream.str();
+		});
 	}
 	else
 	{
-		vddlog("w", "Input buffer is too small for target modes.");
+		VDD_LOG_WARNING("Input buffer is too small for target modes.");
 	}
 
 	return STATUS_SUCCESS;

@@ -24,7 +24,7 @@ bool UpdateXmlElementText(const wchar_t *targetElement, const wchar_t *replaceme
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READWRITE, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
 	if (FAILED(hr))
 	{
-		vddlog("e", "UpdatingXML: XML file could not be opened.");
+		VDD_LOG_ERROR("UpdatingXML: XML file could not be opened.");
 		return false;
 	}
 
@@ -32,13 +32,13 @@ bool UpdateXmlElementText(const wchar_t *targetElement, const wchar_t *replaceme
 	hr = CreateXmlReader(__uuidof(IXmlReader), reinterpret_cast<void **>(&pReader), nullptr);
 	if (FAILED(hr))
 	{
-		vddlog("e", "UpdatingXML: Failed to create XML reader.");
+		VDD_LOG_ERROR("UpdatingXML: Failed to create XML reader.");
 		return false;
 	}
 	hr = pReader->SetInput(pFileStream);
 	if (FAILED(hr))
 	{
-		vddlog("e", "UpdatingXML: Failed to set XML reader input.");
+		VDD_LOG_ERROR("UpdatingXML: Failed to set XML reader input.");
 		return false;
 	}
 
@@ -47,7 +47,7 @@ bool UpdateXmlElementText(const wchar_t *targetElement, const wchar_t *replaceme
 	hr = SHCreateStreamOnFileEx(tempFileName.c_str(), STGM_CREATE | STGM_WRITE, FILE_ATTRIBUTE_NORMAL, TRUE, nullptr, &pOutFileStream);
 	if (FAILED(hr))
 	{
-		vddlog("e", "UpdatingXML: Failed to create output file stream.");
+		VDD_LOG_ERROR("UpdatingXML: Failed to create output file stream.");
 		return false;
 	}
 
@@ -55,19 +55,19 @@ bool UpdateXmlElementText(const wchar_t *targetElement, const wchar_t *replaceme
 	hr = CreateXmlWriter(__uuidof(IXmlWriter), reinterpret_cast<void **>(&pWriter), nullptr);
 	if (FAILED(hr))
 	{
-		vddlog("e", "UpdatingXML: Failed to create XML writer.");
+		VDD_LOG_ERROR("UpdatingXML: Failed to create XML writer.");
 		return false;
 	}
 	hr = pWriter->SetOutput(pOutFileStream);
 	if (FAILED(hr))
 	{
-		vddlog("e", "UpdatingXML: Failed to set XML writer output.");
+		VDD_LOG_ERROR("UpdatingXML: Failed to set XML writer output.");
 		return false;
 	}
 	hr = pWriter->WriteStartDocument(XmlStandalone_Omit);
 	if (FAILED(hr))
 	{
-		vddlog("e", "UpdatingXML: Failed to write start of the document.");
+		VDD_LOG_ERROR("UpdatingXML: Failed to write start of the document.");
 		return false;
 	}
 

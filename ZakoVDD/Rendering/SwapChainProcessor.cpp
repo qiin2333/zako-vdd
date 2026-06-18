@@ -1,12 +1,11 @@
 #include "SwapChainProcessor.h"
 
+#include "..\Logging\Logger.h"
+
 #include <exception>
-#include <sstream>
 
 using namespace std;
 using namespace Microsoft::WRL;
-
-void vddlog(const char* type, const char* message);
 
 namespace Microsoft
 {
@@ -16,14 +15,11 @@ namespace IndirectDisp
 SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex)
 	: m_hSwapChain(hSwapChain), m_Device(Device), m_hAvailableBufferEvent(NewFrameEvent), m_MonitorIndex(MonitorIndex)
 {
-	stringstream logStream;
-
-	logStream << "Constructing SwapChainProcessor:"
-	          << "\n  SwapChain Handle: " << static_cast<void*>(hSwapChain)
-	          << "\n  Device Pointer: " << static_cast<void*>(Device.get())
-	          << "\n  NewFrameEvent Handle: " << NewFrameEvent
-	          << "\n  Monitor Index: " << MonitorIndex;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Constructing SwapChainProcessor:"
+	                     << "\n  SwapChain Handle: " << static_cast<void*>(hSwapChain)
+	                     << "\n  Device Pointer: " << static_cast<void*>(Device.get())
+	                     << "\n  NewFrameEvent Handle: " << NewFrameEvent
+	                     << "\n  Monitor Index: " << MonitorIndex);
 
 	// Initialize the VDD->external consumer frame exporter (best effort).
 	try
@@ -32,61 +28,45 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Di
 	}
 	catch (...)
 	{
-		vddlog("e", "[VddExport] Failed to construct SharedFrameExporter (non-fatal)");
+		VDD_LOG_ERROR("[VddExport] Failed to construct SharedFrameExporter (non-fatal)");
 		m_Exporter.reset();
 	}
 
 	m_hTerminateEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
 	if (!m_hTerminateEvent.Get())
 	{
-		logStream.str("");
-		logStream << "Failed to create terminate event. GetLastError: " << GetLastError();
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("Failed to create terminate event. GetLastError: " << GetLastError());
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Terminate event created successfully.";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("Terminate event created successfully.");
 	}
 
 	// Immediately create and run the swap-chain processing thread, passing 'this' as the thread parameter
 	m_hThread.Attach(CreateThread(nullptr, 0, RunThread, this, 0, nullptr));
 	if (!m_hThread.Get())
 	{
-		logStream.str("");
-		logStream << "Failed to create swap-chain processing thread. GetLastError: " << GetLastError();
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("Failed to create swap-chain processing thread. GetLastError: " << GetLastError());
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Swap-chain processing thread created and started successfully.";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("Swap-chain processing thread created and started successfully.");
 	}
 }
 
 SwapChainProcessor::~SwapChainProcessor()
 {
-	stringstream logStream;
-
-	logStream << "Destructing SwapChainProcessor:";
-
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG("Destructing SwapChainProcessor:");
 	// Alert the swap-chain processing thread to terminate
 	// SetEvent(m_hTerminateEvent.Get()); changed for error handling + log purposes
 
 	if (SetEvent(m_hTerminateEvent.Get()))
 	{
-		logStream.str("");
-		logStream << "Terminate event signaled successfully.";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("Terminate event signaled successfully.");
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Failed to signal terminate event. GetLastError: " << GetLastError();
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("Failed to signal terminate event. GetLastError: " << GetLastError());
 	}
 
 	if (m_hThread.Get())
@@ -97,27 +77,19 @@ SwapChainProcessor::~SwapChainProcessor()
 		switch (waitResult)
 		{
 		case WAIT_OBJECT_0:
-			logStream.str("");
-			logStream << "Thread terminated successfully.";
-			vddlog("d", logStream.str().c_str());
+			VDD_LOG_DEBUG("Thread terminated successfully.");
 			break;
 		case WAIT_ABANDONED:
-			logStream.str("");
-			logStream << "Thread wait was abandoned. GetLastError: " << GetLastError();
-			vddlog("e", logStream.str().c_str());
+			VDD_LOG_ERROR_STREAM("Thread wait was abandoned. GetLastError: " << GetLastError());
 			break;
 		default:
-			logStream.str("");
-			logStream << "Unexpected result from WaitForSingleObject: " << waitResult << ". GetLastError: " << GetLastError();
-			vddlog("e", logStream.str().c_str());
+			VDD_LOG_ERROR_STREAM("Unexpected result from WaitForSingleObject: " << waitResult << ". GetLastError: " << GetLastError());
 			break;
 		}
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "No valid thread handle to wait for.";
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR("No valid thread handle to wait for.");
 	}
 }
 
@@ -145,10 +117,7 @@ void SwapChainProcessor::UpdateHdrMetadata(bool isHdr, float maxNits, float minN
 
 DWORD CALLBACK SwapChainProcessor::RunThread(LPVOID Argument)
 {
-	stringstream logStream;
-
-	logStream << "RunThread started. Argument: " << Argument;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("RunThread started. Argument: " << Argument);
 
 	reinterpret_cast<SwapChainProcessor*>(Argument)->Run();
 	return 0;
@@ -156,10 +125,7 @@ DWORD CALLBACK SwapChainProcessor::RunThread(LPVOID Argument)
 
 void SwapChainProcessor::Run()
 {
-	stringstream logStream;
-
-	logStream << "Run method started.";
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG("Run method started.");
 
 	// For improved performance, make use of the Multimedia Class Scheduler Service, which will intelligently
 	// prioritize this thread for improved throughput in high CPU-load scenarios.
@@ -172,19 +138,13 @@ void SwapChainProcessor::Run()
 		// Additionally boost thread priority within the MMCSS task
 		if (!AvSetMmThreadPriority(AvTaskHandle, AVRT_PRIORITY_CRITICAL))
 		{
-			logStream.str("");
-			logStream << "Failed to set MMCSS priority to CRITICAL. GetLastError: " << GetLastError();
-			vddlog("w", logStream.str().c_str());
+			VDD_LOG_WARNING_STREAM("Failed to set MMCSS priority to CRITICAL. GetLastError: " << GetLastError());
 		}
-		logStream.str("");
-		logStream << "Multimedia thread characteristics set successfully (Pro Audio). AvTask: " << AvTask;
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG_STREAM("Multimedia thread characteristics set successfully (Pro Audio). AvTask: " << AvTask);
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Failed to set multimedia thread characteristics. GetLastError: " << GetLastError();
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("Failed to set multimedia thread characteristics. GetLastError: " << GetLastError());
 	}
 
 	// Also set regular thread priority as high as possible (in case MMCSS doesn't fully apply)
@@ -192,9 +152,7 @@ void SwapChainProcessor::Run()
 
 	RunCore();
 
-	logStream.str("");
-	logStream << "Core processing function RunCore() completed.";
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG("Core processing function RunCore() completed.");
 
 	// Always delete the swap-chain object when swap-chain processing loop terminates in order to kick the system to
 	// provide a new swap-chain if necessary.
@@ -203,35 +161,29 @@ void SwapChainProcessor::Run()
 		try
 		{
 			// Attempt graceful cleanup first
-			vddlog("d", "Attempting graceful swap-chain cleanup");
+			VDD_LOG_DEBUG("Attempting graceful swap-chain cleanup");
 
 			// Give the system time to complete any pending operations
 			Sleep(10);
 
 			WdfObjectDelete((WDFOBJECT)m_hSwapChain);
-			logStream.str("");
-			logStream << "Swap-chain object deleted successfully.";
-			vddlog("d", logStream.str().c_str());
+			VDD_LOG_DEBUG("Swap-chain object deleted successfully.");
 			m_hSwapChain = nullptr;
 		}
 		catch (const std::exception& e)
 		{
-			stringstream errorStream;
-			errorStream << "Exception while deleting swap-chain: " << e.what();
-			vddlog("e", errorStream.str().c_str());
+			VDD_LOG_ERROR_STREAM("Exception while deleting swap-chain: " << e.what());
 			m_hSwapChain = nullptr; // Mark as null to prevent further access
 		}
 		catch (...)
 		{
-			vddlog("e", "Unknown exception while deleting swap-chain");
+			VDD_LOG_ERROR("Unknown exception while deleting swap-chain");
 			m_hSwapChain = nullptr; // Mark as null to prevent further access
 		}
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "No valid swap-chain object to delete.";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("No valid swap-chain object to delete.");
 	}
 	/*
 	AvRevertMmThreadCharacteristics(AvTaskHandle);
@@ -239,29 +191,22 @@ void SwapChainProcessor::Run()
 	// error handling when reversing multimedia thread characteristics
 	if (AvRevertMmThreadCharacteristics(AvTaskHandle))
 	{
-		logStream.str("");
-		logStream << "Multimedia thread characteristics reverted successfully.";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("Multimedia thread characteristics reverted successfully.");
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Failed to revert multimedia thread characteristics. GetLastError: " << GetLastError();
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("Failed to revert multimedia thread characteristics. GetLastError: " << GetLastError());
 	}
 }
 
 void SwapChainProcessor::RunCore()
 {
-	stringstream logStream;
-
 	// Get the DXGI device interface
 	ComPtr<IDXGIDevice> DxgiDevice;
 	HRESULT hr = m_Device->Device.As(&DxgiDevice);
 	if (FAILED(hr))
 	{
-		logStream << "Failed to get DXGI device interface. HRESULT: " << hr;
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("Failed to get DXGI device interface. HRESULT: " << hr);
 		return;
 	}
 
@@ -275,9 +220,7 @@ void SwapChainProcessor::RunCore()
 		// This usually means the OS already unassigned/abandoned this swap-chain. Treat as a normal teardown path.
 		if (hr != static_cast<HRESULT>(0x887A0026))
 		{
-			logStream.str("");
-			logStream << "Failed to set device to swap chain. HRESULT: " << hr;
-			vddlog("e", logStream.str().c_str());
+			VDD_LOG_ERROR_STREAM("Failed to set device to swap chain. HRESULT: " << hr);
 		}
 		return;
 	}
@@ -290,13 +233,11 @@ void SwapChainProcessor::RunCore()
 		hr = IddCxSetRealtimeGPUPriority(m_hSwapChain, &PriorityArgs);
 		if (FAILED(hr))
 		{
-			logStream.str("");
-			logStream << "IddCxSetRealtimeGPUPriority failed (non-fatal). HRESULT: 0x" << hex << hr;
-			vddlog("w", logStream.str().c_str());
+			VDD_LOG_WARNING_STREAM("IddCxSetRealtimeGPUPriority failed (non-fatal). HRESULT: 0x" << hex << hr);
 		}
 		else
 		{
-			vddlog("d", "GPU priority raised to realtime for swap chain processing");
+			VDD_LOG_DEBUG("GPU priority raised to realtime for swap chain processing");
 		}
 	}
 
@@ -359,10 +300,7 @@ void SwapChainProcessor::RunCore()
 			{
 				// The wait was cancelled or something unexpected happened
 				hr = (WaitResult == WAIT_FAILED) ? HRESULT_FROM_WIN32(GetLastError()) : HRESULT_FROM_WIN32(WaitResult);
-				// Only build log message when actually needed (error case)
-				logStream.str("");
-				logStream << "Unexpected wait result. HRESULT: " << hr;
-				vddlog("e", logStream.str().c_str());
+				VDD_LOG_ERROR_STREAM("Unexpected wait result. HRESULT: " << hr);
 				break;
 			}
 		}
@@ -396,9 +334,7 @@ void SwapChainProcessor::RunCore()
 			// 0x887A0026 = DXGI_ERROR_ACCESS_LOST: treat as normal swap-chain teardown.
 			if (hr != static_cast<HRESULT>(0x887A0026))
 			{
-				logStream.str("");
-				logStream << "Failed to acquire buffer. Exiting loop. HRESULT: " << hr;
-				vddlog("e", logStream.str().c_str());
+				VDD_LOG_ERROR_STREAM("Failed to acquire buffer. Exiting loop. HRESULT: " << hr);
 			}
 			// The swap-chain was likely abandoned (e.g. DXGI_ERROR_ACCESS_LOST), so exit the processing loop
 			break;

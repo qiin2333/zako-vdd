@@ -1,11 +1,11 @@
 #include "SharedFrameExporter.h"
 
+#include "..\Logging\Logger.h"
+
 #include <sddl.h>
 #include <sstream>
 
 using namespace std;
-
-void vddlog(const char* type, const char* message);
 
 namespace Microsoft
 {
@@ -172,7 +172,7 @@ void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
 		std::stringstream ss;
 		ss << "[VddExport] Failed to publish mode metadata for monitor=" << m_MonitorIndex
 		   << " " << width << "x" << height;
-		vddlog("e", ss.str().c_str());
+		VDD_LOG_ERROR(ss.str().c_str());
 		return;
 	}
 
@@ -181,7 +181,7 @@ void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
 	   << " " << width << "x" << height
 	   << " fmt=" << desc.Format
 	   << " hdr=" << (m_PendingIsHdr ? 1 : 0);
-	vddlog("i", ss.str().c_str());
+	VDD_LOG_INFO(ss.str().c_str());
 }
 
 DXGI_FORMAT SharedFrameExporter::GuessMetadataFormat() const
@@ -209,7 +209,7 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
 	        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)", SDDL_REVISION_1, &sd, nullptr))
 	{
-		vddlog("e", "[VddExport] Failed to build SDDL for shared texture");
+		VDD_LOG_ERROR("[VddExport] Failed to build SDDL for shared texture");
 		return false;
 	}
 	sa.nLength = sizeof(sa);
@@ -231,7 +231,7 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	{
 		std::stringstream ss;
 		ss << "[VddExport] CreateTexture2D failed: 0x" << std::hex << hr;
-		vddlog("e", ss.str().c_str());
+		VDD_LOG_ERROR(ss.str().c_str());
 		LocalFree(sd);
 		return false;
 	}
@@ -240,7 +240,7 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	hr = m_SharedTex.As(&dxgiRes);
 	if (FAILED(hr))
 	{
-		vddlog("e", "[VddExport] QueryInterface IDXGIResource1 failed");
+		VDD_LOG_ERROR("[VddExport] QueryInterface IDXGIResource1 failed");
 		m_SharedTex.Reset();
 		LocalFree(sd);
 		return false;
@@ -254,7 +254,7 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	{
 		std::stringstream ss;
 		ss << "[VddExport] CreateSharedHandle failed: 0x" << std::hex << hr;
-		vddlog("e", ss.str().c_str());
+		VDD_LOG_ERROR(ss.str().c_str());
 		m_SharedTex.Reset();
 		return false;
 	}
@@ -270,7 +270,7 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	hr = m_SharedTex.As(&m_KeyedMutex);
 	if (FAILED(hr) || !m_KeyedMutex)
 	{
-		vddlog("e", "[VddExport] QueryInterface IDXGIKeyedMutex failed");
+		VDD_LOG_ERROR("[VddExport] QueryInterface IDXGIKeyedMutex failed");
 		m_SharedTex.Reset();
 		return false;
 	}
@@ -290,7 +290,7 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	ss << "[VddExport] Shared texture ready monitor=" << m_MonitorIndex
 	   << " " << srcDesc.Width << "x" << srcDesc.Height
 	   << " fmt=" << srcDesc.Format;
-	vddlog("i", ss.str().c_str());
+	VDD_LOG_INFO(ss.str().c_str());
 	return true;
 }
 
@@ -315,7 +315,7 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 		{
 			std::stringstream ss;
 			ss << "[VddExport] CreateEventW failed: " << GetLastError();
-			vddlog("e", ss.str().c_str());
+			VDD_LOG_ERROR(ss.str().c_str());
 			LocalFree(sd);
 			return false;
 		}
@@ -331,7 +331,7 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 		{
 			std::stringstream ss;
 			ss << "[VddExport] CreateFileMappingW failed: " << GetLastError();
-			vddlog("e", ss.str().c_str());
+			VDD_LOG_ERROR(ss.str().c_str());
 			LocalFree(sd);
 			return false;
 		}

@@ -5,6 +5,7 @@
 #include "..\Util\StringConversion.h"
 
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <sddl.h>
 #include <sstream>
@@ -21,11 +22,23 @@ HANDLE g_pipeHandle = INVALID_HANDLE_VALUE;
 
 extern std::mutex g_Mutex;
 
+void SendLegacyPipeMessage(const char *message)
+{
+	if (message == nullptr || g_pipeHandle == INVALID_HANDLE_VALUE)
+	{
+		return;
+	}
+
+	DWORD bytesWritten = 0;
+	DWORD bytesToWrite = static_cast<DWORD>(strlen(message));
+	WriteFile(g_pipeHandle, message, bytesToWrite, &bytesWritten, NULL);
+}
+
 // [LEGACY-PIPE] entire function -- pipe-side wrapper around DispatchVddCommandBuffer
 void HandleClient(HANDLE hPipe)
 {
 	g_pipeHandle = hPipe;
-	vddlog("p", "Client Handling Enabled");
+	VDD_LOG_VERBOSE("Client Handling Enabled");
 	wchar_t buffer[2048];
 	DWORD bytesRead;
 	BOOL result = ReadFile(hPipe, buffer, sizeof(buffer) - sizeof(wchar_t), &bytesRead, NULL);
@@ -34,7 +47,7 @@ void HandleClient(HANDLE hPipe)
 		buffer[bytesRead / sizeof(wchar_t)] = L'\0';
 		wstring bufferwstr(buffer);
 		string bufferstr = WStringToString(bufferwstr);
-		vddlog("p", bufferstr.c_str());
+		VDD_LOG_VERBOSE(bufferstr.c_str());
 
 		DispatchVddCommandBuffer(hPipe, buffer);
 	}
@@ -113,7 +126,7 @@ VOID VirtualDisplayDriverIoDeviceControl(
 		{
 			wstring bufferwstr(buffer);
 			string bufferstr = WStringToString(bufferwstr);
-			vddlog("p", ("[IOCTL] " + bufferstr).c_str());
+			VDD_LOG_VERBOSE(("[IOCTL] " + bufferstr).c_str());
 
 			// Pass INVALID_HANDLE_VALUE so response-emitting handlers
 			// (GETSETTINGS / PING) silently skip their WriteFile path.
@@ -122,13 +135,11 @@ VOID VirtualDisplayDriverIoDeviceControl(
 		}
 		catch (const std::exception &e)
 		{
-			stringstream errorStream;
-			errorStream << "Exception during IOCTL command dispatch: " << e.what();
-			vddlog("e", errorStream.str().c_str());
+			VDD_LOG_ERROR_STREAM("Exception during IOCTL command dispatch: " << e.what());
 		}
 		catch (...)
 		{
-			vddlog("e", "Unknown exception during IOCTL command dispatch");
+			VDD_LOG_ERROR("Unknown exception during IOCTL command dispatch");
 		}
 
 		WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
@@ -151,13 +162,13 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam)
 	sa.nLength = sizeof(SECURITY_ATTRIBUTES);
 	sa.bInheritHandle = FALSE;
 	const wchar_t *sddl = L"D:(A;;GA;;;SY)(A;;GA;;;BA)";
-	vddlog("d", "Starting pipe with parameters: D:(A;;GA;;;SY)(A;;GA;;;BA)");
+	VDD_LOG_DEBUG("Starting pipe with parameters: D:(A;;GA;;;SY)(A;;GA;;;BA)");
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
 			sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
 	{
 		DWORD ErrorCode = GetLastError();
 		string errorMsg = to_string(ErrorCode);
-		vddlog("e", errorMsg.c_str());
+		VDD_LOG_ERROR(errorMsg.c_str());
 		return 1;
 	}
 	HANDLE hPipe;
@@ -176,7 +187,7 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam)
 		{
 			DWORD ErrorCode = GetLastError();
 			string errorMsg = to_string(ErrorCode);
-			vddlog("e", errorMsg.c_str());
+			VDD_LOG_ERROR(errorMsg.c_str());
 			LocalFree(sa.lpSecurityDescriptor);
 			return 1;
 		}
@@ -184,7 +195,7 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam)
 		BOOL connected = ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
 		if (connected)
 		{
-			vddlog("p", "Client Connected");
+			VDD_LOG_VERBOSE("Client Connected");
 			HandleClient(hPipe);
 		}
 		else
@@ -199,24 +210,24 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam)
 // [LEGACY-PIPE] entire function
 void StartNamedPipeServer()
 {
-	vddlog("p", "Starting Pipe");
+	VDD_LOG_VERBOSE("Starting Pipe");
 	hPipeThread = CreateThread(NULL, 0, NamedPipeServer, NULL, 0, NULL);
 	if (hPipeThread == NULL)
 	{
 		DWORD ErrorCode = GetLastError();
 		string errorMsg = to_string(ErrorCode);
-		vddlog("e", errorMsg.c_str());
+		VDD_LOG_ERROR(errorMsg.c_str());
 	}
 	else
 	{
-		vddlog("p", "Pipe created");
+		VDD_LOG_VERBOSE("Pipe created");
 	}
 }
 
 // [LEGACY-PIPE] entire function
 void StopNamedPipeServer()
 {
-	vddlog("p", "Stopping Pipe");
+	VDD_LOG_VERBOSE("Stopping Pipe");
 	{
 		lock_guard<mutex> lock(g_Mutex);
 		g_Running = false;
@@ -241,7 +252,7 @@ void StopNamedPipeServer()
 		WaitForSingleObject(hPipeThread, INFINITE);
 		CloseHandle(hPipeThread);
 		hPipeThread = NULL;
-		vddlog("p", "Stopped Pipe");
+		VDD_LOG_VERBOSE("Stopped Pipe");
 	}
 }
 

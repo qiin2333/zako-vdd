@@ -20,9 +20,6 @@ std::wstring confpath = []()
 	return std::wstring(sysDrive) + L"\\VirtualDisplayDriver";
 }();
 
-std::atomic<bool> logsEnabled{false};
-std::atomic<bool> debugLogs{false};
-
 std::atomic<bool> HDRPlus{false};
 std::atomic<bool> SDR10{false};
 std::atomic<bool> customEdid{false};
@@ -35,9 +32,6 @@ std::atomic<bool> vrrEnabled{false};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
 std::atomic<bool> edidCeaOverride{false};
-// [LEGACY-PIPE]
-std::atomic<bool> sendLogsThroughPipe{true};
-
 // Mouse settings
 std::atomic<bool> alphaCursorSupport{true};
 int CursorMaxX = 128;

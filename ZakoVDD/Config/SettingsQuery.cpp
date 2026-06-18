@@ -16,13 +16,10 @@ using namespace std;
 namespace
 {
 const map<wstring, pair<wstring, wstring>> SettingsQueryMap = {
-	{L"LoggingEnabled", {L"LOGS", L"logging"}},
-	{L"DebugLoggingEnabled", {L"DEBUGLOGS", L"debuglogging"}},
 	{L"CustomEdidEnabled", {L"CUSTOMEDID", L"CustomEdid"}},
 
 	{L"PreventMonitorSpoof", {L"PREVENTMONITORSPOOF", L"PreventSpoof"}},
 	{L"EdidCeaOverride", {L"EDIDCEAOVERRIDE", L"EdidCeaOverride"}},
-	{L"SendLogsThroughPipe", {L"SENDLOGSTHROUGHPIPE", L"SendLogsThroughPipe"}},
 	// Cursor Begin
 	{L"HardwareCursorEnabled", {L"HARDWARECURSOR", L"HardwareCursor"}},
 	{L"AlphaCursorSupport", {L"ALPHACURSORSUPPORT", L"AlphaCursorSupport"}},
@@ -44,20 +41,15 @@ const pair<wstring, wstring> *FindSettingNames(const wstring &settingKey)
 	auto it = SettingsQueryMap.find(settingKey);
 	if (it == SettingsQueryMap.end())
 	{
-		vddlog("e", "requested data not found in xml, consider updating xml!");
+		VDD_LOG_ERROR("requested data not found in xml, consider updating xml!");
 		return nullptr;
 	}
 
 	return &it->second;
 }
 
-void LogQueries(const char *severity, const wstring &xmlName)
+void LogQueries(VddLogLevel severity, const wstring &xmlName)
 {
-	if (xmlName.find(L"logging") != wstring::npos)
-	{
-		return;
-	}
-
 	int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, xmlName.c_str(), static_cast<int>(xmlName.size()), nullptr, 0, nullptr, nullptr);
 	if (sizeNeeded <= 0)
 	{
@@ -71,7 +63,7 @@ void LogQueries(const char *severity, const wstring &xmlName)
 		return;
 	}
 
-	vddlog(severity, strMessage.c_str());
+	VDD_LOG(severity, strMessage.c_str());
 }
 
 bool TryReadRegistryDword(const wstring &regName, DWORD &value)
@@ -121,7 +113,7 @@ bool TryReadXmlText(const wstring &xmlName, wstring &value)
 	HRESULT hr = SHCreateStreamOnFileEx(settingsname.c_str(), STGM_READ, FILE_ATTRIBUTE_NORMAL, FALSE, nullptr, &pFileStream);
 	if (FAILED(hr))
 	{
-		LogQueries("d", xmlName + L" - Failed to create file stream for XML settings.");
+		LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to create file stream for XML settings.");
 		return false;
 	}
 
@@ -129,14 +121,14 @@ bool TryReadXmlText(const wstring &xmlName, wstring &value)
 	hr = CreateXmlReader(__uuidof(IXmlReader), reinterpret_cast<void **>(&pReader), nullptr);
 	if (FAILED(hr))
 	{
-		LogQueries("d", xmlName + L" - Failed to create XML reader.");
+		LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to create XML reader.");
 		return false;
 	}
 
 	hr = pReader->SetInput(pFileStream);
 	if (FAILED(hr))
 	{
-		LogQueries("d", xmlName + L" - Failed to set input for XML reader.");
+		LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to set input for XML reader.");
 		return false;
 	}
 
@@ -199,34 +191,34 @@ bool EnabledQuery(const wstring &settingKey)
 	{
 		if (dwValue == 1)
 		{
-			LogQueries("d", xmlName + L" - is enabled (value = 1).");
+			LogQueries(VddLogLevel::Verbose, xmlName + L" - is enabled (value = 1).");
 			return true;
 		}
 		if (dwValue == 0)
 		{
-			LogQueries("d", xmlName + L" - is disabled (value = 0).");
+			LogQueries(VddLogLevel::Verbose, xmlName + L" - is disabled (value = 0).");
 		}
 	}
 	else
 	{
-		LogQueries("d", xmlName + L" - Failed to retrieve value from registry. Attempting to read as string.");
+		LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to retrieve value from registry. Attempting to read as string.");
 
 		wstring registryValue;
 		if (TryReadRegistryString(regName, registryValue))
 		{
 			if (registryValue == L"true" || registryValue == L"1")
 			{
-				LogQueries("d", xmlName + L" - is enabled (string value).");
+				LogQueries(VddLogLevel::Verbose, xmlName + L" - is enabled (string value).");
 				return true;
 			}
 			if (registryValue == L"false" || registryValue == L"0")
 			{
-				LogQueries("d", xmlName + L" - is disabled (string value).");
+				LogQueries(VddLogLevel::Verbose, xmlName + L" - is disabled (string value).");
 			}
 		}
 		else
 		{
-			LogQueries("d", xmlName + L" - Failed to retrieve string value from registry.");
+			LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to retrieve string value from registry.");
 		}
 	}
 
@@ -237,7 +229,7 @@ bool EnabledQuery(const wstring &settingKey)
 	}
 
 	bool xmlLoggingValue = (xmlValue == L"true");
-	LogQueries("i", xmlName + (xmlLoggingValue ? L" is enabled." : L" is disabled."));
+	LogQueries(VddLogLevel::Info, xmlName + (xmlLoggingValue ? L" is enabled." : L" is disabled."));
 	return xmlLoggingValue;
 }
 
@@ -255,23 +247,23 @@ int GetIntegerSetting(const wstring &settingKey)
 	DWORD dwValue = 0;
 	if (TryReadRegistryDword(regName, dwValue))
 	{
-		LogQueries("d", xmlName + L" - Retrieved integer value: " + to_wstring(dwValue));
+		LogQueries(VddLogLevel::Verbose, xmlName + L" - Retrieved integer value: " + to_wstring(dwValue));
 		return static_cast<int>(dwValue);
 	}
 
-	LogQueries("d", xmlName + L" - Failed to retrieve integer value from registry. Attempting to read as string.");
+	LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to retrieve integer value from registry. Attempting to read as string.");
 	wstring registryValue;
 	if (TryReadRegistryString(regName, registryValue))
 	{
 		try
 		{
 			int logValue = stoi(registryValue);
-			LogQueries("d", xmlName + L" - Retrieved string value: " + to_wstring(logValue));
+			LogQueries(VddLogLevel::Verbose, xmlName + L" - Retrieved string value: " + to_wstring(logValue));
 			return logValue;
 		}
 		catch (const exception &)
 		{
-			LogQueries("d", xmlName + L" - Failed to convert registry string value to integer.");
+			LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to convert registry string value to integer.");
 		}
 	}
 
@@ -284,12 +276,12 @@ int GetIntegerSetting(const wstring &settingKey)
 	try
 	{
 		int xmlLoggingValue = stoi(xmlValue);
-		LogQueries("i", xmlName + L" - Retrieved from XML: " + to_wstring(xmlLoggingValue));
+		LogQueries(VddLogLevel::Info, xmlName + L" - Retrieved from XML: " + to_wstring(xmlLoggingValue));
 		return xmlLoggingValue;
 	}
 	catch (const exception &)
 	{
-		LogQueries("d", xmlName + L" - Failed to convert XML string value to integer.");
+		LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to convert XML string value to integer.");
 		return -1;
 	}
 }
@@ -308,11 +300,11 @@ wstring GetStringSetting(const wstring &settingKey)
 	wstring registryValue;
 	if (TryReadRegistryString(regName, registryValue))
 	{
-		LogQueries("d", xmlName + L" - Retrieved string value from registry: " + registryValue);
+		LogQueries(VddLogLevel::Verbose, xmlName + L" - Retrieved string value from registry: " + registryValue);
 		return registryValue;
 	}
 
-	LogQueries("d", xmlName + L" - Failed to retrieve string value from registry. Attempting to read as XML.");
+	LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to retrieve string value from registry. Attempting to read as XML.");
 
 	wstring xmlValue;
 	if (!TryReadXmlText(xmlName, xmlValue))
@@ -320,6 +312,6 @@ wstring GetStringSetting(const wstring &settingKey)
 		return L"";
 	}
 
-	LogQueries("i", xmlName + L" - Retrieved from XML: " + xmlValue);
+	LogQueries(VddLogLevel::Info, xmlName + L" - Retrieved from XML: " + xmlValue);
 	return xmlValue;
 }

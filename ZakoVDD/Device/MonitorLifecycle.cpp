@@ -25,8 +25,9 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 
 	wstring logMessage = L"Creating Monitor: " + to_wstring(index + 1);
 	string narrowLogMessage = WStringToString(logMessage);
-	vddlog("i", narrowLogMessage.c_str());
+	VDD_LOG_INFO(narrowLogMessage.c_str());
 
+	VDD_LOG_DEBUG_LAZY([&]() -> string
 	{
 		stringstream ss;
 		ss << "Monitor " << (index + 1) << " HDR settings - MaxNits: " << maxNits << ", MaxFALL: " << maxFALL << ", MinNits: " << minNits;
@@ -34,8 +35,8 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		{
 			ss << ", Physical size: " << widthCm << " x " << heightCm << " cm";
 		}
-		vddlog("d", ss.str().c_str());
-	}
+		return ss.str();
+	});
 
 	WDF_OBJECT_ATTRIBUTES Attr;
 	WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectDeviceContextWrapper);
@@ -78,9 +79,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		if (it != s_ClientGuidEdidMap.end())
 		{
 			pMonitorEdid = &it->second;
-			stringstream ss;
-			ss << "Using existing EDID for client GUID (monitor " << (index + 1) << ")";
-			vddlog("d", ss.str().c_str());
+			VDD_LOG_DEBUG_STREAM("Using existing EDID for client GUID (monitor " << (index + 1) << ")");
 
 			UpdateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
 			UpdateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
@@ -108,9 +107,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			BYTE checksum = CalculateEdidChecksum(*pMonitorEdid);
 			(*pMonitorEdid)[127] = checksum;
 
-			stringstream ss;
-			ss << "Created new EDID with serial number based on client GUID for monitor " << (index + 1);
-			vddlog("d", ss.str().c_str());
+			VDD_LOG_DEBUG_STREAM("Created new EDID with serial number based on client GUID for monitor " << (index + 1));
 		}
 	}
 	else
@@ -145,7 +142,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
 	if (pMonitorEdid->size() > UINT_MAX)
 	{
-		vddlog("e", "Edid size passes UINT_Max, escape to prevent loading borked display");
+		VDD_LOG_ERROR("Edid size passes UINT_Max, escape to prevent loading borked display");
 	}
 	else
 	{
@@ -156,14 +153,12 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	if (pClientGuid != nullptr)
 	{
 		MonitorInfo.MonitorContainerId = *pClientGuid;
-		stringstream ss;
-		ss << "Using client-provided GUID as container ID for monitor " << (index + 1);
-		vddlog("d", ss.str().c_str());
+		VDD_LOG_DEBUG_STREAM("Using client-provided GUID as container ID for monitor " << (index + 1));
 	}
 	else
 	{
 		CoCreateGuid(&MonitorInfo.MonitorContainerId);
-		vddlog("d", "Created container ID");
+		VDD_LOG_DEBUG("Created container ID");
 	}
 
 	IDARG_IN_MONITORCREATE MonitorCreate = {};
@@ -174,12 +169,12 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	NTSTATUS Status = IddCxMonitorCreate(m_Adapter, &MonitorCreate, &MonitorCreateOut);
 	if (NT_SUCCESS(Status))
 	{
-		vddlog("d", "Monitor created successfully.");
+		VDD_LOG_DEBUG("Monitor created successfully.");
 		IDDCX_MONITOR newMonitor = MonitorCreateOut.MonitorObject;
 
 		if (newMonitor == nullptr)
 		{
-			vddlog("e", "Invalid monitor handle");
+			VDD_LOG_ERROR("Invalid monitor handle");
 			return;
 		}
 
@@ -194,12 +189,10 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			hdrSettings.maxFALL = maxFALL;
 			s_MonitorHdrSettingsMap[newMonitor] = hdrSettings;
 
-			stringstream ss;
-			ss << "Stored HDR settings for monitor " << (index + 1)
-			   << " - IsHdr: false, MaxNits: " << maxNits
-			   << ", MinNits: " << minNits
-			   << ", MaxFALL: " << maxFALL;
-			vddlog("d", ss.str().c_str());
+			VDD_LOG_DEBUG_STREAM("Stored HDR settings for monitor " << (index + 1)
+			                     << " - IsHdr: false, MaxNits: " << maxNits
+			                     << ", MinNits: " << minNits
+			                     << ", MaxFALL: " << maxFALL);
 		}
 
 		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorCreateOut.MonitorObject);
@@ -209,20 +202,16 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		Status = IddCxMonitorArrival(newMonitor, &ArrivalOut);
 		if (NT_SUCCESS(Status))
 		{
-			vddlog("d", "Monitor arrival successfully reported.");
+			VDD_LOG_DEBUG("Monitor arrival successfully reported.");
 		}
 		else
 		{
-			stringstream ss;
-			ss << "Failed to report monitor arrival. Status: " << Status;
-			vddlog("e", ss.str().c_str());
+			VDD_LOG_ERROR_STREAM("Failed to report monitor arrival. Status: " << Status);
 		}
 	}
 	else
 	{
-		stringstream ss;
-		ss << "Failed to create monitor. Status: " << Status;
-		vddlog("e", ss.str().c_str());
+		VDD_LOG_ERROR_STREAM("Failed to create monitor. Status: " << Status);
 	}
 }
 
@@ -233,17 +222,13 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 	auto monIt = m_Monitors.find(index);
 	if (monIt == m_Monitors.end() || monIt->second == nullptr)
 	{
-		stringstream ws;
-		ws << "Monitor handle for index " << index << " is already null or not found";
-		vddlog("w", ws.str().c_str());
+		VDD_LOG_WARNING_STREAM("Monitor handle for index " << index << " is already null or not found");
 		return;
 	}
 
 	IDDCX_MONITOR hMonitor = monIt->second;
 
-	stringstream logStream;
-	logStream << "Destroying monitor (Index: " << index << ")";
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Destroying monitor (Index: " << index << ")");
 
 	try
 	{
@@ -253,7 +238,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 			if (it != s_MonitorHdrSettingsMap.end())
 			{
 				s_MonitorHdrSettingsMap.erase(it);
-				vddlog("d", "Cleaned up HDR settings for monitor");
+				VDD_LOG_DEBUG("Cleaned up HDR settings for monitor");
 			}
 		}
 
@@ -266,7 +251,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 				lock_guard<mutex> edidLock(s_EdidMapMutex);
 				s_ClientGuidEdidMap.erase(guidIt->second);
 				m_MonitorGuids.erase(guidIt);
-				vddlog("d", "Cleaned up EDID cache for monitor client GUID");
+				VDD_LOG_DEBUG("Cleaned up EDID cache for monitor client GUID");
 			}
 		}
 
@@ -274,10 +259,10 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 			auto scIt = m_ProcessingThreads.find(hMonitor);
 			if (scIt != m_ProcessingThreads.end())
 			{
-				vddlog("d", "Stopping SwapChain processing thread before monitor destruction");
+				VDD_LOG_DEBUG("Stopping SwapChain processing thread before monitor destruction");
 				scIt->second.reset();
 				m_ProcessingThreads.erase(scIt);
-				vddlog("d", "SwapChain processing thread stopped");
+				VDD_LOG_DEBUG("SwapChain processing thread stopped");
 			}
 		}
 
@@ -287,11 +272,11 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 			{
 				if (meIt->second != nullptr)
 				{
-					vddlog("d", "Cleaning up hardware cursor event handle");
+					VDD_LOG_DEBUG("Cleaning up hardware cursor event handle");
 					CloseHandle(meIt->second);
 				}
 				m_MouseEvents.erase(meIt);
-				vddlog("d", "Hardware cursor event handle cleaned up");
+				VDD_LOG_DEBUG("Hardware cursor event handle cleaned up");
 			}
 		}
 
@@ -299,7 +284,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 
 		NTSTATUS Status = STATUS_UNSUCCESSFUL;
 		{
-			vddlog("d", "Reporting monitor departure to system");
+			VDD_LOG_DEBUG("Reporting monitor departure to system");
 			int retryCount = 0;
 			const int maxRetries = 3;
 
@@ -308,15 +293,13 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 				Status = IddCxMonitorDeparture(hMonitor);
 				if (NT_SUCCESS(Status))
 				{
-					vddlog("d", "Successfully reported monitor departure");
+					VDD_LOG_DEBUG("Successfully reported monitor departure");
 					break;
 				}
 
 				retryCount++;
-				stringstream errorStream;
-				errorStream << "Failed to report monitor departure attempt " << retryCount
-							<< "/" << maxRetries << ". Status: 0x" << hex << Status;
-				vddlog("w", errorStream.str().c_str());
+				VDD_LOG_WARNING_STREAM("Failed to report monitor departure attempt " << retryCount
+				                       << "/" << maxRetries << ". Status: 0x" << hex << Status);
 
 				if (retryCount < maxRetries)
 				{
@@ -327,30 +310,26 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 
 		if (!NT_SUCCESS(Status))
 		{
-			vddlog("e", "All monitor departure attempts failed, continuing with cleanup");
+			VDD_LOG_ERROR("All monitor departure attempts failed, continuing with cleanup");
 		}
 
 		Sleep(500);
 
-		vddlog("d", "Deleting monitor WDF object");
+		VDD_LOG_DEBUG("Deleting monitor WDF object");
 		WdfObjectDelete(hMonitor);
 		m_Monitors.erase(monIt);
-		vddlog("d", "Monitor WDF object deleted successfully");
+		VDD_LOG_DEBUG("Monitor WDF object deleted successfully");
 
-		logStream.str("");
-		logStream << "Monitor object destroyed successfully (Index: " << index << ")";
-		vddlog("i", logStream.str().c_str());
+		VDD_LOG_INFO_STREAM("Monitor object destroyed successfully (Index: " << index << ")");
 	}
 	catch (const exception &e)
 	{
-		stringstream errorStream;
-		errorStream << "Exception during monitor destruction (Index: " << index << "): " << e.what();
-		vddlog("e", errorStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("Exception during monitor destruction (Index: " << index << "): " << e.what());
 		m_Monitors.erase(index);
 	}
 	catch (...)
 	{
-		vddlog("e", "Unknown exception during monitor destruction");
+		VDD_LOG_ERROR("Unknown exception during monitor destruction");
 		m_Monitors.erase(index);
 	}
 }
@@ -359,7 +338,7 @@ void IndirectDeviceContext::DestroyAllMonitors()
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
 
-	vddlog("i", "Destroying all monitors.");
+	VDD_LOG_INFO("Destroying all monitors.");
 	vector<unsigned int> indices;
 	for (const auto &pair : m_Monitors)
 	{
@@ -379,7 +358,7 @@ int IndirectDeviceContext::RefreshMonitorModes()
 {
 	if (!IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorUpdateModes2))
 	{
-		vddlog("w", "RefreshMonitorModes: IddCxMonitorUpdateModes2 not available on this OS");
+		VDD_LOG_WARNING("RefreshMonitorModes: IddCxMonitorUpdateModes2 not available on this OS");
 		return -1;
 	}
 
@@ -400,7 +379,7 @@ int IndirectDeviceContext::RefreshMonitorModes()
 
 	if (localModes.empty())
 	{
-		vddlog("w", "RefreshMonitorModes: monitorModes is empty, refusing to push");
+		VDD_LOG_WARNING("RefreshMonitorModes: monitorModes is empty, refusing to push");
 		return 0;
 	}
 
@@ -430,23 +409,20 @@ int IndirectDeviceContext::RefreshMonitorModes()
 		inArgs.pTargetModes = targetModes.data();
 
 		NTSTATUS status = IddCxMonitorUpdateModes2(hMonitor, &inArgs);
-		stringstream ss;
-		ss << "RefreshMonitorModes: monitor index=" << pair.first
-		   << " status=0x" << hex << status << " modeCount=" << dec << targetModes.size();
 		if (NT_SUCCESS(status))
 		{
 			++refreshed;
-			vddlog("d", ss.str().c_str());
+			VDD_LOG_DEBUG_STREAM("RefreshMonitorModes: monitor index=" << pair.first
+			                     << " status=0x" << hex << status << " modeCount=" << dec << targetModes.size());
 		}
 		else
 		{
-			vddlog("w", ss.str().c_str());
+			VDD_LOG_WARNING_STREAM("RefreshMonitorModes: monitor index=" << pair.first
+			                       << " status=0x" << hex << status << " modeCount=" << dec << targetModes.size());
 		}
 	}
 
-	stringstream summary;
-	summary << "RefreshMonitorModes: pushed " << refreshed << "/" << m_Monitors.size()
-	        << " monitors with " << targetModes.size() << " modes (no departure)";
-	vddlog("i", summary.str().c_str());
+	VDD_LOG_INFO_STREAM("RefreshMonitorModes: pushed " << refreshed << "/" << m_Monitors.size()
+	                    << " monitors with " << targetModes.size() << " modes (no departure)");
 	return refreshed;
 }

@@ -6,7 +6,6 @@
 
 #include <exception>
 #include <memory>
-#include <sstream>
 
 using namespace std;
 using namespace Microsoft::IndirectDisp;
@@ -28,14 +27,12 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 	HRESULT hr = Device->Init();
 	if (FAILED(hr))
 	{
-		stringstream ss;
-		ss << "Failed to initialize Direct3DDevice. HRESULT: " << hr << ". Deleting existing swap-chain.";
-		vddlog("e", ss.str().c_str());
+		VDD_LOG_ERROR_STREAM("Failed to initialize Direct3DDevice. HRESULT: " << hr << ". Deleting existing swap-chain.");
 		WdfObjectDelete(SwapChain);
 		return;
 	}
 
-	vddlog("d", "Creating a new swap-chain processing thread.");
+	VDD_LOG_DEBUG("Creating a new swap-chain processing thread.");
 
 	unsigned int monitorIndex = 0xFFFFFFFFu;
 	for (const auto &kv : m_Monitors)
@@ -79,13 +76,13 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 				CloseHandle(meIt->second);
 			}
 			m_MouseEvents.erase(meIt);
-			vddlog("d", "Cleaned up existing mouse event handle");
+			VDD_LOG_DEBUG("Cleaned up existing mouse event handle");
 		}
 
 		HANDLE hMouseEvent = CreateEventA(nullptr, false, false, nullptr);
 		if (!hMouseEvent)
 		{
-			vddlog("e", "Failed to create mouse event. No hardware cursor supported!");
+			VDD_LOG_ERROR("Failed to create mouse event. No hardware cursor supported!");
 			return;
 		}
 
@@ -107,15 +104,15 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 		{
 			CloseHandle(hMouseEvent);
 			m_MouseEvents.erase(Monitor);
-			vddlog("e", "Failed to setup hardware cursor");
+			VDD_LOG_ERROR("Failed to setup hardware cursor");
 			return;
 		}
 
-		vddlog("d", "Hardware cursor setup completed successfully.");
+		VDD_LOG_DEBUG("Hardware cursor setup completed successfully.");
 	}
 	else
 	{
-		vddlog("d", "Hardware cursor is disabled, Skipped creation.");
+		VDD_LOG_DEBUG("Hardware cursor is disabled, Skipped creation.");
 	}
 }
 
@@ -209,36 +206,34 @@ void IndirectDeviceContext::UnassignSwapChain(IDDCX_MONITOR Monitor)
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
 
-	vddlog("i", "Unassigning Swapchain. Processing will be stopped.");
+	VDD_LOG_INFO("Unassigning Swapchain. Processing will be stopped.");
 
 	auto scIt = m_ProcessingThreads.find(Monitor);
 	if (scIt != m_ProcessingThreads.end())
 	{
 		try
 		{
-			vddlog("d", "Stopping SwapChain processing thread");
+			VDD_LOG_DEBUG("Stopping SwapChain processing thread");
 			auto processingThread = move(scIt->second);
 			m_ProcessingThreads.erase(scIt);
 
 			Sleep(50);
 			processingThread.reset();
-			vddlog("d", "SwapChain processing thread stopped successfully");
+			VDD_LOG_DEBUG("SwapChain processing thread stopped successfully");
 			Sleep(25);
 		}
 		catch (const exception &e)
 		{
-			stringstream errorStream;
-			errorStream << "Exception while stopping SwapChain processing thread: " << e.what();
-			vddlog("e", errorStream.str().c_str());
+			VDD_LOG_ERROR_STREAM("Exception while stopping SwapChain processing thread: " << e.what());
 		}
 		catch (...)
 		{
-			vddlog("e", "Unknown exception while stopping SwapChain processing thread");
+			VDD_LOG_ERROR("Unknown exception while stopping SwapChain processing thread");
 		}
 	}
 	else
 	{
-		vddlog("d", "No SwapChain processing thread to stop for this monitor");
+		VDD_LOG_DEBUG("No SwapChain processing thread to stop for this monitor");
 	}
 }
 
@@ -246,7 +241,7 @@ void IndirectDeviceContext::UnassignAllSwapChains()
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
 
-	vddlog("i", "Unassigning all SwapChains.");
+	VDD_LOG_INFO("Unassigning all SwapChains.");
 	for (auto it = m_ProcessingThreads.begin(); it != m_ProcessingThreads.end();)
 	{
 		try
@@ -256,7 +251,7 @@ void IndirectDeviceContext::UnassignAllSwapChains()
 		}
 		catch (...)
 		{
-			vddlog("e", "Exception while stopping a SwapChain processing thread");
+			VDD_LOG_ERROR("Exception while stopping a SwapChain processing thread");
 			it = m_ProcessingThreads.erase(it);
 		}
 	}

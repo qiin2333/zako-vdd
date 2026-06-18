@@ -5,7 +5,6 @@
 #include "..\Logging\Logger.h"
 #include "IndirectDeviceContextWrapper.h"
 
-#include <sstream>
 #include <string>
 #include <vdd_control_ioctl.h>
 
@@ -20,12 +19,12 @@ VOID EvtDriverUnload(
 {
 	UNREFERENCED_PARAMETER(Driver);
 
-	vddlog("i", "Starting driver unload process");
+	VDD_LOG_INFO("Starting driver unload process");
 
 	// Clean up global device resources before stopping services
 	if (g_GlobalDevice != nullptr)
 	{
-		vddlog("d", "Cleaning up global device resources");
+		VDD_LOG_DEBUG("Cleaning up global device resources");
 
 		try
 		{
@@ -36,7 +35,7 @@ VOID EvtDriverUnload(
 				// Stop any active SwapChain processing
 				if (pContext->pContext->HasActiveSwapChain())
 				{
-					vddlog("d", "Stopping active SwapChain processing during unload");
+					VDD_LOG_DEBUG("Stopping active SwapChain processing during unload");
 					pContext->pContext->UnassignAllSwapChains();
 					Sleep(50);
 				}
@@ -44,29 +43,27 @@ VOID EvtDriverUnload(
 				// Destroy all active monitors
 				if (pContext->pContext->HasActiveMonitor())
 				{
-					vddlog("d", "Destroying all monitors during unload");
+					VDD_LOG_DEBUG("Destroying all monitors during unload");
 					try
 					{
 						pContext->pContext->DestroyAllMonitors();
 					}
 					catch (...)
 					{
-						vddlog("w", "Failed to cleanly destroy monitors during unload");
+						VDD_LOG_WARNING("Failed to cleanly destroy monitors during unload");
 					}
 				}
 
-				vddlog("d", "Global device resource cleanup completed");
+				VDD_LOG_DEBUG("Global device resource cleanup completed");
 			}
 		}
 		catch (const std::exception &e)
 		{
-			stringstream errorStream;
-			errorStream << "Exception during device cleanup in unload: " << e.what();
-			vddlog("e", errorStream.str().c_str());
+			VDD_LOG_ERROR_STREAM("Exception during device cleanup in unload: " << e.what());
 		}
 		catch (...)
 		{
-			vddlog("e", "Unknown exception during device cleanup in unload");
+			VDD_LOG_ERROR("Unknown exception during device cleanup in unload");
 		}
 
 		// Wait for system stabilization
@@ -76,7 +73,7 @@ VOID EvtDriverUnload(
 	// [LEGACY-PIPE] Stop the named pipe server
 	StopNamedPipeServer();
 
-	vddlog("i", "Driver unload completed");
+	VDD_LOG_INFO("Driver unload completed");
 }
 
 _Use_decl_annotations_
@@ -85,13 +82,11 @@ _Use_decl_annotations_
 {
 	NTSTATUS Status = STATUS_SUCCESS;
 	WDF_PNPPOWER_EVENT_CALLBACKS PnpPowerCallbacks;
-	stringstream logStream;
 
 	UNREFERENCED_PARAMETER(Driver);
 
-	logStream << "Initializing device:"
-			  << "\n  DeviceInit Pointer: " << static_cast<void *>(pDeviceInit);
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Initializing device:"
+	                     << "\n  DeviceInit Pointer: " << static_cast<void *>(pDeviceInit));
 
 	// Register for power callbacks - D0Entry for power-on, D0Exit for power-off (IDDCX 1.10 power management)
 	WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&PnpPowerCallbacks);
@@ -102,13 +97,11 @@ _Use_decl_annotations_
 	IDD_CX_CLIENT_CONFIG IddConfig;
 	IDD_CX_CLIENT_CONFIG_INIT(&IddConfig);
 
-	logStream.str("");
-	logStream << "Configuring IDD_CX client:"
-			  << "\n  EvtIddCxAdapterInitFinished: " << (IddConfig.EvtIddCxAdapterInitFinished ? "Set" : "Not Set")
-			  << "\n  EvtIddCxMonitorGetDefaultDescriptionModes: " << (IddConfig.EvtIddCxMonitorGetDefaultDescriptionModes ? "Set" : "Not Set")
-			  << "\n  EvtIddCxMonitorAssignSwapChain: " << (IddConfig.EvtIddCxMonitorAssignSwapChain ? "Set" : "Not Set")
-			  << "\n  EvtIddCxMonitorUnassignSwapChain: " << (IddConfig.EvtIddCxMonitorUnassignSwapChain ? "Set" : "Not Set");
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Configuring IDD_CX client:"
+	                     << "\n  EvtIddCxAdapterInitFinished: " << (IddConfig.EvtIddCxAdapterInitFinished ? "Set" : "Not Set")
+	                     << "\n  EvtIddCxMonitorGetDefaultDescriptionModes: " << (IddConfig.EvtIddCxMonitorGetDefaultDescriptionModes ? "Set" : "Not Set")
+	                     << "\n  EvtIddCxMonitorAssignSwapChain: " << (IddConfig.EvtIddCxMonitorAssignSwapChain ? "Set" : "Not Set")
+	                     << "\n  EvtIddCxMonitorUnassignSwapChain: " << (IddConfig.EvtIddCxMonitorUnassignSwapChain ? "Set" : "Not Set"));
 
 	// If the driver wishes to handle custom IoDeviceControl requests, it's necessary to use this callback since IddCx
 	// redirects IoDeviceControl requests to an internal queue.
@@ -139,9 +132,7 @@ _Use_decl_annotations_
 	Status = IddCxDeviceInitConfig(pDeviceInit, &IddConfig);
 	if (!NT_SUCCESS(Status))
 	{
-		logStream.str("");
-		logStream << "IddCxDeviceInitConfig failed with status: " << Status;
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("IddCxDeviceInitConfig failed with status: " << Status);
 		return Status;
 	}
 
@@ -149,7 +140,7 @@ _Use_decl_annotations_
 	WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectDeviceContextWrapper);
 	Attr.EvtCleanupCallback = [](WDFOBJECT Object)
 	{
-		vddlog("d", "Device cleanup callback triggered");
+		VDD_LOG_DEBUG("Device cleanup callback triggered");
 
 		// Automatically cleanup the context when the WDF object is about to be deleted
 		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Object);
@@ -158,12 +149,12 @@ _Use_decl_annotations_
 			try
 			{
 				// Perform comprehensive cleanup before destroying the context
-				vddlog("d", "Performing comprehensive device cleanup");
+				VDD_LOG_DEBUG("Performing comprehensive device cleanup");
 
 				// Stop any active SwapChain processing
 				if (pContext->pContext->HasActiveSwapChain())
 				{
-					vddlog("d", "Stopping active SwapChain during device cleanup");
+					VDD_LOG_DEBUG("Stopping active SwapChain during device cleanup");
 					pContext->pContext->UnassignAllSwapChains();
 					Sleep(50);
 				}
@@ -171,68 +162,60 @@ _Use_decl_annotations_
 				// Destroy all active monitors
 				if (pContext->pContext->HasActiveMonitor())
 				{
-					vddlog("d", "Destroying all monitors during device cleanup");
+					VDD_LOG_DEBUG("Destroying all monitors during device cleanup");
 					try
 					{
 						pContext->pContext->DestroyAllMonitors();
 					}
 					catch (...)
 					{
-						vddlog("w", "Exception while destroying monitors during device cleanup");
+						VDD_LOG_WARNING("Exception while destroying monitors during device cleanup");
 					}
 				}
 
 				// Wait for stabilization
 				Sleep(50);
 
-				vddlog("d", "Device-specific cleanup completed, calling context cleanup");
+				VDD_LOG_DEBUG("Device-specific cleanup completed, calling context cleanup");
 			}
 			catch (const std::exception &e)
 			{
-				stringstream errorStream;
-				errorStream << "Exception during device cleanup: " << e.what();
-				vddlog("e", errorStream.str().c_str());
+				VDD_LOG_ERROR_STREAM("Exception during device cleanup: " << e.what());
 			}
 			catch (...)
 			{
-				vddlog("e", "Unknown exception during device cleanup");
+				VDD_LOG_ERROR("Unknown exception during device cleanup");
 			}
 
 			// Always call the context cleanup
 			pContext->Cleanup();
-			vddlog("d", "Device cleanup callback completed");
+			VDD_LOG_DEBUG("Device cleanup callback completed");
 		}
 		else if (pContext)
 		{
-			vddlog("w", "Device context wrapper found but context is null during cleanup");
+			VDD_LOG_WARNING("Device context wrapper found but context is null during cleanup");
 			pContext->Cleanup();
 		}
 		else
 		{
-			vddlog("w", "No device context wrapper found during cleanup");
+			VDD_LOG_WARNING("No device context wrapper found during cleanup");
 		}
 	};
 
-	logStream.str("");
-	logStream << "Creating device with WdfDeviceCreate:";
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG("Creating device with WdfDeviceCreate:");
 
 	WDFDEVICE Device = nullptr;
 	Status = WdfDeviceCreate(&pDeviceInit, &Attr, &Device);
 	if (!NT_SUCCESS(Status))
 	{
-		logStream.str("");
-		logStream << "WdfDeviceCreate failed with status: " << Status;
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("WdfDeviceCreate failed with status: " << Status);
 		return Status;
 	}
 
 	Status = IddCxDeviceInitialize(Device);
 	if (!NT_SUCCESS(Status))
 	{
-		logStream.str("");
-		logStream << "IddCxDeviceInitialize failed with status: " << Status;
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("IddCxDeviceInitialize failed with status: " << Status);
 		return Status;
 	}
 
@@ -245,15 +228,13 @@ _Use_decl_annotations_
 	Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
 	if (!NT_SUCCESS(Status))
 	{
-		logStream.str("");
-		logStream << "WdfDeviceCreateDeviceInterface failed with status: " << Status
-		          << " - IOCTL transport will be unavailable, pipe transport still works";
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("WdfDeviceCreateDeviceInterface failed with status: " << Status
+		                     << " - IOCTL transport will be unavailable, pipe transport still works");
 		// Non-fatal: pipe transport remains usable, so don't abort device add.
 	}
 	else
 	{
-		vddlog("d", "Registered Zako VDD control device interface");
+		VDD_LOG_DEBUG("Registered Zako VDD control device interface");
 	}
 
 	// Create a new device context object and attach it to the WDF device object
@@ -267,15 +248,11 @@ _Use_decl_annotations_
 	if (pContext)
 	{
 		pContext->pContext = new IndirectDeviceContext(Device);
-		logStream.str("");
-		logStream << "Device context initialized and attached to WDF device.";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("Device context initialized and attached to WDF device.");
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Failed to get device context wrapper.";
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR("Failed to get device context wrapper.");
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 
@@ -289,13 +266,10 @@ _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE PreviousState)
 {
-	stringstream logStream;
-
 	// Log the entry into D0 state
-	logStream << "Entering D0 power state:"
-			  << "\n  Device Handle: " << static_cast<void *>(Device)
-			  << "\n  Previous State: " << PreviousState;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Entering D0 power state:"
+	                     << "\n  Device Handle: " << static_cast<void *>(Device)
+	                     << "\n  Previous State: " << PreviousState);
 
 	// This function is called by WDF to start the device in the fully-on power state.
 	// For IDDCX 1.10 power management: when recovering from low-power state (D3),
@@ -307,32 +281,24 @@ _Use_decl_annotations_
 		// Check if we're recovering from a low-power state
 		if (PreviousState == WdfPowerDeviceD3 || PreviousState == WdfPowerDeviceD3Final)
 		{
-			logStream.str("");
-			logStream << "Recovering from low-power state (D3), reinitializing adapter...";
-			vddlog("i", logStream.str().c_str());
+			VDD_LOG_INFO("Recovering from low-power state (D3), reinitializing adapter...");
 		}
 		else
 		{
-			logStream.str("");
-			logStream << "Initializing adapter...";
-			vddlog("d", logStream.str().c_str());
+			VDD_LOG_DEBUG("Initializing adapter...");
 		}
 
 		// Initialize adapter (safe to call multiple times)
 		pContext->pContext->InitAdapter();
 
-		logStream.str("");
-		logStream << "InitAdapter called successfully.";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("InitAdapter called successfully.");
 
 		// Note: When recovering from D3, the system will automatically re-assign SwapChain
 		// through the EvtIddCxMonitorAssignSwapChain callback, so we don't need to do it here.
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Failed to get device context.";
-		vddlog("e", logStream.str().c_str());
+		VDD_LOG_ERROR("Failed to get device context.");
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
 
@@ -343,13 +309,10 @@ _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
 {
-	stringstream logStream;
-
 	// Log the exit from D0 state
-	logStream << "Exiting D0 power state:"
-			  << "\n  Device Handle: " << static_cast<void *>(Device)
-			  << "\n  Target State: " << TargetState;
-	vddlog("d", logStream.str().c_str());
+	VDD_LOG_DEBUG_STREAM("Exiting D0 power state:"
+	                     << "\n  Device Handle: " << static_cast<void *>(Device)
+	                     << "\n  Target State: " << TargetState);
 
 	// This function is called by WDF when the device is transitioning to a low-power state (D3).
 	// For IDDCX 1.10 power management, we should pause SwapChain processing to save resources.
@@ -357,16 +320,12 @@ _Use_decl_annotations_
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	if (pContext && pContext->pContext)
 	{
-		logStream.str("");
-		logStream << "Preparing device for low-power state...";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("Preparing device for low-power state...");
 
 		// Stop SwapChain processing to save GPU/CPU resources during low-power state
 		if (pContext->pContext->HasActiveSwapChain())
 		{
-			logStream.str("");
-			logStream << "Pausing SwapChain processing for power management";
-			vddlog("i", logStream.str().c_str());
+			VDD_LOG_INFO("Pausing SwapChain processing for power management");
 
 			try
 			{
@@ -374,37 +333,27 @@ _Use_decl_annotations_
 				pContext->pContext->UnassignAllSwapChains();
 				Sleep(50);
 
-				logStream.str("");
-				logStream << "SwapChain processing paused successfully for power management";
-				vddlog("d", logStream.str().c_str());
+				VDD_LOG_DEBUG("SwapChain processing paused successfully for power management");
 			}
 			catch (const std::exception &e)
 			{
-				stringstream errorStream;
-				errorStream << "Exception while pausing SwapChain for power management: " << e.what();
-				vddlog("e", errorStream.str().c_str());
+				VDD_LOG_ERROR_STREAM("Exception while pausing SwapChain for power management: " << e.what());
 			}
 			catch (...)
 			{
-				vddlog("e", "Unknown exception while pausing SwapChain for power management");
+				VDD_LOG_ERROR("Unknown exception while pausing SwapChain for power management");
 			}
 		}
 		else
 		{
-			logStream.str("");
-			logStream << "No active SwapChain to pause";
-			vddlog("d", logStream.str().c_str());
+			VDD_LOG_DEBUG("No active SwapChain to pause");
 		}
 
-		logStream.str("");
-		logStream << "Device prepared for low-power state";
-		vddlog("d", logStream.str().c_str());
+		VDD_LOG_DEBUG("Device prepared for low-power state");
 	}
 	else
 	{
-		logStream.str("");
-		logStream << "Failed to get device context during D0Exit";
-		vddlog("w", logStream.str().c_str());
+		VDD_LOG_WARNING("Failed to get device context during D0Exit");
 		// Don't return error - allow power transition to continue
 	}
 

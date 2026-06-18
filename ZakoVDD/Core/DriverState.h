@@ -20,8 +20,6 @@ extern UINT numVirtualDisplays;
 extern std::wstring gpuname;
 extern std::wstring confpath;
 
-extern std::atomic<bool> logsEnabled;
-extern std::atomic<bool> debugLogs;
 extern std::atomic<bool> HDRPlus;
 extern std::atomic<bool> SDR10;
 extern std::atomic<bool> customEdid;
@@ -29,7 +27,6 @@ extern std::atomic<bool> vrrEnabled;
 extern std::atomic<bool> hardwareCursor;
 extern std::atomic<bool> preventManufacturerSpoof;
 extern std::atomic<bool> edidCeaOverride;
-extern std::atomic<bool> sendLogsThroughPipe;
 
 extern std::atomic<bool> alphaCursorSupport;
 extern int CursorMaxX;

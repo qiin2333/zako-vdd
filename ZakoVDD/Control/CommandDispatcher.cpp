@@ -15,8 +15,6 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 {
 	Command commands[] = {
 		{L"RELOAD_DRIVER", 13, HandleReloadDriverCommand},
-		{L"LOG_DEBUG", 9, HandleLogDebugCommand},
-		{L"LOGGING", 7, HandleLoggingCommand},
 		{L"HDRPLUS", 7, HandleHdrPlusCommand},
 		{L"SDR10", 5, HandleSdr10Command},
 		{L"CUSTOMEDID", 10, HandleCustomEdidCommand},

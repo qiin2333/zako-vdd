@@ -27,29 +27,27 @@ static VddEdid::Profile DetectAutoEdidProfile()
 	HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
 	if (!ntdll)
 	{
-		vddlog("w", "DetectAutoEdidProfile: ntdll handle missing, defaulting to Legacy");
+		VDD_LOG_WARNING("DetectAutoEdidProfile: ntdll handle missing, defaulting to Legacy");
 		return VddEdid::Profile::Legacy;
 	}
 	auto pRtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
 	if (!pRtlGetVersion)
 	{
-		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion missing, defaulting to Legacy");
+		VDD_LOG_WARNING("DetectAutoEdidProfile: RtlGetVersion missing, defaulting to Legacy");
 		return VddEdid::Profile::Legacy;
 	}
 	RTL_OSVERSIONINFOW info{};
 	info.dwOSVersionInfoSize = sizeof(info);
 	if (pRtlGetVersion(&info) != 0)
 	{
-		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion failed, defaulting to Legacy");
+		VDD_LOG_WARNING("DetectAutoEdidProfile: RtlGetVersion failed, defaulting to Legacy");
 		return VddEdid::Profile::Legacy;
 	}
 
 	const bool isWin10OrOlder = (info.dwMajorVersion < 10) ||
 		(info.dwMajorVersion == 10 && info.dwBuildNumber < 22000);
-	stringstream ss;
-	ss << "DetectAutoEdidProfile: build=" << info.dwBuildNumber
-	   << " -> " << (isWin10OrOlder ? "Legacy" : "Modern");
-	vddlog("i", ss.str().c_str());
+	VDD_LOG_INFO_STREAM("DetectAutoEdidProfile: build=" << info.dwBuildNumber
+	                    << " -> " << (isWin10OrOlder ? "Legacy" : "Modern"));
 	return isWin10OrOlder ? VddEdid::Profile::Legacy : VddEdid::Profile::Modern;
 }
 
@@ -78,12 +76,10 @@ void ApplyEdidProfileSetting(const wstring &settingValue)
 		: requested;
 	gEdidProfile.store(static_cast<int>(effective));
 
-	stringstream ss;
-	ss << "EDID profile applied: requested=";
-	ss << WStringToString(VddEdid::ProfileToString(requested));
-	ss << " effective=";
-	ss << WStringToString(VddEdid::ProfileToString(effective));
-	vddlog("i", ss.str().c_str());
+	VDD_LOG_INFO_STREAM("EDID profile applied: requested="
+	                    << WStringToString(VddEdid::ProfileToString(requested))
+	                    << " effective="
+	                    << WStringToString(VddEdid::ProfileToString(effective)));
 }
 
 static vector<BYTE> GetHardcodedEdid()
@@ -139,7 +135,7 @@ void UpdateEdidPhysicalSize(vector<BYTE> &edid, float widthCm, float heightCm)
 {
 	if (edid.size() < 23)
 	{
-		vddlog("w", "EDID too small to update physical size");
+		VDD_LOG_WARNING("EDID too small to update physical size");
 		return;
 	}
 
@@ -152,9 +148,7 @@ void UpdateEdidPhysicalSize(vector<BYTE> &edid, float widthCm, float heightCm)
 			width = 255;
 		edid[21] = static_cast<BYTE>(width);
 
-		stringstream ss;
-		ss << "Set EDID horizontal size: " << width << " cm";
-		vddlog("d", ss.str().c_str());
+		VDD_LOG_DEBUG_STREAM("Set EDID horizontal size: " << width << " cm");
 	}
 
 	if (heightCm > 0)
@@ -166,9 +160,7 @@ void UpdateEdidPhysicalSize(vector<BYTE> &edid, float widthCm, float heightCm)
 			height = 255;
 		edid[22] = static_cast<BYTE>(height);
 
-		stringstream ss;
-		ss << "Set EDID vertical size: " << height << " cm";
-		vddlog("d", ss.str().c_str());
+		VDD_LOG_DEBUG_STREAM("Set EDID vertical size: " << height << " cm");
 	}
 }
 
@@ -198,7 +190,7 @@ void UpdateEdidHdrMetadata(vector<BYTE> &edid, float maxNits, float minNits, flo
 {
 	if (edid.size() < 256)
 	{
-		vddlog("w", "EDID too small to update HDR metadata");
+		VDD_LOG_WARNING("EDID too small to update HDR metadata");
 		return;
 	}
 
@@ -222,7 +214,7 @@ void UpdateEdidHdrMetadata(vector<BYTE> &edid, float maxNits, float minNits, flo
 
 		if (tag == 0x07 && length >= 1 && (pos + 1) < 256 && edid[pos + 1] == 0x06)
 		{
-			vddlog("d", ("Found HDR Static Metadata block at position " + to_string(pos)).c_str());
+			VDD_LOG_DEBUG_STREAM("Found HDR Static Metadata block at position " << pos);
 
 			auto calcLumCv = [](float nits) -> BYTE
 			{
@@ -234,14 +226,16 @@ void UpdateEdidHdrMetadata(vector<BYTE> &edid, float maxNits, float minNits, flo
 			{
 				edid[pos + 4] = calcLumCv(maxNits);
 				float actualNits = 50.0f * powf(2.0f, edid[pos + 4] / 32.0f);
-				vddlog("d", ("Set MaxCLL cv=" + to_string((int)edid[pos + 4]) + " (req " + to_string(maxNits) + ", actual " + to_string(actualNits) + " nits)").c_str());
+				VDD_LOG_DEBUG_STREAM("Set MaxCLL cv=" << (int)edid[pos + 4]
+				                     << " (req " << maxNits << ", actual " << actualNits << " nits)");
 			}
 
 			if (length >= 5 && (pos + 5) < 256)
 			{
 				edid[pos + 5] = calcLumCv(maxFALL);
 				float actualNits = 50.0f * powf(2.0f, edid[pos + 5] / 32.0f);
-				vddlog("d", ("Set MaxFALL cv=" + to_string((int)edid[pos + 5]) + " (req " + to_string(maxFALL) + ", actual " + to_string(actualNits) + " nits)").c_str());
+				VDD_LOG_DEBUG_STREAM("Set MaxFALL cv=" << (int)edid[pos + 5]
+				                     << " (req " << maxFALL << ", actual " << actualNits << " nits)");
 			}
 
 			if (length >= 6 && (pos + 6) < 256)
@@ -249,25 +243,26 @@ void UpdateEdidHdrMetadata(vector<BYTE> &edid, float maxNits, float minNits, flo
 				float minCv = (minNits * 255.0f * 255.0f) / (maxNits * 100.0f);
 				edid[pos + 6] = static_cast<BYTE>(roundf(max(0.0f, min(255.0f, minCv))));
 				float actualNits = (edid[pos + 6] * maxNits * 100.0f) / (255.0f * 255.0f);
-				vddlog("d", ("Set MinLum cv=" + to_string((int)edid[pos + 6]) + " (req " + to_string(minNits) + ", actual " + to_string(actualNits) + " nits)").c_str());
+				VDD_LOG_DEBUG_STREAM("Set MinLum cv=" << (int)edid[pos + 6]
+				                     << " (req " << minNits << ", actual " << actualNits << " nits)");
 			}
 
 			edid[255] = CalculateCeaChecksum(edid);
-			vddlog("d", "Updated CEA extension checksum");
+			VDD_LOG_DEBUG("Updated CEA extension checksum");
 			return;
 		}
 
 		pos += length + 1;
 	}
 
-	vddlog("w", "HDR Static Metadata block not found in EDID");
+	VDD_LOG_WARNING("HDR Static Metadata block not found in EDID");
 }
 
 void UpdateEdidFreeSyncRange(vector<BYTE> &edid, BYTE minHz, BYTE maxHz)
 {
 	if (edid.size() < 256)
 	{
-		vddlog("w", "EDID too small to update FreeSync range");
+		VDD_LOG_WARNING("EDID too small to update FreeSync range");
 		return;
 	}
 	if (minHz < 1) minHz = 1;
@@ -296,19 +291,17 @@ void UpdateEdidFreeSyncRange(vector<BYTE> &edid, BYTE minHz, BYTE maxHz)
 					edid[pos + 6] = minHz;
 					edid[pos + 7] = maxHz;
 					edid[255] = CalculateCeaChecksum(edid);
-					stringstream ss;
-					ss << "FreeSync VSDB rate range " << (int)oldMin << "-" << (int)oldMax
-					   << " Hz -> " << (int)minHz << "-" << (int)maxHz << " Hz";
-					vddlog("d", ss.str().c_str());
+					VDD_LOG_DEBUG_STREAM("FreeSync VSDB rate range " << (int)oldMin << "-" << (int)oldMax
+					                     << " Hz -> " << (int)minHz << "-" << (int)maxHz << " Hz");
 					return;
 				}
-				vddlog("w", "AMD FreeSync VSDB found but length too small for rate range");
+				VDD_LOG_WARNING("AMD FreeSync VSDB found but length too small for rate range");
 				return;
 			}
 		}
 		pos += length + 1;
 	}
-	vddlog("w", "AMD FreeSync VSDB not found in EDID");
+	VDD_LOG_WARNING("AMD FreeSync VSDB not found in EDID");
 }
 
 static vector<BYTE> LoadEdid(const string &filePath)
@@ -317,19 +310,19 @@ static vector<BYTE> LoadEdid(const string &filePath)
 
 	if (customEdid)
 	{
-		vddlog("i", "Attempting to use user Edid");
+		VDD_LOG_INFO("Attempting to use user Edid");
 	}
 	else
 	{
-		vddlog("i", "Using hardcoded edid");
+		VDD_LOG_INFO("Using hardcoded edid");
 		return hardcodedEdid;
 	}
 
 	ifstream file(filePath, ios::binary | ios::ate);
 	if (!file)
 	{
-		vddlog("i", "No custom edid found");
-		vddlog("i", "Using hardcoded edid");
+		VDD_LOG_INFO("No custom edid found");
+		VDD_LOG_INFO("Using hardcoded edid");
 		return hardcodedEdid;
 	}
 
@@ -338,8 +331,8 @@ static vector<BYTE> LoadEdid(const string &filePath)
 
 	if (size <= 0 || size > 1024 * 1024)
 	{
-		vddlog("e", "Custom edid file size invalid (must be >0 and <=1MB)");
-		vddlog("i", "Using hardcoded edid");
+		VDD_LOG_ERROR("Custom edid file size invalid (must be >0 and <=1MB)");
+		VDD_LOG_INFO("Using hardcoded edid");
 		return hardcodedEdid;
 	}
 
@@ -349,8 +342,8 @@ static vector<BYTE> LoadEdid(const string &filePath)
 		BYTE calculatedChecksum = CalculateEdidChecksum(buffer);
 		if (calculatedChecksum != buffer[127])
 		{
-			vddlog("e", "Custom edid failed due to invalid checksum");
-			vddlog("i", "Using hardcoded edid");
+			VDD_LOG_ERROR("Custom edid failed due to invalid checksum");
+			VDD_LOG_INFO("Using hardcoded edid");
 			return hardcodedEdid;
 		}
 
@@ -371,11 +364,11 @@ static vector<BYTE> LoadEdid(const string &filePath)
 			}
 		}
 
-		vddlog("i", "Using custom edid");
+		VDD_LOG_INFO("Using custom edid");
 		return buffer;
 	}
 
-	vddlog("i", "Using hardcoded edid");
+	VDD_LOG_INFO("Using hardcoded edid");
 	return hardcodedEdid;
 }
 
@@ -385,15 +378,13 @@ int LoadKnownMonitorEdid()
 
 	if (edid.empty())
 	{
-		vddlog("e", "EDID data is empty, adapter initialization may fail");
+		VDD_LOG_ERROR("EDID data is empty, adapter initialization may fail");
 		return -1;
 	}
 
 	if (edid.size() < 128)
 	{
-		stringstream ss;
-		ss << "EDID data too small (" << edid.size() << " bytes), expected at least 128 bytes";
-		vddlog("e", ss.str().c_str());
+		VDD_LOG_ERROR_STREAM("EDID data too small (" << edid.size() << " bytes), expected at least 128 bytes");
 		return -1;
 	}
 
@@ -406,9 +397,7 @@ int LoadKnownMonitorEdid()
 
 	IndirectDeviceContext::s_KnownMonitorEdid = edid;
 
-	stringstream ss;
-	ss << "EDID data loaded successfully (" << edid.size() << " bytes)";
-	vddlog("d", ss.str().c_str());
+	VDD_LOG_DEBUG_STREAM("EDID data loaded successfully (" << edid.size() << " bytes)");
 
 	return 0;
 }

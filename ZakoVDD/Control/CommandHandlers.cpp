@@ -4,6 +4,7 @@
 #include "..\Adapter\GpuAdapterSelection.h"
 #include "..\Adapter\GpuStatus.h"
 #include "..\Config\DriverSettings.h"
+#include "..\Control\ControlTransport.h"
 #include "..\Device\IndirectDeviceContextWrapper.h"
 #include "..\Diagnostics\DriverDiagnostics.h"
 #include "..\Core\DriverState.h"
@@ -30,13 +31,13 @@ void ToggleSetting(HANDLE hPipe, wchar_t *param, const wchar_t *settingName, con
 	if (wcsncmp(param, L"true", 4) == 0)
 	{
 		UpdateXmlToggleSetting(true, settingName);
-		vddlog("c", enableMsg);
+		VDD_LOG_INFO(enableMsg);
 		ReloadDriver(hPipe);
 	}
 	else if (wcsncmp(param, L"false", 5) == 0)
 	{
 		UpdateXmlToggleSetting(false, settingName);
-		vddlog("c", disableMsg);
+		VDD_LOG_INFO(disableMsg);
 		ReloadDriver(hPipe);
 	}
 }
@@ -46,11 +47,11 @@ void ReloadDriver(HANDLE hPipe)
 {
 	UNREFERENCED_PARAMETER(hPipe);
 
-	vddlog("i", "Starting driver reload process");
+	VDD_LOG_INFO("Starting driver reload process");
 
 	if (g_GlobalDevice == nullptr)
 	{
-		vddlog("e", "Global device not available for reload");
+		VDD_LOG_ERROR("Global device not available for reload");
 		return;
 	}
 
@@ -58,7 +59,7 @@ void ReloadDriver(HANDLE hPipe)
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 	if (!pContext || !pContext->pContext)
 	{
-		vddlog("e", "Invalid device context for driver reload");
+		VDD_LOG_ERROR("Invalid device context for driver reload");
 		return;
 	}
 
@@ -67,81 +68,69 @@ void ReloadDriver(HANDLE hPipe)
 		LoadDriverSettings();
 
 		UINT oldNumVirtualDisplays = numVirtualDisplays;
-		vddlog("d", ("Saving current monitor count for cleanup: " + to_string(oldNumVirtualDisplays)).c_str());
+		VDD_LOG_DEBUG_STREAM("Saving current monitor count for cleanup: " << oldNumVirtualDisplays);
 
-		vddlog("d", "Cleaning up existing monitors before reload");
+		VDD_LOG_DEBUG("Cleaning up existing monitors before reload");
 		if (pContext->pContext->HasActiveSwapChain())
 		{
-			vddlog("d", "Stopping active SwapChain processing before reload");
+			VDD_LOG_DEBUG("Stopping active SwapChain processing before reload");
 			pContext->pContext->UnassignAllSwapChains();
 			Sleep(100);
 		}
 
 		if (pContext->pContext->HasActiveMonitor())
 		{
-			vddlog("d", "Destroying all existing monitors before reload");
+			VDD_LOG_DEBUG("Destroying all existing monitors before reload");
 			pContext->pContext->DestroyAllMonitors();
 		}
 
-		vddlog("d", "Waiting for system stabilization after cleanup");
+		VDD_LOG_DEBUG("Waiting for system stabilization after cleanup");
 		Sleep(200);
 
-		vddlog("d", "Reinitializing adapter with new configuration");
+		VDD_LOG_DEBUG("Reinitializing adapter with new configuration");
 		pContext->pContext->InitAdapter();
 
-		vddlog("d", "Waiting for adapter initialization to stabilize");
+		VDD_LOG_DEBUG("Waiting for adapter initialization to stabilize");
 		Sleep(100);
 
-		vddlog("i", ("Driver reload completed successfully. Monitor count changed from " + to_string(oldNumVirtualDisplays) + " to " + to_string(numVirtualDisplays)).c_str());
+		VDD_LOG_INFO(("Driver reload completed successfully. Monitor count changed from " + to_string(oldNumVirtualDisplays) + " to " + to_string(numVirtualDisplays)).c_str());
 	}
-	catch (const exception &e)
-	{
-		stringstream errorStream;
-		errorStream << "Exception during driver reload: " << e.what();
-		vddlog("e", errorStream.str().c_str());
+		catch (const exception &e)
+		{
+			VDD_LOG_ERROR_STREAM("Exception during driver reload: " << e.what());
 
 		try
 		{
 			LoadDriverSettings();
 			pContext->pContext->InitAdapter();
-			vddlog("w", "Adapter reinitialized after exception");
+			VDD_LOG_WARNING("Adapter reinitialized after exception");
 		}
 		catch (...)
 		{
-			vddlog("e", "Failed to reinitialize adapter after exception");
+			VDD_LOG_ERROR("Failed to reinitialize adapter after exception");
 		}
 	}
 	catch (...)
 	{
-		vddlog("e", "Unknown exception during driver reload");
+		VDD_LOG_ERROR("Unknown exception during driver reload");
 
 		try
 		{
 			LoadDriverSettings();
 			pContext->pContext->InitAdapter();
-			vddlog("w", "Adapter reinitialized after unknown exception");
+			VDD_LOG_WARNING("Adapter reinitialized after unknown exception");
 		}
 		catch (...)
 		{
-			vddlog("e", "Failed to reinitialize adapter after unknown exception");
+			VDD_LOG_ERROR("Failed to reinitialize adapter after unknown exception");
 		}
 	}
 }
 
 void HandleReloadDriverCommand(HANDLE hPipe, wchar_t *)
 {
-	vddlog("c", "Reloading the driver");
+	VDD_LOG_INFO("Reloading the driver");
 	ReloadDriver(hPipe);
-}
-
-void HandleLogDebugCommand(HANDLE hPipe, wchar_t *param)
-{
-	ToggleSetting(hPipe, param, L"debuglogging", "Pipe debugging enabled", "Debugging disabled");
-}
-
-void HandleLoggingCommand(HANDLE hPipe, wchar_t *param)
-{
-	ToggleSetting(hPipe, param, L"logging", "Logging Enabled", "Logging disabled");
 }
 
 void HandleHdrPlusCommand(HANDLE hPipe, wchar_t *param)
@@ -173,19 +162,19 @@ void HandleEdidProfileCommand(HANDLE, wchar_t *param)
 {
 	if (!param || *param == 0)
 	{
-		vddlog("e", "EDIDPROFILE requires a value: auto | legacy | modern");
+		VDD_LOG_ERROR("EDIDPROFILE requires a value: auto | legacy | modern");
 		return;
 	}
 
 	wstring requested(param);
 	if (!IsKnownEdidProfileSetting(requested))
 	{
-		vddlog("e", "EDIDPROFILE: unknown value (expected auto | legacy | modern)");
+		VDD_LOG_ERROR("EDIDPROFILE: unknown value (expected auto | legacy | modern)");
 		return;
 	}
 
 	ApplyEdidProfileSetting(requested);
-	vddlog("c", "EDID profile updated; recreate monitors to take effect");
+	VDD_LOG_INFO("EDID profile updated; recreate monitors to take effect");
 }
 
 void HandleVrrCommand(HANDLE hPipe, wchar_t *param)
@@ -200,30 +189,30 @@ void HandleHardwareCursorCommand(HANDLE hPipe, wchar_t *param)
 
 void HandleD3DDeviceGpuCommand(HANDLE, wchar_t *)
 {
-	vddlog("c", "Retrieving D3D GPU (This information may be inaccurate without reloading the driver first)");
+	VDD_LOG_INFO("Retrieving D3D GPU (This information may be inaccurate without reloading the driver first)");
 	InitializeD3DDeviceAndLogGPU();
-	vddlog("c", "Retrieved D3D GPU");
+	VDD_LOG_INFO("Retrieved D3D GPU");
 }
 
 void HandleIddCxVersionCommand(HANDLE, wchar_t *)
 {
-	vddlog("c", "Logging iddcx version");
+	VDD_LOG_INFO("Logging iddcx version");
 	LogIddCxVersion();
 }
 
 void HandleGetAssignedGpuCommand(HANDLE, wchar_t *)
 {
-	vddlog("c", "Retrieving Assigned GPU");
+	VDD_LOG_INFO("Retrieving Assigned GPU");
 	GetGpuInfo();
-	vddlog("c", "Retrieved Assigned GPU");
+	VDD_LOG_INFO("Retrieved Assigned GPU");
 }
 
 void HandleGetAllGpusCommand(HANDLE, wchar_t *)
 {
-	vddlog("c", "Logging all GPUs");
-	vddlog("i", "Any GPUs which show twice but you only have one, will most likely be the GPU the driver is attached to");
+	VDD_LOG_INFO("Logging all GPUs");
+	VDD_LOG_INFO("Any GPUs which show twice but you only have one, will most likely be the GPU the driver is attached to");
 	LogAvailableGPUs();
-	vddlog("c", "Logged all GPUs");
+	VDD_LOG_INFO("Logged all GPUs");
 }
 
 void HandleSetGpuCommand(HANDLE hPipe, wchar_t *param)
@@ -233,47 +222,42 @@ void HandleSetGpuCommand(HANDLE hPipe, wchar_t *param)
 
 	string gpuNameNarrow = WStringToString(gpuName);
 
-	vddlog("c", ("Setting GPU to: " + gpuNameNarrow).c_str());
+	VDD_LOG_INFO(("Setting GPU to: " + gpuNameNarrow).c_str());
 	if (UpdateXmlGpuSetting(gpuName.c_str()))
 	{
-		vddlog("c", "Gpu Changed, Restarting Driver");
+		VDD_LOG_INFO("Gpu Changed, Restarting Driver");
 	}
 	else
 	{
-		vddlog("e", "Failed to update GPU setting in XML. Restarting anyway");
+		VDD_LOG_ERROR("Failed to update GPU setting in XML. Restarting anyway");
 	}
 	ReloadDriver(hPipe);
 }
 
 void HandleSetDisplayCountCommand(HANDLE hPipe, wchar_t *param)
 {
-	vddlog("i", "Setting Display Count");
+	VDD_LOG_INFO("Setting Display Count");
 
 	int newDisplayCount = 1;
 	swscanf_s(param, L"%d", &newDisplayCount);
 
 	wstring displayLog = L"Setting display count  to " + to_wstring(newDisplayCount);
-	vddlog("c", WStringToString(displayLog).c_str());
+	VDD_LOG_INFO(WStringToString(displayLog).c_str());
 
 	if (UpdateXmlDisplayCountSetting(newDisplayCount))
 	{
-		vddlog("c", "Display Count Changed, Restarting Driver");
+		VDD_LOG_INFO("Display Count Changed, Restarting Driver");
 	}
 	else
 	{
-		vddlog("e", "Failed to update display count setting in XML. Restarting anyway");
+		VDD_LOG_ERROR("Failed to update display count setting in XML. Restarting anyway");
 	}
 	ReloadDriver(hPipe);
 }
 
 void HandleGetSettingsCommand(HANDLE hPipe, wchar_t *)
 {
-	bool debugEnabled = EnabledQuery(L"DebugLoggingEnabled");
-	bool loggingEnabled = EnabledQuery(L"LoggingEnabled");
-
-	wstring settingsResponse = L"SETTINGS ";
-	settingsResponse += debugEnabled ? L"DEBUG=true " : L"DEBUG=false ";
-	settingsResponse += loggingEnabled ? L"LOG=true" : L"LOG=false";
+	wstring settingsResponse = L"SETTINGS LOG=ETW";
 
 	if (hPipe != INVALID_HANDLE_VALUE && hPipe != NULL)
 	{
@@ -285,15 +269,15 @@ void HandleGetSettingsCommand(HANDLE hPipe, wchar_t *)
 
 void HandlePingCommand(HANDLE, wchar_t *)
 {
-	SendToPipe("PONG");
-	vddlog("p", "Heartbeat Ping");
+	SendLegacyPipeMessage("PONG");
+	VDD_LOG_VERBOSE("Heartbeat Ping");
 }
 
 void HandleCreateMonitorCommand(HANDLE, wchar_t *param)
 {
 	if (g_GlobalDevice == nullptr)
 	{
-		vddlog("e", "Global device not initialized");
+		VDD_LOG_ERROR("Global device not initialized");
 		return;
 	}
 
@@ -301,17 +285,17 @@ void HandleCreateMonitorCommand(HANDLE, wchar_t *param)
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 	if (!pContext || !pContext->pContext)
 	{
-		vddlog("e", "Failed to get device context for monitor creation");
+		VDD_LOG_ERROR("Failed to get device context for monitor creation");
 		return;
 	}
 
 	if (numVirtualDisplays == 0)
 	{
-		vddlog("e", "Invalid display count: 0");
+		VDD_LOG_ERROR("Invalid display count: 0");
 		return;
 	}
 
-	vddlog("i", "Starting monitor creation");
+	VDD_LOG_INFO("Starting monitor creation");
 
 	struct MonitorParams
 	{
@@ -381,10 +365,8 @@ void HandleCreateMonitorCommand(HANDLE, wchar_t *param)
 							mp.minNits = values[1];
 							mp.maxFALL = (values.size() >= 3) ? values[2] : values[0];
 
-							stringstream ss;
-							ss << "Parsed luminance - MaxNits: " << mp.maxNits
-							   << ", MinNits: " << mp.minNits << ", MaxFALL: " << mp.maxFALL;
-							vddlog("d", ss.str().c_str());
+							VDD_LOG_DEBUG_STREAM("Parsed luminance - MaxNits: " << mp.maxNits
+							                     << ", MinNits: " << mp.minNits << ", MaxFALL: " << mp.maxFALL);
 						}
 					}
 					else if (bracketIndex == 1)
@@ -394,10 +376,8 @@ void HandleCreateMonitorCommand(HANDLE, wchar_t *param)
 							mp.widthCm = values[0];
 							mp.heightCm = values[1];
 
-							stringstream ss;
-							ss << "Parsed dimensions - Width: " << mp.widthCm
-							   << " cm, Height: " << mp.heightCm << " cm";
-							vddlog("d", ss.str().c_str());
+							VDD_LOG_DEBUG_STREAM("Parsed dimensions - Width: " << mp.widthCm
+							                     << " cm, Height: " << mp.heightCm << " cm");
 						}
 					}
 
@@ -421,11 +401,11 @@ void HandleCreateMonitorCommand(HANDLE, wchar_t *param)
 				if (SUCCEEDED(CLSIDFromString(guidWithBraces.c_str(), &mp.guid)))
 				{
 					mp.hasGuid = true;
-					vddlog("d", ("Parsed client GUID: " + WStringToString(guidWithBraces)).c_str());
+					VDD_LOG_DEBUG_STREAM("Parsed client GUID: " << WStringToString(guidWithBraces));
 				}
 				else
 				{
-					vddlog("w", ("Failed to parse GUID: " + WStringToString(guidStr)).c_str());
+					VDD_LOG_WARNING(("Failed to parse GUID: " + WStringToString(guidStr)).c_str());
 				}
 			}
 
@@ -460,7 +440,7 @@ void HandleDestroyMonitorCommand(HANDLE, wchar_t *)
 {
 	if (g_GlobalDevice == nullptr)
 	{
-		vddlog("e", "Global device not initialized for monitor destruction");
+		VDD_LOG_ERROR("Global device not initialized for monitor destruction");
 		return;
 	}
 
@@ -468,31 +448,29 @@ void HandleDestroyMonitorCommand(HANDLE, wchar_t *)
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 	if (!pContext || !pContext->pContext)
 	{
-		vddlog("e", "Failed to get device context for monitor destruction");
+		VDD_LOG_ERROR("Failed to get device context for monitor destruction");
 		return;
 	}
 
-	vddlog("i", "Starting monitor destruction process");
-	vddlog("d", "Preparing system for monitor destruction");
+	VDD_LOG_INFO("Starting monitor destruction process");
+	VDD_LOG_DEBUG("Preparing system for monitor destruction");
 	Sleep(50);
 
 	try
 	{
 		pContext->pContext->DestroyAllMonitors();
-		vddlog("d", "Allowing system to stabilize after monitor destruction");
+		VDD_LOG_DEBUG("Allowing system to stabilize after monitor destruction");
 		Sleep(100);
-		vddlog("i", "All monitors destroyed successfully");
+		VDD_LOG_INFO("All monitors destroyed successfully");
 	}
 	catch (const exception &e)
 	{
-		stringstream errorStream;
-		errorStream << "Exception during monitor destruction: " << e.what();
-		vddlog("e", errorStream.str().c_str());
+		VDD_LOG_ERROR_STREAM("Exception during monitor destruction: " << e.what());
 		Sleep(200);
 	}
 	catch (...)
 	{
-		vddlog("e", "Unknown exception during monitor destruction");
+		VDD_LOG_ERROR("Unknown exception during monitor destruction");
 		Sleep(200);
 	}
 }
@@ -501,7 +479,7 @@ void HandleRefreshModesCommand(HANDLE, wchar_t *)
 {
 	if (g_GlobalDevice == nullptr)
 	{
-		vddlog("e", "REFRESHMODES: global device not initialized");
+		VDD_LOG_ERROR("REFRESHMODES: global device not initialized");
 		return;
 	}
 
@@ -509,21 +487,19 @@ void HandleRefreshModesCommand(HANDLE, wchar_t *)
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 	if (!pContext || !pContext->pContext)
 	{
-		vddlog("e", "REFRESHMODES: invalid device context");
+		VDD_LOG_ERROR("REFRESHMODES: invalid device context");
 		return;
 	}
 
 	int n = pContext->pContext->RefreshMonitorModes();
-	stringstream ss;
-	ss << "REFRESHMODES: refreshed " << n << " monitor(s) without departure";
-	vddlog("i", ss.str().c_str());
+	VDD_LOG_INFO_STREAM("REFRESHMODES: refreshed " << n << " monitor(s) without departure");
 }
 
 void HandleSetModesCommand(HANDLE, wchar_t *param)
 {
 	if (param == nullptr || *param == L'\0')
 	{
-		vddlog("e", "SETMODES: empty parameter");
+		VDD_LOG_ERROR("SETMODES: empty parameter");
 		return;
 	}
 
@@ -545,15 +521,13 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 		}
 		else
 		{
-			stringstream ss;
-			ss << "SETMODES: skipping malformed token '" << WStringToString(token) << "'";
-			vddlog("w", ss.str().c_str());
+			VDD_LOG_WARNING_STREAM("SETMODES: skipping malformed token '" << WStringToString(token) << "'");
 		}
 	}
 
 	if (parsed.empty())
 	{
-		vddlog("e", "SETMODES: no valid modes parsed; aborting");
+		VDD_LOG_ERROR("SETMODES: no valid modes parsed; aborting");
 		return;
 	}
 
@@ -561,9 +535,7 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 		lock_guard<mutex> dataLock(g_DataMutex);
 		monitorModes = parsed;
 	}
-	stringstream ss;
-	ss << "SETMODES: applied " << parsed.size() << " modes (in-memory only)";
-	vddlog("i", ss.str().c_str());
+	VDD_LOG_INFO_STREAM("SETMODES: applied " << parsed.size() << " modes (in-memory only)");
 
 	if (g_GlobalDevice != nullptr)
 	{
@@ -572,15 +544,13 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 		if (pContext && pContext->pContext)
 		{
 			int n = pContext->pContext->RefreshMonitorModes();
-			stringstream s2;
-			s2 << "SETMODES: pushed to " << n << " live monitor(s)";
-			vddlog("i", s2.str().c_str());
+			VDD_LOG_INFO_STREAM("SETMODES: pushed to " << n << " live monitor(s)");
 		}
 	}
 }
 
 void HandleUnknownCommand(HANDLE, wchar_t *buffer)
 {
-	vddlog("e", "Unknown command");
-	vddlog("e", WStringToString(buffer).c_str());
+	VDD_LOG_ERROR("Unknown command");
+	VDD_LOG_ERROR(WStringToString(buffer).c_str());
 }

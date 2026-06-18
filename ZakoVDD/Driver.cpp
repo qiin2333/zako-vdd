@@ -46,10 +46,10 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	Config.EvtDriverUnload = EvtDriverUnload;
 	LoadDriverSettings();
 
-	vddlog("i", "Driver Starting");
+	VDD_LOG_INFO("Driver Starting");
 	string utf8_confpath = WStringToString(confpath);
 	string logtext = "VDD Path: " + utf8_confpath;
-	vddlog("i", logtext.c_str());
+	VDD_LOG_INFO(logtext.c_str());
 	LogIddCxVersion();
 
 	Status = WdfDriverCreate(pDriverObject, pRegistryPath, &Attributes, &Config, WDF_NO_HANDLE);

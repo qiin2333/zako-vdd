@@ -257,10 +257,18 @@ jobs:
       - name: Package release zip
         run: |
           cd driver-x64
-          zip -j ../zakovdd.zip ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml ZakoVDD.cer
+          zip -j ../zakovdd.zip \
+            ZakoVDD/ZakoVDD.dll \
+            ZakoVDD/ZakoVDD.inf \
+            ZakoVDD/zakovdd.cat \
+            ZakoVDD/vdd_settings.xml \
+            ZakoVDD.cer
           cd ..
+          unzip -l zakovdd.zip
+          for required in ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml ZakoVDD.cer; do
+            unzip -l zakovdd.zip "$required" >/dev/null
+          done
           ls -la zakovdd.zip
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

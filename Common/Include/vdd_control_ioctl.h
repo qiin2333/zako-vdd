@@ -32,10 +32,9 @@ DEFINE_GUID(GUID_DEVINTERFACE_ZAKO_VDD_CONTROL,
 // driver works on stable, non-volatile memory and we don't have to worry
 // about the caller's buffer disappearing mid-handler.
 //
-// FILE_WRITE_DATA matches the pipe's GENERIC_READ|GENERIC_WRITE access mask
-// expectations and matches the SDDL-allows-everyone semantics of the legacy
-// pipe (D:(A;;GA;;;WD)). If you tighten this later remember to update both
-// the driver registration and the Sunshine SetupDi code path.
+// FILE_WRITE_DATA matches the command channel's GENERIC_READ|GENERIC_WRITE
+// expectations. Legacy pipe access is intentionally tighter than the IOCTL
+// path; Sunshine should prefer this device interface for normal operation.
 #define ZAKO_VDD_DEVICE_TYPE   FILE_DEVICE_UNKNOWN
 
 #define IOCTL_VDD_COMMAND \

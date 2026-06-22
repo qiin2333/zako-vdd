@@ -60,7 +60,7 @@ jobs:
 
       - name: Build the driver
         run: |
-          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
+          msbuild "ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
 
       - name: Stamp driver version
         shell: pwsh
@@ -75,7 +75,7 @@ jobs:
           }
           Write-Host "Using stampinf: $($stampinf.FullName)"
 
-          $infPath = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf"
+          $infPath = "${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf"
 
           # Extract numeric version from tag (e.g. v0.13 -> 100.0.13.0,
           # v0.15.3-zak2333 -> 100.0.15.3) or use date-based version.
@@ -111,7 +111,7 @@ jobs:
 
       - name: List build directory
         continue-on-error: true
-        run: dir "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
+        run: dir "${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
 
       - name: Sign driver with certificate
         # Skip signing for PRs from forks to prevent secret exfiltration
@@ -147,7 +147,7 @@ jobs:
           }
           Write-Host "Using signtool: $($signtool.FullName)"
 
-          $buildDir = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
+          $buildDir = "${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
           
           # Search for inf2cat in both x64 and x86 (MSBuild uses x86)
           $inf2cat = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\inf2cat.exe","C:\Program Files*\Windows Kits\10\bin\*\x86\inf2cat.exe" -ErrorAction SilentlyContinue |
@@ -181,7 +181,7 @@ jobs:
           }
 
           # Export the signing certificate as .cer (overrides the self-signed test cert from MSBuild)
-          $cerPath = Join-Path $buildDir "ZakoVDD.cer"
+          $cerPath = Join-Path (Split-Path $buildDir -Parent) "ZakoVDD.cer"
           Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT | Out-Null
           Write-Host "Exported signing certificate to $cerPath"
 
@@ -191,11 +191,11 @@ jobs:
         with:
           name: Built-Driver-${{ matrix.configuration }}-${{ matrix.platform }}
           path: |
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.dll
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\zakovdd.cat
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\vdd_settings.xml
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.cer
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.dll
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\zakovdd.cat
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\vdd_settings.xml
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD.cer
 
   release:
     name: Create Release

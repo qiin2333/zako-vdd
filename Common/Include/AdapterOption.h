@@ -1,8 +1,18 @@
 #pragma once
 
-#include <wrl/client.h> 	// For ComPtr
-#include <dxgi.h>       	// For IDXGIAdapter, IDXGIFactory1
-#include <algorithm>    	// For sort
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <wdf.h>
+#include <iddcx.h>
+
+#include <algorithm>		// For sort
+#include <dxgi.h>		// For IDXGIAdapter, IDXGIFactory1
+#include <fstream>
+#include <string>
+#include <vector>
+#include <wrl/client.h>	// For ComPtr
 
 using namespace std;
 using namespace Microsoft::WRL;
@@ -15,12 +25,12 @@ struct GPUInfo {
 };
 
 // Sort function for GPUs by dedicated video memory
-bool CompareGPUs(const GPUInfo& a, const GPUInfo& b) {
+inline bool CompareGPUs(const GPUInfo& a, const GPUInfo& b) {
     return a.desc.DedicatedVideoMemory > b.desc.DedicatedVideoMemory;
 }
 
 // Get a enumerate list of available GPUs
-vector<GPUInfo> getAvailableGPUs() {
+inline vector<GPUInfo> getAvailableGPUs() {
     vector<GPUInfo> gpus; // Vector to hold all GPU's information
 
     ComPtr<IDXGIFactory1> factory;

@@ -3,17 +3,19 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - master
       - sunshine
     tags:
       - 'v*'
   pull_request_target:
     branches:
+      - main
       - master
       - sunshine
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       matrix:
         configuration: [Release]
@@ -26,16 +28,25 @@ jobs:
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[17.0,18.0)'
 
       - name: Install WDK
         shell: pwsh
         run: |
-          # Check if WDK is already installed
+          # Check if WDK and its VS2022 MSBuild tasks are installed.
+          $requiredVsVersion = "17.0"
+          $wdkTaskPattern = "C:\Program Files*\Windows Kits\10\build\*\bin\Microsoft.DriverKit.Build.Tasks.$requiredVsVersion.dll"
           $wdfHeader = Get-ChildItem "C:\Program Files*\Windows Kits\10\Include\*\wdf" -Directory -ErrorAction SilentlyContinue |
                        Sort-Object { $_.Parent.Name } -Descending |
                        Select-Object -First 1
-          if ($wdfHeader) {
+          $wdkTask = Get-ChildItem $wdkTaskPattern -ErrorAction SilentlyContinue |
+                     Sort-Object { $_.Directory.Parent.Name } -Descending |
+                     Select-Object -First 1
+
+          if ($wdfHeader -and $wdkTask) {
             Write-Host "WDK already installed at: $($wdfHeader.FullName)"
+            Write-Host "WDK MSBuild task found at: $($wdkTask.FullName)"
           } else {
             Write-Host "Installing WDK..."
             $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2272234"
@@ -43,20 +54,52 @@ jobs:
             Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
             $proc = Start-Process -FilePath $wdkInstaller -ArgumentList "/quiet", "/norestart", "/features", "+" -Wait -NoNewWindow -PassThru
             Write-Host "WDK installer exit code: $($proc.ExitCode)"
-          }
-
-          # Install WDK VSIX for MSBuild integration
-          $vsixFiles = Get-ChildItem "C:\Program Files*\Windows Kits\10\Vsix\*\WDK.vsix" -Recurse -ErrorAction SilentlyContinue
-          if ($vsixFiles) {
-            $vsixInstaller = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\VSIXInstaller.exe"
-            if (Test-Path $vsixInstaller) {
-              foreach ($vsix in $vsixFiles) {
-                Write-Host "Installing VSIX: $($vsix.FullName)"
-                $p = Start-Process -FilePath $vsixInstaller -ArgumentList "/q", $vsix.FullName -Wait -NoNewWindow -PassThru
-                Write-Host "VSIX installer exit code: $($p.ExitCode)"
-              }
+            if ($proc.ExitCode -ne 0) {
+              Write-Error "WDK installer failed with exit code $($proc.ExitCode)"
+              exit 1
             }
           }
+
+          # Install WDK VSIX for MSBuild integration into the selected VS2022 instance.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            Write-Error "vswhere.exe not found"
+            exit 1
+          }
+
+          $vsInstall = & $vswhere -products * -requires Microsoft.Component.MSBuild -version "[17.0,18.0)" -property installationPath -latest
+          if (-not $vsInstall) {
+            Write-Error "Visual Studio 2022 with MSBuild was not found"
+            exit 1
+          }
+          Write-Host "Using Visual Studio: $vsInstall"
+
+          $vsixInstaller = Join-Path $vsInstall "Common7\IDE\VSIXInstaller.exe"
+          if (-not (Test-Path $vsixInstaller)) {
+            Write-Error "VSIXInstaller.exe not found at $vsixInstaller"
+            exit 1
+          }
+
+          $vsixFiles = Get-ChildItem "C:\Program Files*\Windows Kits\10\Vsix\*\WDK.vsix" -Recurse -ErrorAction SilentlyContinue
+          if (-not $vsixFiles) {
+            Write-Error "WDK.vsix not found"
+            exit 1
+          }
+
+          foreach ($vsix in $vsixFiles) {
+            Write-Host "Installing VSIX: $($vsix.FullName)"
+            $p = Start-Process -FilePath $vsixInstaller -ArgumentList "/q", $vsix.FullName -Wait -NoNewWindow -PassThru
+            Write-Host "VSIX installer exit code: $($p.ExitCode)"
+          }
+
+          $wdkTask = Get-ChildItem $wdkTaskPattern -ErrorAction SilentlyContinue |
+                     Sort-Object { $_.Directory.Parent.Name } -Descending |
+                     Select-Object -First 1
+          if (-not $wdkTask) {
+            Write-Error "WDK MSBuild task for VS $requiredVsVersion not found ($wdkTaskPattern)"
+            exit 1
+          }
+          Write-Host "Verified WDK MSBuild task: $($wdkTask.FullName)"
 
       - name: Build the driver
         run: |

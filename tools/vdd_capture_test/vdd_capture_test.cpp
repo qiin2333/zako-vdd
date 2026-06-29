@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <chrono>
@@ -48,6 +49,19 @@ struct SharedFrameMetadata
     float  MaxFALL;
     UINT64 FrameCounter;
     UINT64 LastPresentQpc;
+    UINT64 LastPublishQpc;
+    UINT32 LastPresentationFrameNumber;
+    UINT32 LastDirtyRectCount;
+    UINT64 ReplacedUnreadFrames;
+    UINT64 DroppedConsumerHeldFrames;
+    UINT64 DroppedAcquireFailures;
+    UINT32 MetadataSize;
+    UINT32 SlotCount;
+    UINT32 SlotIndex;
+    UINT32 Reserved0;
+    UINT32 AdapterLuidLowPart;
+    INT32  AdapterLuidHighPart;
+    UINT64 ProducerQpcFrequency;
 };
 
 struct Args
@@ -94,6 +108,25 @@ static const char* DxgiFormatName(DXGI_FORMAT f)
     }
 }
 
+static std::wstring TextureName(unsigned int monitor, UINT32 slot)
+{
+    std::wstring base = L"Global\\ZakoVDD_Frame_" + std::to_wstring(monitor);
+    if (slot == 0) return base;
+    return base + L"_Slot_" + std::to_wstring(slot);
+}
+
+static bool HasProducerLuid(const SharedFrameMetadata* meta)
+{
+    return meta && (meta->AdapterLuidLowPart != 0 || meta->AdapterLuidHighPart != 0);
+}
+
+static bool AdapterMatchesProducer(const DXGI_ADAPTER_DESC1& adapter, const SharedFrameMetadata* meta)
+{
+    if (!HasProducerLuid(meta)) return true;
+    return adapter.AdapterLuid.LowPart == meta->AdapterLuidLowPart &&
+           adapter.AdapterLuid.HighPart == meta->AdapterLuidHighPart;
+}
+
 // Dump as PPM (P6) for quick visual sanity check (only handles BGRA8/RGBA8).
 static bool DumpPpm(const std::string& path, const uint8_t* bgra,
                     UINT width, UINT height, UINT rowPitch, bool isBgr)
@@ -136,7 +169,6 @@ int main(int argc, char** argv)
 
     std::wstring metaName  = L"Global\\ZakoVDD_Meta_"       + std::to_wstring(args.monitor);
     std::wstring evName    = L"Global\\ZakoVDD_FrameReady_" + std::to_wstring(args.monitor);
-    std::wstring texName   = L"Global\\ZakoVDD_Frame_"      + std::to_wstring(args.monitor);
 
     printf("[vdd_capture_test] monitor=%u frames=%d out=%s timeout=%ums\n",
            args.monitor, args.frames, args.out.c_str(), args.timeoutMs);
@@ -163,23 +195,33 @@ int main(int argc, char** argv)
         fprintf(stderr, "Bad metadata magic: 0x%08X (expected 0x5A564446)\n", meta->Magic);
         return 1;
     }
-    printf("[meta] %ux%u fmt=%s(%u) hdr=%u maxNits=%.1f frameCounter=%llu\n",
+    UINT32 slotCount = meta->SlotCount ? std::min<UINT32>(meta->SlotCount, 8) : 1;
+    printf("[meta] %ux%u fmt=%s(%u) hdr=%u maxNits=%.1f frameCounter=%llu slots=%u latestSlot=%u\n",
            meta->Width, meta->Height, DxgiFormatName((DXGI_FORMAT)meta->DxgiFormat),
            meta->DxgiFormat, meta->IsHdr, meta->MaxNits,
-           static_cast<unsigned long long>(meta->FrameCounter));
+           static_cast<unsigned long long>(meta->FrameCounter),
+           slotCount, meta->SlotIndex);
+    printf("[meta] dirtyRects=%u replacedUnread=%llu droppedConsumerHeld=%llu droppedAcquireFailures=%llu "
+           "presentFrame=%u qpcFreq=%llu adapterLuid=%08x:%08x\n",
+           meta->LastDirtyRectCount,
+           static_cast<unsigned long long>(meta->ReplacedUnreadFrames),
+           static_cast<unsigned long long>(meta->DroppedConsumerHeldFrames),
+           static_cast<unsigned long long>(meta->DroppedAcquireFailures),
+           meta->LastPresentationFrameNumber,
+           static_cast<unsigned long long>(meta->ProducerQpcFrequency),
+           static_cast<unsigned int>(meta->AdapterLuidHighPart),
+           meta->AdapterLuidLowPart);
 
     // Open frame-ready event
-    HANDLE hEvent = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, evName.c_str());
+    HANDLE hEvent = OpenEventW(SYNCHRONIZE, FALSE, evName.c_str());
     if (!hEvent)
     {
         fprintf(stderr, "OpenEventW(%ls) failed: %lu\n", evName.c_str(), GetLastError());
         return 1;
     }
 
-    // Enumerate all DXGI hardware adapters and try opening the shared texture
-    // on each. The producer-side D3D device is on a specific RenderAdapter
-    // assigned by IddCx; we have no way to know its LUID without extending the
-    // metadata, so brute-force across adapters until one succeeds.
+    // This tool requires the shared-ring metadata layout. Prefer the producer
+    // RenderAdapter LUID when present, then fall back to enumerating adapters.
     ComPtr<IDXGIFactory1> factory;
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
     if (FAILED(hr))
@@ -191,59 +233,87 @@ int main(int argc, char** argv)
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> ctx;
     ComPtr<ID3D11Device1> device1;
-    ComPtr<ID3D11Texture2D> sharedTex;
+    std::vector<ComPtr<ID3D11Texture2D>> sharedTex;
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 #ifdef _DEBUG
     flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
     D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+    const bool hasProducerLuid = HasProducerLuid(meta);
+    bool openedByProducerLuid = false;
 
-    for (UINT i = 0;; ++i)
+    for (int pass = 0; pass < (hasProducerLuid ? 2 : 1) && sharedTex.empty(); ++pass)
     {
-        ComPtr<IDXGIAdapter1> adapter;
-        if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
-        DXGI_ADAPTER_DESC1 ad{};
-        adapter->GetDesc1(&ad);
-        if (ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-        wprintf(L"[adapter %u] %ls LUID=%lx:%lx\n", i, ad.Description, ad.AdapterLuid.HighPart, ad.AdapterLuid.LowPart);
-
-        device.Reset(); ctx.Reset(); device1.Reset(); sharedTex.Reset();
-        hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
-                               nullptr, 0, D3D11_SDK_VERSION,
-                               &device, &fl, &ctx);
-        if (FAILED(hr)) { fprintf(stderr, "  D3D11CreateDevice failed: 0x%08X\n", hr); continue; }
-        if (FAILED(device.As(&device1)) || !device1) continue;
-
-        hr = device1->OpenSharedResourceByName(texName.c_str(),
-                                               DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
-                                               IID_PPV_ARGS(&sharedTex));
-        if (SUCCEEDED(hr) && sharedTex)
+        for (UINT i = 0;; ++i)
         {
-            wprintf(L"  OpenSharedResourceByName OK on adapter %u\n", i);
-            break;
+            ComPtr<IDXGIAdapter1> adapter;
+            if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+            DXGI_ADAPTER_DESC1 ad{};
+            adapter->GetDesc1(&ad);
+            if (ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+
+            const bool matchesProducer = AdapterMatchesProducer(ad, meta);
+            if (hasProducerLuid && pass == 0 && !matchesProducer) continue;
+            if (hasProducerLuid && pass == 1 && matchesProducer) continue;
+
+            wprintf(L"[adapter %u] %ls LUID=%lx:%lx%s\n", i, ad.Description,
+                    ad.AdapterLuid.HighPart, ad.AdapterLuid.LowPart,
+                    (hasProducerLuid && matchesProducer) ? L" producer" : L"");
+
+            device.Reset(); ctx.Reset(); device1.Reset(); sharedTex.clear();
+            hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
+                                   nullptr, 0, D3D11_SDK_VERSION,
+                                   &device, &fl, &ctx);
+            if (FAILED(hr)) { fprintf(stderr, "  D3D11CreateDevice failed: 0x%08X\n", hr); continue; }
+            if (FAILED(device.As(&device1)) || !device1) continue;
+
+            std::vector<ComPtr<ID3D11Texture2D>> opened(slotCount);
+            bool allOpened = true;
+            for (UINT32 slot = 0; slot < slotCount; ++slot)
+            {
+                auto texName = TextureName(args.monitor, slot);
+                hr = device1->OpenSharedResourceByName(texName.c_str(),
+                                                       DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+                                                       IID_PPV_ARGS(&opened[slot]));
+                if (FAILED(hr) || !opened[slot])
+                {
+                    fprintf(stderr, "  OpenSharedResourceByName(%u) failed: 0x%08X\n", slot, hr);
+                    allOpened = false;
+                    break;
+                }
+            }
+            if (allOpened)
+            {
+                sharedTex = std::move(opened);
+                openedByProducerLuid = hasProducerLuid && matchesProducer;
+                wprintf(L"  OpenSharedResourceByName OK on adapter %u (%u slots)%s\n",
+                        i, slotCount, openedByProducerLuid ? L" via producer LUID" : L"");
+                break;
+            }
         }
-        fprintf(stderr, "  OpenSharedResourceByName failed: 0x%08X\n", hr);
-        sharedTex.Reset();
     }
 
-    if (!sharedTex)
+    if (sharedTex.empty())
     {
-        fprintf(stderr, "FATAL: no adapter could open %ls\n", texName.c_str());
+        fprintf(stderr, "FATAL: no adapter could open VDD shared textures\n");
         return 1;
     }
 
-    ComPtr<IDXGIKeyedMutex> mutex;
-    if (FAILED(sharedTex.As(&mutex)) || !mutex)
+    std::vector<ComPtr<IDXGIKeyedMutex>> mutexes(sharedTex.size());
+    for (UINT32 slot = 0; slot < sharedTex.size(); ++slot)
     {
-        fprintf(stderr, "QueryInterface IDXGIKeyedMutex failed\n");
-        return 1;
+        if (FAILED(sharedTex[slot].As(&mutexes[slot])) || !mutexes[slot])
+        {
+            fprintf(stderr, "QueryInterface IDXGIKeyedMutex failed for slot %u\n", slot);
+            return 1;
+        }
     }
 
     D3D11_TEXTURE2D_DESC desc{};
-    sharedTex->GetDesc(&desc);
-    printf("[shared] tex %ux%u fmt=%s(%u) bind=0x%X misc=0x%X\n",
+    sharedTex[0]->GetDesc(&desc);
+    printf("[shared] tex %ux%u fmt=%s(%u) bind=0x%X misc=0x%X slots=%zu\n",
            desc.Width, desc.Height, DxgiFormatName(desc.Format),
-           desc.Format, desc.BindFlags, desc.MiscFlags);
+           desc.Format, desc.BindFlags, desc.MiscFlags, sharedTex.size());
 
     // Create CPU-readable staging texture for download
     D3D11_TEXTURE2D_DESC stageDesc = desc;
@@ -280,23 +350,25 @@ int main(int argc, char** argv)
             break;
         }
 
-        // Acquire key 1 (producer released as 1)
-        hr = mutex->AcquireSync(1, args.timeoutMs);
+        UINT32 slot = meta->SlotIndex < mutexes.size() ? meta->SlotIndex : 0;
+
+        // AcquireSync returns WAIT_TIMEOUT directly; only S_OK means acquired.
+        hr = mutexes[slot]->AcquireSync(1, args.timeoutMs);
         if (hr == static_cast<HRESULT>(WAIT_TIMEOUT))
         {
-            fprintf(stderr, "[acquire] keyed mutex timeout; producer stuck?\n");
+            fprintf(stderr, "[acquire] keyed mutex timeout on slot %u; producer stuck?\n", slot);
             continue;
         }
         if (FAILED(hr))
         {
-            fprintf(stderr, "AcquireSync failed: 0x%08X\n", hr);
+            fprintf(stderr, "AcquireSync(slot %u) failed: 0x%08X\n", slot, hr);
             break;
         }
 
-        ctx->CopyResource(stage.Get(), sharedTex.Get());
+        ctx->CopyResource(stage.Get(), sharedTex[slot].Get());
 
         // Release back to producer ASAP
-        mutex->ReleaseSync(0);
+        mutexes[slot]->ReleaseSync(0);
 
         D3D11_MAPPED_SUBRESOURCE m{};
         hr = ctx->Map(stage.Get(), 0, D3D11_MAP_READ, 0, &m);
@@ -335,10 +407,11 @@ int main(int argc, char** argv)
 
         UINT64 dCnt = cnt - lastCounter;
         lastCounter = cnt;
-        printf("[frame %3d] dumped=%s path=%s frameCounter=%llu (+%llu)\n",
+        printf("[frame %3d] dumped=%s path=%s frameCounter=%llu (+%llu) slot=%u\n",
                captured, dumped ? "OK" : "FAIL", path,
                static_cast<unsigned long long>(cnt),
-               static_cast<unsigned long long>(dCnt));
+               static_cast<unsigned long long>(dCnt),
+               slot);
 
         ++captured;
     }

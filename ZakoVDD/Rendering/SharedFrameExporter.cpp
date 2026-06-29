@@ -12,6 +12,16 @@ namespace Microsoft
 namespace IndirectDisp
 {
 
+static std::wstring SharedTextureName(unsigned int monitorIndex, UINT slotIndex)
+{
+	std::wstring base = L"Global\\ZakoVDD_Frame_" + std::to_wstring(monitorIndex);
+	if (slotIndex == 0)
+	{
+		return base;
+	}
+	return base + L"_Slot_" + std::to_wstring(slotIndex);
+}
+
 struct SharedFrameMetadata
 {
 	UINT32 Magic;          // 'ZVDF' = 0x5A564446
@@ -33,6 +43,13 @@ struct SharedFrameMetadata
 	UINT64 ReplacedUnreadFrames;       // Producer overwrote a published frame before it was consumed
 	UINT64 DroppedConsumerHeldFrames;  // Consumer held the slot while producer wanted to publish
 	UINT64 DroppedAcquireFailures;     // Non-timeout keyed mutex acquire failures
+	UINT32 MetadataSize;               // sizeof(SharedFrameMetadata) for optional-tail readers
+	UINT32 SlotCount;                  // Number of shared mailbox slots exported by this producer
+	UINT32 SlotIndex;                  // Slot containing the latest published frame
+	UINT32 Reserved0;
+	UINT32 AdapterLuidLowPart;         // Render adapter LUID used by this swap chain
+	INT32  AdapterLuidHighPart;
+	UINT64 ProducerQpcFrequency;
 };
 
 SharedFrameExporter::SharedFrameExporter(unsigned int monitorIndex, std::shared_ptr<Direct3DDevice> device)
@@ -72,39 +89,88 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 	}
 
 	// Best-effort acquire with 0 timeout. First try the normal empty-slot
-	// key (0). If the previous frame is still published but unread (key 1),
-	// reclaim and overwrite it. That gives the export path WGC-like
-	// "latest frame wins" mailbox semantics without stalling the IddCx loop.
+	// key (0) across the ring. If all slots are already published but unread
+	// (key 1), reclaim one and overwrite it. That keeps WGC-like "latest frame
+	// wins" semantics without stalling the IddCx loop.
 	bool replacedUnreadFrame = false;
-	HRESULT hr = m_KeyedMutex->AcquireSync(0, 0);
-	if (hr == static_cast<HRESULT>(WAIT_TIMEOUT))
+	bool sawTimeout = false;
+	bool sawFailure = false;
+	UINT selectedSlot = SharedFrameSlotCount;
+	HRESULT hr = E_FAIL;
+
+	// IDXGIKeyedMutex::AcquireSync returns WAIT_TIMEOUT as a DWORD-style
+	// success code, so only S_OK means the mutex was actually acquired.
+	for (UINT offset = 0; offset < SharedFrameSlotCount; ++offset)
 	{
-		hr = m_KeyedMutex->AcquireSync(1, 0);
-		if (SUCCEEDED(hr))
+		UINT slot = (m_NextPublishSlot + offset) % SharedFrameSlotCount;
+		if (!m_KeyedMutex[slot])
 		{
-			replacedUnreadFrame = true;
+			continue;
+		}
+
+		hr = m_KeyedMutex[slot]->AcquireSync(0, 0);
+		if (hr == S_OK)
+		{
+			selectedSlot = slot;
+			break;
+		}
+		if (hr == static_cast<HRESULT>(WAIT_TIMEOUT))
+		{
+			sawTimeout = true;
+		}
+		else
+		{
+			sawFailure = true;
 		}
 	}
-	if (hr == static_cast<HRESULT>(WAIT_TIMEOUT))
+
+	if (selectedSlot == SharedFrameSlotCount)
+	{
+		for (UINT offset = 0; offset < SharedFrameSlotCount; ++offset)
+		{
+			UINT slot = (m_NextPublishSlot + offset) % SharedFrameSlotCount;
+			if (!m_KeyedMutex[slot])
+			{
+				continue;
+			}
+
+			hr = m_KeyedMutex[slot]->AcquireSync(1, 0);
+			if (hr == S_OK)
+			{
+				selectedSlot = slot;
+				replacedUnreadFrame = true;
+				break;
+			}
+			if (hr == static_cast<HRESULT>(WAIT_TIMEOUT))
+			{
+				sawTimeout = true;
+			}
+			else
+			{
+				sawFailure = true;
+			}
+		}
+	}
+
+	if (selectedSlot == SharedFrameSlotCount)
 	{
 		if (m_MetaView)
 		{
-			m_MetaView->DroppedConsumerHeldFrames++;
-		}
-		return;
-	}
-	if (FAILED(hr))
-	{
-		if (m_MetaView)
-		{
-			m_MetaView->DroppedAcquireFailures++;
+			if (sawTimeout)
+			{
+				m_MetaView->DroppedConsumerHeldFrames++;
+			}
+			else if (sawFailure)
+			{
+				m_MetaView->DroppedAcquireFailures++;
+			}
 		}
 		return;
 	}
 
 	Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
 	m_Device->Device->GetImmediateContext(&ctx);
-	ctx->CopyResource(m_SharedTex.Get(), srcTex.Get());
+	ctx->CopyResource(m_SharedTex[selectedSlot].Get(), srcTex.Get());
 	ctx->Flush();
 
 	// Update metadata before releasing key 1 so the consumer sees metadata
@@ -118,13 +184,24 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 		m_MetaView->LastPublishQpc = static_cast<UINT64>(qpc.QuadPart);
 		m_MetaView->LastPresentationFrameNumber = presentationFrameNumber;
 		m_MetaView->LastDirtyRectCount = dirtyRectCount;
+		m_MetaView->SlotCount = SharedFrameSlotCount;
+		m_MetaView->SlotIndex = selectedSlot;
 		if (replacedUnreadFrame)
 		{
 			m_MetaView->ReplacedUnreadFrames++;
 		}
 	}
 
-	m_KeyedMutex->ReleaseSync(1);
+	hr = m_KeyedMutex[selectedSlot]->ReleaseSync(1);
+	if (FAILED(hr))
+	{
+		std::stringstream ss;
+		ss << "[VddExport] ReleaseSync(1) failed for slot=" << selectedSlot << ": 0x" << std::hex << hr;
+		VDD_LOG_ERROR(ss.str().c_str());
+		TeardownTexture();
+		return;
+	}
+	m_NextPublishSlot = (selectedSlot + 1) % SharedFrameSlotCount;
 
 	if (m_FrameReadyEvent)
 	{
@@ -191,7 +268,17 @@ DXGI_FORMAT SharedFrameExporter::GuessMetadataFormat() const
 
 bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDesc)
 {
-	if (m_SharedTex &&
+	bool allSlotsReady = true;
+	for (const auto& tex : m_SharedTex)
+	{
+		if (!tex)
+		{
+			allSlotsReady = false;
+			break;
+		}
+	}
+
+	if (allSlotsReady &&
 	    m_CachedWidth == srcDesc.Width &&
 	    m_CachedHeight == srcDesc.Height &&
 	    m_CachedFormat == srcDesc.Format)
@@ -226,59 +313,60 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	desc.MipLevels = 1;
 	desc.ArraySize = 1;
 
-	HRESULT hr = m_Device->Device->CreateTexture2D(&desc, nullptr, &m_SharedTex);
-	if (FAILED(hr))
+	for (UINT slot = 0; slot < SharedFrameSlotCount; ++slot)
 	{
-		std::stringstream ss;
-		ss << "[VddExport] CreateTexture2D failed: 0x" << std::hex << hr;
-		VDD_LOG_ERROR(ss.str().c_str());
-		LocalFree(sd);
-		return false;
-	}
+		HRESULT hr = m_Device->Device->CreateTexture2D(&desc, nullptr, &m_SharedTex[slot]);
+		if (FAILED(hr))
+		{
+			std::stringstream ss;
+			ss << "[VddExport] CreateTexture2D failed for slot=" << slot << ": 0x" << std::hex << hr;
+			VDD_LOG_ERROR(ss.str().c_str());
+			LocalFree(sd);
+			TeardownTexture();
+			return false;
+		}
 
-	Microsoft::WRL::ComPtr<IDXGIResource1> dxgiRes;
-	hr = m_SharedTex.As(&dxgiRes);
-	if (FAILED(hr))
-	{
-		VDD_LOG_ERROR("[VddExport] QueryInterface IDXGIResource1 failed");
-		m_SharedTex.Reset();
-		LocalFree(sd);
-		return false;
-	}
+		Microsoft::WRL::ComPtr<IDXGIResource1> dxgiRes;
+		hr = m_SharedTex[slot].As(&dxgiRes);
+		if (FAILED(hr))
+		{
+			VDD_LOG_ERROR("[VddExport] QueryInterface IDXGIResource1 failed");
+			LocalFree(sd);
+			TeardownTexture();
+			return false;
+		}
 
-	std::wstring texName = L"Global\\ZakoVDD_Frame_" + std::to_wstring(m_MonitorIndex);
-	HANDLE ntHandle = nullptr;
-	hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, texName.c_str(), &ntHandle);
+		HANDLE ntHandle = nullptr;
+		auto texName = SharedTextureName(m_MonitorIndex, slot);
+		hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, texName.c_str(), &ntHandle);
+		if (FAILED(hr))
+		{
+			std::stringstream ss;
+			ss << "[VddExport] CreateSharedHandle failed for slot=" << slot << ": 0x" << std::hex << hr;
+			VDD_LOG_ERROR(ss.str().c_str());
+			LocalFree(sd);
+			TeardownTexture();
+			return false;
+		}
+		// The NT handle MUST stay open for the named lookup to remain valid;
+		// closing it before consumers open will make OpenSharedResourceByName
+		// return E_INVALIDARG even though the texture is still alive in our process.
+		m_NtHandle[slot] = ntHandle;
+
+		hr = m_SharedTex[slot].As(&m_KeyedMutex[slot]);
+		if (FAILED(hr) || !m_KeyedMutex[slot])
+		{
+			VDD_LOG_ERROR("[VddExport] QueryInterface IDXGIKeyedMutex failed");
+			LocalFree(sd);
+			TeardownTexture();
+			return false;
+		}
+	}
 	LocalFree(sd);
-	if (FAILED(hr))
-	{
-		std::stringstream ss;
-		ss << "[VddExport] CreateSharedHandle failed: 0x" << std::hex << hr;
-		VDD_LOG_ERROR(ss.str().c_str());
-		m_SharedTex.Reset();
-		return false;
-	}
-	// The NT handle MUST stay open for the named lookup to remain valid;
-	// closing it before consumers open will make OpenSharedResourceByName
-	// return E_INVALIDARG even though the texture is still alive in our process.
-	if (m_NtHandle)
-	{
-		CloseHandle(m_NtHandle);
-	}
-	m_NtHandle = ntHandle;
-
-	hr = m_SharedTex.As(&m_KeyedMutex);
-	if (FAILED(hr) || !m_KeyedMutex)
-	{
-		VDD_LOG_ERROR("[VddExport] QueryInterface IDXGIKeyedMutex failed");
-		m_SharedTex.Reset();
-		return false;
-	}
 
 	if (!EnsureEventAndMetadata(srcDesc))
 	{
-		m_KeyedMutex.Reset();
-		m_SharedTex.Reset();
+		TeardownTexture();
 		return false;
 	}
 
@@ -289,7 +377,8 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	std::stringstream ss;
 	ss << "[VddExport] Shared texture ready monitor=" << m_MonitorIndex
 	   << " " << srcDesc.Width << "x" << srcDesc.Height
-	   << " fmt=" << srcDesc.Format;
+	   << " fmt=" << srcDesc.Format
+	   << " slots=" << SharedFrameSlotCount;
 	VDD_LOG_INFO(ss.str().c_str());
 	return true;
 }
@@ -339,15 +428,29 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 		    MapViewOfFile(m_MetaMapping, FILE_MAP_WRITE, 0, 0, sizeof(SharedFrameMetadata)));
 		if (!m_MetaView)
 		{
+			std::stringstream ss;
+			ss << "[VddExport] MapViewOfFile failed: " << GetLastError();
+			VDD_LOG_ERROR(ss.str().c_str());
+			CloseHandle(m_MetaMapping);
+			m_MetaMapping = nullptr;
 			LocalFree(sd);
 			return false;
 		}
 		ZeroMemory(m_MetaView, sizeof(SharedFrameMetadata));
 		m_MetaView->Magic = 0x5A564446; // 'ZVDF'
 		m_MetaView->Version = 1;
+		m_MetaView->MetadataSize = sizeof(SharedFrameMetadata);
+		m_MetaView->SlotCount = SharedFrameSlotCount;
+		m_MetaView->SlotIndex = 0;
+		LARGE_INTEGER frequency{};
+		if (QueryPerformanceFrequency(&frequency))
+		{
+			m_MetaView->ProducerQpcFrequency = static_cast<UINT64>(frequency.QuadPart);
+		}
 	}
 	LocalFree(sd);
 
+	m_MetaView->MetadataSize = sizeof(SharedFrameMetadata);
 	m_MetaView->Width = srcDesc.Width;
 	m_MetaView->Height = srcDesc.Height;
 	m_MetaView->DxgiFormat = srcDesc.Format;
@@ -355,18 +458,35 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 	m_MetaView->MaxNits = m_PendingMaxNits;
 	m_MetaView->MinNits = m_PendingMinNits;
 	m_MetaView->MaxFALL = m_PendingMaxFALL;
+	m_MetaView->SlotCount = SharedFrameSlotCount;
+	m_MetaView->SlotIndex = 0;
+	if (m_Device)
+	{
+		m_MetaView->AdapterLuidLowPart = m_Device->AdapterLuid.LowPart;
+		m_MetaView->AdapterLuidHighPart = m_Device->AdapterLuid.HighPart;
+	}
 	return true;
 }
 
 void SharedFrameExporter::TeardownTexture()
 {
-	m_KeyedMutex.Reset();
-	m_SharedTex.Reset();
-	if (m_NtHandle)
+	for (auto& keyedMutex : m_KeyedMutex)
 	{
-		CloseHandle(m_NtHandle);
-		m_NtHandle = nullptr;
+		keyedMutex.Reset();
 	}
+	for (auto& tex : m_SharedTex)
+	{
+		tex.Reset();
+	}
+	for (auto& handle : m_NtHandle)
+	{
+		if (handle)
+		{
+			CloseHandle(handle);
+			handle = nullptr;
+		}
+	}
+	m_NextPublishSlot = 0;
 	m_CachedWidth = 0;
 	m_CachedHeight = 0;
 	m_CachedFormat = DXGI_FORMAT_UNKNOWN;

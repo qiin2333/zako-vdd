@@ -2,6 +2,7 @@
 
 #include "Direct3DDevice.h"
 
+#include <array>
 #include <memory>
 #include <mutex>
 
@@ -13,6 +14,8 @@ namespace IndirectDisp
 class SharedFrameExporter
 {
 public:
+	static constexpr UINT SharedFrameSlotCount = 3;
+
 	SharedFrameExporter(unsigned int monitorIndex, std::shared_ptr<Direct3DDevice> device);
 	~SharedFrameExporter();
 
@@ -32,13 +35,14 @@ private:
 
 	unsigned int m_MonitorIndex = 0;
 	std::shared_ptr<Direct3DDevice> m_Device;
-	Microsoft::WRL::ComPtr<ID3D11Texture2D> m_SharedTex;
-	Microsoft::WRL::ComPtr<IDXGIKeyedMutex> m_KeyedMutex;
+	std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, SharedFrameSlotCount> m_SharedTex;
+	std::array<Microsoft::WRL::ComPtr<IDXGIKeyedMutex>, SharedFrameSlotCount> m_KeyedMutex;
+	std::array<HANDLE, SharedFrameSlotCount> m_NtHandle = {};
 	std::mutex m_ExportMutex;
-	HANDLE m_NtHandle = nullptr;
 	HANDLE m_FrameReadyEvent = nullptr;
 	HANDLE m_MetaMapping = nullptr;
 	struct SharedFrameMetadata* m_MetaView = nullptr;
+	UINT m_NextPublishSlot = 0;
 
 	UINT m_CachedWidth = 0;
 	UINT m_CachedHeight = 0;

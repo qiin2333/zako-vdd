@@ -84,21 +84,21 @@ IndirectDeviceContext::~IndirectDeviceContext()
 void IndirectDeviceContext::InitAdapter()
 {
 	loadSettings();
-	wstring requestedGpuName;
 	if (gpuname.empty() || SameGpuName(gpuname, L"default"))
 	{
 		const wstring adaptername = confpath + L"\\adapter.txt";
-		requestedGpuName = ReadAdapterPreferenceFile(adaptername);
 		Options.Adapter.load(adaptername.c_str());
 		VDD_LOG_INFO("Attempting to Load GPU from adapter.txt");
 	}
 	else
 	{
-		requestedGpuName = gpuname;
 		Options.Adapter.xmlprovide(gpuname);
 		VDD_LOG_INFO("Loading GPU from vdd_settings.xml");
 	}
-	EnsureUsableRenderAdapter(Options.Adapter, requestedGpuName);
+	// Avoid probing D3D11 render-adapter usability during UMDF D0 startup.
+	// Some Intel display stacks can hang WUDFHost while the virtual display
+	// adapter is still initializing. Sunshine should validate explicit GPU
+	// selections before writing them to the driver configuration instead.
 	GetGpuInfo();
 
 	int edidResult = LoadKnownMonitorEdid();

@@ -29,6 +29,9 @@ namespace Microsoft
 			void CommitModes(const IDARG_IN_COMMITMODES *pInArgs);
 			void CommitModes2(const IDARG_IN_COMMITMODES2 *pInArgs);
 			void UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool isHdr, float maxNits, float minNits, float maxFALL);
+			NTSTATUS OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
+			                          HANDLE targetProcess,
+			                          VDD_FRAME_CHANNEL_OPEN_RESPONSE& response);
 
 			bool HasActiveSwapChain() const { std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex); return !m_ProcessingThreads.empty(); }
 			bool HasActiveMonitor() const { std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex); return !m_Monitors.empty(); }

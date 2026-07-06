@@ -115,6 +115,18 @@ void SwapChainProcessor::UpdateHdrMetadata(bool isHdr, float maxNits, float minN
 	m_Exporter->UpdateHdrMetadata(isHdr, maxNits, minNits, maxFALL);
 }
 
+NTSTATUS SwapChainProcessor::OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
+                                              HANDLE targetProcess,
+                                              VDD_FRAME_CHANNEL_OPEN_RESPONSE& response)
+{
+	if (!m_Exporter)
+	{
+		return STATUS_DEVICE_NOT_READY;
+	}
+
+	return m_Exporter->OpenFrameChannel(request, targetProcess, response);
+}
+
 DWORD CALLBACK SwapChainProcessor::RunThread(LPVOID Argument)
 {
 	VDD_LOG_DEBUG_STREAM("RunThread started. Argument: " << Argument);

@@ -202,6 +202,23 @@ void IndirectDeviceContext::UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool
 	}
 }
 
+NTSTATUS IndirectDeviceContext::OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
+                                                 HANDLE targetProcess,
+                                                 VDD_FRAME_CHANNEL_OPEN_RESPONSE& response)
+{
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
+	for (auto& pair : m_ProcessingThreads)
+	{
+		if (pair.second && pair.second->m_MonitorIndex == request.MonitorIndex)
+		{
+			return pair.second->OpenFrameChannel(request, targetProcess, response);
+		}
+	}
+
+	return STATUS_DEVICE_NOT_READY;
+}
+
 void IndirectDeviceContext::UnassignSwapChain(IDDCX_MONITOR Monitor)
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);

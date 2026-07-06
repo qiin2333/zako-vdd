@@ -25,6 +25,9 @@ namespace Microsoft
 
 			void PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO &mode);
 			void UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL);
+			NTSTATUS OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
+			                          HANDLE targetProcess,
+			                          VDD_FRAME_CHANNEL_OPEN_RESPONSE& response);
 
 		private:
 			static DWORD CALLBACK RunThread(LPVOID Argument);

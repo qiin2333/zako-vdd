@@ -1,6 +1,7 @@
 #include "ControlTransport.h"
 
 #include "CommandDispatcher.h"
+#include "..\Device\IndirectDeviceContextWrapper.h"
 #include "..\Logging\Logger.h"
 #include "..\Util\StringConversion.h"
 
@@ -21,6 +22,131 @@ std::atomic<bool> g_Running{true};
 HANDLE g_pipeHandle = INVALID_HANDLE_VALUE;
 
 extern std::mutex g_Mutex;
+
+struct TargetProcessOpenContext
+{
+	DWORD pid = 0;
+	HANDLE handle = nullptr;
+	DWORD error = 0;
+};
+
+static void OpenTargetProcessAsRequestor(WDFREQUEST Request, PVOID Context)
+{
+	UNREFERENCED_PARAMETER(Request);
+
+	auto* openContext = static_cast<TargetProcessOpenContext*>(Context);
+	if (!openContext || openContext->pid == 0)
+	{
+		return;
+	}
+
+	openContext->handle = OpenProcess(PROCESS_DUP_HANDLE, FALSE, openContext->pid);
+	if (!openContext->handle)
+	{
+		openContext->error = GetLastError();
+	}
+}
+
+static NTSTATUS HandleQueryFrameChannelCaps(WDFREQUEST Request)
+{
+	PVOID pOutBuffer = nullptr;
+	size_t outBufferLen = 0;
+	NTSTATUS status = WdfRequestRetrieveOutputBuffer(
+	    Request, sizeof(VDD_FRAME_CHANNEL_CAPS), &pOutBuffer, &outBufferLen);
+	if (!NT_SUCCESS(status))
+	{
+		return status;
+	}
+	if (outBufferLen < sizeof(VDD_FRAME_CHANNEL_CAPS))
+	{
+		return STATUS_BUFFER_TOO_SMALL;
+	}
+
+	auto caps = Microsoft::IndirectDisp::SharedFrameExporter::FrameChannelCaps();
+	RtlCopyMemory(pOutBuffer, &caps, sizeof(caps));
+	WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(caps));
+	return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleOpenFrameChannel(WDFDEVICE Device,
+                                       WDFREQUEST Request,
+                                       size_t InputBufferLength)
+{
+	if (InputBufferLength < sizeof(VDD_FRAME_CHANNEL_OPEN_REQUEST))
+	{
+		return STATUS_INVALID_BUFFER_SIZE;
+	}
+
+	PVOID pInBuffer = nullptr;
+	size_t inBufferLen = 0;
+	NTSTATUS status = WdfRequestRetrieveInputBuffer(
+	    Request, sizeof(VDD_FRAME_CHANNEL_OPEN_REQUEST), &pInBuffer, &inBufferLen);
+	if (!NT_SUCCESS(status))
+	{
+		return status;
+	}
+
+	PVOID pOutBuffer = nullptr;
+	size_t outBufferLen = 0;
+	status = WdfRequestRetrieveOutputBuffer(
+	    Request, sizeof(VDD_FRAME_CHANNEL_OPEN_RESPONSE), &pOutBuffer, &outBufferLen);
+	if (!NT_SUCCESS(status))
+	{
+		return status;
+	}
+	if (outBufferLen < sizeof(VDD_FRAME_CHANNEL_OPEN_RESPONSE))
+	{
+		return STATUS_BUFFER_TOO_SMALL;
+	}
+
+	auto request = *static_cast<VDD_FRAME_CHANNEL_OPEN_REQUEST*>(pInBuffer);
+	if (request.Size < sizeof(VDD_FRAME_CHANNEL_OPEN_REQUEST) ||
+	    request.Version != VDD_FRAME_CHANNEL_OPEN_VERSION)
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	if (request.TargetProcessId == 0)
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+	if (!pContext || !pContext->pContext)
+	{
+		return STATUS_DEVICE_NOT_READY;
+	}
+
+	TargetProcessOpenContext openContext = {};
+	openContext.pid = request.TargetProcessId;
+	// Open the target process while impersonating the IOCTL caller. A caller can
+	// only receive duplicated frame-channel handles for a process it can open.
+	status = WdfRequestImpersonate(Request, SecurityImpersonation, OpenTargetProcessAsRequestor, &openContext);
+	if (!NT_SUCCESS(status))
+	{
+		VDD_LOG_WARNING_STREAM("[IOCTL] WdfRequestImpersonate failed for frame channel open: 0x"
+		                       << std::hex << status);
+		return status;
+	}
+	if (!openContext.handle)
+	{
+		VDD_LOG_WARNING_STREAM("[IOCTL] OpenProcess(PROCESS_DUP_HANDLE) failed for frame channel pid="
+		                       << request.TargetProcessId << " gle=" << openContext.error);
+		return STATUS_ACCESS_DENIED;
+	}
+
+	VDD_FRAME_CHANNEL_OPEN_RESPONSE response = {};
+	status = pContext->pContext->OpenFrameChannel(request, openContext.handle, response);
+	CloseHandle(openContext.handle);
+	if (!NT_SUCCESS(status))
+	{
+		return status;
+	}
+
+	RtlCopyMemory(pOutBuffer, &response, sizeof(response));
+	WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(response));
+	return STATUS_SUCCESS;
+}
 
 void SendLegacyPipeMessage(const char *message)
 {
@@ -71,7 +197,6 @@ VOID VirtualDisplayDriverIoDeviceControl(
 	size_t InputBufferLength,
 	ULONG IoControlCode)
 {
-	UNREFERENCED_PARAMETER(Device);
 	UNREFERENCED_PARAMETER(OutputBufferLength);
 
 	switch (IoControlCode)
@@ -82,6 +207,26 @@ VOID VirtualDisplayDriverIoDeviceControl(
 		// whether to short-circuit to disable_enable instead of waiting on
 		// a slow command IOCTL.
 		WdfRequestComplete(Request, STATUS_SUCCESS);
+		return;
+	}
+
+	case IOCTL_VDD_QUERY_FRAME_CHANNEL_CAPS:
+	{
+		NTSTATUS status = HandleQueryFrameChannelCaps(Request);
+		if (!NT_SUCCESS(status))
+		{
+			WdfRequestComplete(Request, status);
+		}
+		return;
+	}
+
+	case IOCTL_VDD_OPEN_FRAME_CHANNEL:
+	{
+		NTSTATUS status = HandleOpenFrameChannel(Device, Request, InputBufferLength);
+		if (!NT_SUCCESS(status))
+		{
+			WdfRequestComplete(Request, status);
+		}
 		return;
 	}
 

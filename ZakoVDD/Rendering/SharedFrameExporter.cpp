@@ -3,6 +3,7 @@
 #include "..\Core\DriverState.h"
 #include "..\Logging\Logger.h"
 
+#include <cstddef>
 #include <sddl.h>
 #include <sstream>
 
@@ -130,6 +131,27 @@ struct SharedFrameMetadata
 	INT32  AdapterLuidHighPart;
 	UINT64 ProducerQpcFrequency;
 };
+
+static_assert(sizeof(SharedFrameMetadata) == 128,
+              "SharedFrameMetadata must remain ABI-compatible with Sunshine");
+static_assert(offsetof(SharedFrameMetadata, MetadataSize) == 96,
+              "MetadataSize offset is part of the shared metadata ABI");
+static_assert(offsetof(SharedFrameMetadata, MetadataSequence) == 108,
+              "MetadataSequence offset is part of the shared metadata ABI");
+static_assert(offsetof(SharedFrameMetadata, ProducerQpcFrequency) == 120,
+              "ProducerQpcFrequency offset is part of the shared metadata ABI");
+
+static void ClearMetadataPayload(SharedFrameMetadata* metadata)
+{
+	if (!metadata)
+	{
+		return;
+	}
+
+	ZeroMemory(metadata, offsetof(SharedFrameMetadata, MetadataSequence));
+	ZeroMemory(reinterpret_cast<BYTE*>(&metadata->AdapterLuidLowPart),
+	           sizeof(SharedFrameMetadata) - offsetof(SharedFrameMetadata, AdapterLuidLowPart));
+}
 
 VDD_FRAME_CHANNEL_CAPS SharedFrameExporter::FrameChannelCaps()
 {
@@ -693,6 +715,7 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 			return false;
 		}
 		MetadataWriteScope metadataWrite(*this);
+		ClearMetadataPayload(m_MetaView);
 		m_MetaView->Magic = 0x5A564446; // 'ZVDF'
 		m_MetaView->Version = 1;
 		m_MetaView->MetadataSize = sizeof(SharedFrameMetadata);

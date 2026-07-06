@@ -113,6 +113,7 @@ void LoadDriverSettings()
 	// VRR / FreeSync: behavioural change, default OFF until EDID FreeSync
 	// Range Block also lands (see ROADMAP P1).
 	vrrEnabled = EnabledQuery(L"VrrEnabled");
+	legacyNamedFrameChannel = EnabledQuery(L"LegacyNamedFrameChannel");
 
 	// Cursor
 	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
@@ -137,6 +138,7 @@ void LoadDriverSettings()
 
 	VDD_LOG_INFO(("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
 	VDD_LOG_INFO((string("Hardware cursor runtime setting: ") + (hardwareCursor ? "enabled" : "disabled")).c_str());
+	VDD_LOG_INFO((string("Legacy named frame-channel export: ") + (legacyNamedFrameChannel ? "enabled" : "disabled")).c_str());
 }
 
 void loadSettings()

@@ -1,5 +1,6 @@
 #include "SharedFrameExporter.h"
 
+#include "..\Core\DriverState.h"
 #include "..\Logging\Logger.h"
 
 #include <sddl.h>
@@ -511,8 +512,10 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	TeardownTexture();
 	BumpChannelGeneration();
 
-	// Keep the Global namespace for cross-session Sunshine compatibility, but
-	// avoid granting WRITE_DAC/WRITE_OWNER/DELETE to consumers.
+	const bool exportLegacyNamedChannel = legacyNamedFrameChannel.load();
+
+	// Keep a restrictive DACL on every shared object. Legacy named objects are
+	// created only when explicitly enabled for old Sunshine builds.
 	SECURITY_ATTRIBUTES sa = {};
 	PSECURITY_DESCRIPTOR sd = nullptr;
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -558,22 +561,25 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 			return false;
 		}
 
-		HANDLE namedNtHandle = nullptr;
-		auto texName = SharedTextureName(m_MonitorIndex, slot);
-		hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, texName.c_str(), &namedNtHandle);
-		if (FAILED(hr))
+		if (exportLegacyNamedChannel)
 		{
-			std::stringstream ss;
-			ss << "[VddExport] CreateSharedHandle(named) failed for slot=" << slot << ": 0x" << std::hex << hr;
-			VDD_LOG_ERROR(ss.str().c_str());
-			LocalFree(sd);
-			TeardownTexture();
-			return false;
+			HANDLE namedNtHandle = nullptr;
+			auto texName = SharedTextureName(m_MonitorIndex, slot);
+			hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, texName.c_str(), &namedNtHandle);
+			if (FAILED(hr))
+			{
+				std::stringstream ss;
+				ss << "[VddExport] CreateSharedHandle(named) failed for slot=" << slot << ": 0x" << std::hex << hr;
+				VDD_LOG_ERROR(ss.str().c_str());
+				LocalFree(sd);
+				TeardownTexture();
+				return false;
+			}
+			// The NT handle MUST stay open for the named lookup to remain valid;
+			// closing it before consumers open will make OpenSharedResourceByName
+			// return E_INVALIDARG even though the texture is still alive in our process.
+			m_NamedNtHandle[slot] = namedNtHandle;
 		}
-		// The NT handle MUST stay open for the named lookup to remain valid;
-		// closing it before consumers open will make OpenSharedResourceByName
-		// return E_INVALIDARG even though the texture is still alive in our process.
-		m_NamedNtHandle[slot] = namedNtHandle;
 
 		HANDLE sealedNtHandle = nullptr;
 		hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ, nullptr, &sealedNtHandle);
@@ -613,7 +619,8 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	ss << "[VddExport] Shared texture ready monitor=" << m_MonitorIndex
 	   << " " << srcDesc.Width << "x" << srcDesc.Height
 	   << " fmt=" << srcDesc.Format
-	   << " slots=" << SharedFrameSlotCount;
+	   << " slots=" << SharedFrameSlotCount
+	   << " legacy_named_export=" << (exportLegacyNamedChannel ? "enabled" : "disabled");
 	VDD_LOG_INFO(ss.str().c_str());
 	return true;
 }
@@ -633,8 +640,15 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 
 	if (!m_FrameReadyEvent)
 	{
-		std::wstring evName = L"Global\\ZakoVDD_FrameReady_" + std::to_wstring(m_MonitorIndex);
-		m_FrameReadyEvent = CreateEventW(&sa, FALSE, FALSE, evName.c_str());
+		const bool exportLegacyNamedChannel = legacyNamedFrameChannel.load();
+		std::wstring evName;
+		LPCWSTR evNamePtr = nullptr;
+		if (exportLegacyNamedChannel)
+		{
+			evName = L"Global\\ZakoVDD_FrameReady_" + std::to_wstring(m_MonitorIndex);
+			evNamePtr = evName.c_str();
+		}
+		m_FrameReadyEvent = CreateEventW(&sa, FALSE, FALSE, evNamePtr);
 		if (!m_FrameReadyEvent)
 		{
 			std::stringstream ss;
@@ -647,10 +661,17 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 
 	if (!m_MetaMapping)
 	{
-		std::wstring mapName = L"Global\\ZakoVDD_Meta_" + std::to_wstring(m_MonitorIndex);
+		const bool exportLegacyNamedChannel = legacyNamedFrameChannel.load();
+		std::wstring mapName;
+		LPCWSTR mapNamePtr = nullptr;
+		if (exportLegacyNamedChannel)
+		{
+			mapName = L"Global\\ZakoVDD_Meta_" + std::to_wstring(m_MonitorIndex);
+			mapNamePtr = mapName.c_str();
+		}
 		m_MetaMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa,
 		                                   PAGE_READWRITE, 0, sizeof(SharedFrameMetadata),
-		                                   mapName.c_str());
+		                                   mapNamePtr);
 		if (!m_MetaMapping)
 		{
 			std::stringstream ss;

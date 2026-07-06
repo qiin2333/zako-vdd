@@ -160,6 +160,7 @@ void SharedFrameExporter::BeginMetadataWrite()
 			++m_MetadataSequenceCounter;
 		}
 		m_MetaView->MetadataSequence = ComposeMetadataSequence(true);
+		MemoryBarrier();
 	}
 }
 
@@ -167,11 +168,13 @@ void SharedFrameExporter::EndMetadataWrite()
 {
 	if (m_MetaView)
 	{
+		MemoryBarrier();
 		if ((m_MetadataSequenceCounter & 1u) != 0)
 		{
 			++m_MetadataSequenceCounter;
 		}
 		m_MetaView->MetadataSequence = ComposeMetadataSequence(false);
+		MemoryBarrier();
 	}
 }
 
@@ -668,7 +671,6 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 			LocalFree(sd);
 			return false;
 		}
-		ZeroMemory(m_MetaView, sizeof(SharedFrameMetadata));
 		MetadataWriteScope metadataWrite(*this);
 		m_MetaView->Magic = 0x5A564446; // 'ZVDF'
 		m_MetaView->Version = 1;

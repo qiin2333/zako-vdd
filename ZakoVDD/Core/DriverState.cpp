@@ -32,6 +32,7 @@ std::atomic<bool> vrrEnabled{false};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
 std::atomic<bool> edidCeaOverride{false};
+std::atomic<bool> legacyNamedFrameChannel{false};
 // Mouse settings
 std::atomic<bool> alphaCursorSupport{true};
 int CursorMaxX = 128;

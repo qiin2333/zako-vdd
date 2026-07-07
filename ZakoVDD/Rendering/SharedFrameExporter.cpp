@@ -1,7 +1,9 @@
 #include "SharedFrameExporter.h"
 
+#include "..\Core\DriverState.h"
 #include "..\Logging\Logger.h"
 
+#include <cstddef>
 #include <sddl.h>
 #include <sstream>
 
@@ -12,6 +14,11 @@ namespace Microsoft
 namespace IndirectDisp
 {
 
+static constexpr UINT32 FrameChannelFlags =
+	VDD_FRAME_CHANNEL_FLAG_SEALED_BORROW |
+	VDD_FRAME_CHANNEL_FLAG_UNNAMED_HANDLES |
+	VDD_FRAME_CHANNEL_FLAG_STRICT_DACL;
+
 static std::wstring SharedTextureName(unsigned int monitorIndex, UINT slotIndex)
 {
 	std::wstring base = L"Global\\ZakoVDD_Frame_" + std::to_wstring(monitorIndex);
@@ -20,6 +27,79 @@ static std::wstring SharedTextureName(unsigned int monitorIndex, UINT slotIndex)
 		return base;
 	}
 	return base + L"_Slot_" + std::to_wstring(slotIndex);
+}
+
+static bool IsZeroLuid(UINT32 lowPart, INT32 highPart)
+{
+	return lowPart == 0 && highPart == 0;
+}
+
+static bool LuidMatches(const LUID& lhs, UINT32 rhsLowPart, INT32 rhsHighPart)
+{
+	return lhs.LowPart == rhsLowPart && lhs.HighPart == rhsHighPart;
+}
+
+static void CloseDuplicatedTargetHandle(HANDLE targetProcess, HANDLE targetHandle)
+{
+	if (!targetProcess || !targetHandle)
+	{
+		return;
+	}
+
+	HANDLE localDuplicate = nullptr;
+	if (DuplicateHandle(targetProcess,
+	                    targetHandle,
+	                    GetCurrentProcess(),
+	                    &localDuplicate,
+	                    0,
+	                    FALSE,
+	                    DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE) &&
+	    localDuplicate)
+	{
+		CloseHandle(localDuplicate);
+	}
+}
+
+static bool DuplicateHandleToTarget(HANDLE targetProcess,
+                                    HANDLE sourceHandle,
+                                    DWORD desiredAccess,
+                                    UINT64& targetHandleValue)
+{
+	targetHandleValue = 0;
+	if (!targetProcess || !sourceHandle)
+	{
+		return false;
+	}
+
+	HANDLE duplicatedHandle = nullptr;
+	if (!DuplicateHandle(GetCurrentProcess(),
+	                     sourceHandle,
+	                     targetProcess,
+	                     &duplicatedHandle,
+	                     desiredAccess,
+	                     FALSE,
+	                     0))
+	{
+		return false;
+	}
+
+	targetHandleValue = static_cast<UINT64>(reinterpret_cast<UINT_PTR>(duplicatedHandle));
+	return true;
+}
+
+static void CloseFrameChannelResponseHandles(HANDLE targetProcess, VDD_FRAME_CHANNEL_OPEN_RESPONSE& response)
+{
+	CloseDuplicatedTargetHandle(targetProcess, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(response.MetadataHandle)));
+	response.MetadataHandle = 0;
+
+	CloseDuplicatedTargetHandle(targetProcess, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(response.FrameReadyEventHandle)));
+	response.FrameReadyEventHandle = 0;
+
+	for (auto& slot : response.Slots)
+	{
+		CloseDuplicatedTargetHandle(targetProcess, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(slot.TextureHandle)));
+		slot.TextureHandle = 0;
+	}
 }
 
 struct SharedFrameMetadata
@@ -46,11 +126,43 @@ struct SharedFrameMetadata
 	UINT32 MetadataSize;               // sizeof(SharedFrameMetadata) for optional-tail readers
 	UINT32 SlotCount;                  // Number of shared mailbox slots exported by this producer
 	UINT32 SlotIndex;                  // Slot containing the latest published frame
-	UINT32 Reserved0;
+	UINT32 MetadataSequence;           // High 16 bits = channel generation; low 16 bits even/odd seqlock
 	UINT32 AdapterLuidLowPart;         // Render adapter LUID used by this swap chain
 	INT32  AdapterLuidHighPart;
 	UINT64 ProducerQpcFrequency;
 };
+
+static_assert(sizeof(SharedFrameMetadata) == 128,
+              "SharedFrameMetadata must remain ABI-compatible with Sunshine");
+static_assert(offsetof(SharedFrameMetadata, MetadataSize) == 96,
+              "MetadataSize offset is part of the shared metadata ABI");
+static_assert(offsetof(SharedFrameMetadata, MetadataSequence) == 108,
+              "MetadataSequence offset is part of the shared metadata ABI");
+static_assert(offsetof(SharedFrameMetadata, ProducerQpcFrequency) == 120,
+              "ProducerQpcFrequency offset is part of the shared metadata ABI");
+
+static void ClearMetadataPayload(SharedFrameMetadata* metadata)
+{
+	if (!metadata)
+	{
+		return;
+	}
+
+	ZeroMemory(metadata, offsetof(SharedFrameMetadata, MetadataSequence));
+	ZeroMemory(reinterpret_cast<BYTE*>(&metadata->AdapterLuidLowPart),
+	           sizeof(SharedFrameMetadata) - offsetof(SharedFrameMetadata, AdapterLuidLowPart));
+}
+
+VDD_FRAME_CHANNEL_CAPS SharedFrameExporter::FrameChannelCaps()
+{
+	VDD_FRAME_CHANNEL_CAPS caps = {};
+	caps.Size = sizeof(caps);
+	caps.Version = VDD_FRAME_CHANNEL_CAPS_VERSION;
+	caps.Flags = FrameChannelFlags;
+	caps.MaxSharedSlots = SharedFrameSlotCount;
+	caps.MetadataSize = sizeof(SharedFrameMetadata);
+	return caps;
+}
 
 SharedFrameExporter::SharedFrameExporter(unsigned int monitorIndex, std::shared_ptr<Direct3DDevice> device)
 	: m_MonitorIndex(monitorIndex), m_Device(device)
@@ -60,6 +172,68 @@ SharedFrameExporter::SharedFrameExporter(unsigned int monitorIndex, std::shared_
 SharedFrameExporter::~SharedFrameExporter()
 {
 	Teardown();
+}
+
+void SharedFrameExporter::BeginMetadataWrite()
+{
+	if (m_MetaView)
+	{
+		if ((m_MetadataSequenceCounter & 1u) == 0)
+		{
+			++m_MetadataSequenceCounter;
+		}
+		m_MetaView->MetadataSequence = ComposeMetadataSequence(true);
+		MemoryBarrier();
+	}
+}
+
+void SharedFrameExporter::EndMetadataWrite()
+{
+	if (m_MetaView)
+	{
+		MemoryBarrier();
+		if ((m_MetadataSequenceCounter & 1u) != 0)
+		{
+			++m_MetadataSequenceCounter;
+		}
+		m_MetaView->MetadataSequence = ComposeMetadataSequence(false);
+		MemoryBarrier();
+	}
+}
+
+void SharedFrameExporter::BumpChannelGeneration()
+{
+	++m_ChannelGeneration;
+	if (m_ChannelGeneration == 0)
+	{
+		m_ChannelGeneration = 1;
+	}
+	m_MetadataSequenceCounter = 0;
+}
+
+UINT32 SharedFrameExporter::ComposeMetadataSequence(bool writing) const
+{
+	UINT16 sequence = m_MetadataSequenceCounter;
+	if (writing)
+	{
+		sequence = static_cast<UINT16>(sequence | 1u);
+	}
+	else
+	{
+		sequence = static_cast<UINT16>(sequence & ~1u);
+	}
+	return (static_cast<UINT32>(m_ChannelGeneration) << 16) | sequence;
+}
+
+SharedFrameExporter::MetadataWriteScope::MetadataWriteScope(SharedFrameExporter& exporter)
+	: m_Exporter(exporter)
+{
+	m_Exporter.BeginMetadataWrite();
+}
+
+SharedFrameExporter::MetadataWriteScope::~MetadataWriteScope()
+{
+	m_Exporter.EndMetadataWrite();
 }
 
 void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
@@ -156,6 +330,7 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 	{
 		if (m_MetaView)
 		{
+			MetadataWriteScope metadataWrite(*this);
 			if (sawTimeout)
 			{
 				m_MetaView->DroppedConsumerHeldFrames++;
@@ -179,6 +354,7 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 	{
 		LARGE_INTEGER qpc{};
 		QueryPerformanceCounter(&qpc);
+		MetadataWriteScope metadataWrite(*this);
 		m_MetaView->FrameCounter++;
 		m_MetaView->LastPresentQpc = presentDisplayQpc ? presentDisplayQpc : static_cast<UINT64>(qpc.QuadPart);
 		m_MetaView->LastPublishQpc = static_cast<UINT64>(qpc.QuadPart);
@@ -219,6 +395,7 @@ void SharedFrameExporter::UpdateHdrMetadata(bool isHdr, float maxNits, float min
 	m_PendingMaxFALL = maxFALL;
 	if (m_MetaView)
 	{
+		MetadataWriteScope metadataWrite(*this);
 		m_MetaView->IsHdr = isHdr ? 1u : 0u;
 		m_MetaView->MaxNits = maxNits;
 		m_MetaView->MinNits = minNits;
@@ -261,6 +438,73 @@ void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
 	VDD_LOG_INFO(ss.str().c_str());
 }
 
+NTSTATUS SharedFrameExporter::OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
+                                               HANDLE targetProcess,
+                                               VDD_FRAME_CHANNEL_OPEN_RESPONSE& response)
+{
+	ZeroMemory(&response, sizeof(response));
+	response.Size = sizeof(response);
+	response.Version = VDD_FRAME_CHANNEL_OPEN_VERSION;
+	response.Flags = FrameChannelFlags;
+	response.SlotCount = SharedFrameSlotCount;
+	response.MetadataSize = sizeof(SharedFrameMetadata);
+
+	if (request.Size < sizeof(VDD_FRAME_CHANNEL_OPEN_REQUEST) ||
+	    request.Version != VDD_FRAME_CHANNEL_OPEN_VERSION ||
+	    request.TargetProcessId == 0 ||
+	    !targetProcess ||
+	    (request.DesiredSlots != 0 && request.DesiredSlots != SharedFrameSlotCount) ||
+	    (request.RequiredFlags & ~FrameChannelFlags) != 0)
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	if (m_Device && !IsZeroLuid(request.AdapterLuidLowPart, request.AdapterLuidHighPart) &&
+	    !LuidMatches(m_Device->AdapterLuid, request.AdapterLuidLowPart, request.AdapterLuidHighPart))
+	{
+		return STATUS_NOT_SUPPORTED;
+	}
+
+	std::lock_guard<std::mutex> lock(m_ExportMutex);
+	if (!m_MetaMapping || !m_MetaView || !m_FrameReadyEvent)
+	{
+		return STATUS_DEVICE_NOT_READY;
+	}
+
+	for (const auto handle : m_SealedNtHandle)
+	{
+		if (!handle)
+		{
+			return STATUS_DEVICE_NOT_READY;
+		}
+	}
+
+	NTSTATUS status = STATUS_SUCCESS;
+	if (!DuplicateHandleToTarget(targetProcess, m_MetaMapping, FILE_MAP_READ, response.MetadataHandle) ||
+	    !DuplicateHandleToTarget(targetProcess, m_FrameReadyEvent, SYNCHRONIZE, response.FrameReadyEventHandle))
+	{
+		status = STATUS_ACCESS_DENIED;
+	}
+
+	for (UINT slot = 0; NT_SUCCESS(status) && slot < SharedFrameSlotCount; ++slot)
+	{
+		if (!DuplicateHandleToTarget(targetProcess,
+		                             m_SealedNtHandle[slot],
+		                             DXGI_SHARED_RESOURCE_READ,
+		                             response.Slots[slot].TextureHandle))
+		{
+			status = STATUS_ACCESS_DENIED;
+			break;
+		}
+	}
+
+	if (!NT_SUCCESS(status))
+	{
+		CloseFrameChannelResponseHandles(targetProcess, response);
+	}
+	return status;
+}
+
 DXGI_FORMAT SharedFrameExporter::GuessMetadataFormat() const
 {
 	return m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -288,9 +532,12 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 
 	// Recreate everything since dimensions / format changed.
 	TeardownTexture();
+	BumpChannelGeneration();
 
-	// Keep the Global namespace for cross-session Sunshine compatibility, but
-	// avoid granting WRITE_DAC/WRITE_OWNER/DELETE to consumers.
+	const bool exportLegacyNamedChannel = legacyNamedFrameChannel.load();
+
+	// Keep a restrictive DACL on every shared object. Legacy named objects are
+	// created only when explicitly enabled for old Sunshine builds.
 	SECURITY_ATTRIBUTES sa = {};
 	PSECURITY_DESCRIPTOR sd = nullptr;
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -336,22 +583,38 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 			return false;
 		}
 
-		HANDLE ntHandle = nullptr;
-		auto texName = SharedTextureName(m_MonitorIndex, slot);
-		hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, texName.c_str(), &ntHandle);
+		if (exportLegacyNamedChannel)
+		{
+			HANDLE namedNtHandle = nullptr;
+			auto texName = SharedTextureName(m_MonitorIndex, slot);
+			hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, texName.c_str(), &namedNtHandle);
+			if (FAILED(hr))
+			{
+				std::stringstream ss;
+				ss << "[VddExport] CreateSharedHandle(named) failed for slot=" << slot << ": 0x" << std::hex << hr;
+				VDD_LOG_ERROR(ss.str().c_str());
+				LocalFree(sd);
+				TeardownTexture();
+				return false;
+			}
+			// The NT handle MUST stay open for the named lookup to remain valid;
+			// closing it before consumers open will make OpenSharedResourceByName
+			// return E_INVALIDARG even though the texture is still alive in our process.
+			m_NamedNtHandle[slot] = namedNtHandle;
+		}
+
+		HANDLE sealedNtHandle = nullptr;
+		hr = dxgiRes->CreateSharedHandle(&sa, DXGI_SHARED_RESOURCE_READ, nullptr, &sealedNtHandle);
 		if (FAILED(hr))
 		{
 			std::stringstream ss;
-			ss << "[VddExport] CreateSharedHandle failed for slot=" << slot << ": 0x" << std::hex << hr;
+			ss << "[VddExport] CreateSharedHandle(sealed) failed for slot=" << slot << ": 0x" << std::hex << hr;
 			VDD_LOG_ERROR(ss.str().c_str());
 			LocalFree(sd);
 			TeardownTexture();
 			return false;
 		}
-		// The NT handle MUST stay open for the named lookup to remain valid;
-		// closing it before consumers open will make OpenSharedResourceByName
-		// return E_INVALIDARG even though the texture is still alive in our process.
-		m_NtHandle[slot] = ntHandle;
+		m_SealedNtHandle[slot] = sealedNtHandle;
 
 		hr = m_SharedTex[slot].As(&m_KeyedMutex[slot]);
 		if (FAILED(hr) || !m_KeyedMutex[slot])
@@ -378,7 +641,8 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	ss << "[VddExport] Shared texture ready monitor=" << m_MonitorIndex
 	   << " " << srcDesc.Width << "x" << srcDesc.Height
 	   << " fmt=" << srcDesc.Format
-	   << " slots=" << SharedFrameSlotCount;
+	   << " slots=" << SharedFrameSlotCount
+	   << " legacy_named_export=" << (exportLegacyNamedChannel ? "enabled" : "disabled");
 	VDD_LOG_INFO(ss.str().c_str());
 	return true;
 }
@@ -398,8 +662,15 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 
 	if (!m_FrameReadyEvent)
 	{
-		std::wstring evName = L"Global\\ZakoVDD_FrameReady_" + std::to_wstring(m_MonitorIndex);
-		m_FrameReadyEvent = CreateEventW(&sa, FALSE, FALSE, evName.c_str());
+		const bool exportLegacyNamedChannel = legacyNamedFrameChannel.load();
+		std::wstring evName;
+		LPCWSTR evNamePtr = nullptr;
+		if (exportLegacyNamedChannel)
+		{
+			evName = L"Global\\ZakoVDD_FrameReady_" + std::to_wstring(m_MonitorIndex);
+			evNamePtr = evName.c_str();
+		}
+		m_FrameReadyEvent = CreateEventW(&sa, FALSE, FALSE, evNamePtr);
 		if (!m_FrameReadyEvent)
 		{
 			std::stringstream ss;
@@ -412,10 +683,17 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 
 	if (!m_MetaMapping)
 	{
-		std::wstring mapName = L"Global\\ZakoVDD_Meta_" + std::to_wstring(m_MonitorIndex);
+		const bool exportLegacyNamedChannel = legacyNamedFrameChannel.load();
+		std::wstring mapName;
+		LPCWSTR mapNamePtr = nullptr;
+		if (exportLegacyNamedChannel)
+		{
+			mapName = L"Global\\ZakoVDD_Meta_" + std::to_wstring(m_MonitorIndex);
+			mapNamePtr = mapName.c_str();
+		}
 		m_MetaMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa,
 		                                   PAGE_READWRITE, 0, sizeof(SharedFrameMetadata),
-		                                   mapName.c_str());
+		                                   mapNamePtr);
 		if (!m_MetaMapping)
 		{
 			std::stringstream ss;
@@ -436,7 +714,8 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 			LocalFree(sd);
 			return false;
 		}
-		ZeroMemory(m_MetaView, sizeof(SharedFrameMetadata));
+		MetadataWriteScope metadataWrite(*this);
+		ClearMetadataPayload(m_MetaView);
 		m_MetaView->Magic = 0x5A564446; // 'ZVDF'
 		m_MetaView->Version = 1;
 		m_MetaView->MetadataSize = sizeof(SharedFrameMetadata);
@@ -450,6 +729,7 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 	}
 	LocalFree(sd);
 
+	MetadataWriteScope metadataWrite(*this);
 	m_MetaView->MetadataSize = sizeof(SharedFrameMetadata);
 	m_MetaView->Width = srcDesc.Width;
 	m_MetaView->Height = srcDesc.Height;
@@ -478,7 +758,15 @@ void SharedFrameExporter::TeardownTexture()
 	{
 		tex.Reset();
 	}
-	for (auto& handle : m_NtHandle)
+	for (auto& handle : m_NamedNtHandle)
+	{
+		if (handle)
+		{
+			CloseHandle(handle);
+			handle = nullptr;
+		}
+	}
+	for (auto& handle : m_SealedNtHandle)
 	{
 		if (handle)
 		{

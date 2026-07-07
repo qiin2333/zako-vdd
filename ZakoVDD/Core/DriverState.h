@@ -27,6 +27,7 @@ extern std::atomic<bool> vrrEnabled;
 extern std::atomic<bool> hardwareCursor;
 extern std::atomic<bool> preventManufacturerSpoof;
 extern std::atomic<bool> edidCeaOverride;
+extern std::atomic<bool> legacyNamedFrameChannel;
 
 extern std::atomic<bool> alphaCursorSupport;
 extern int CursorMaxX;

@@ -1,3 +1,5 @@
+#include <vdd_control_ioctl.h>
+
 #include "WdfDeviceLifecycle.h"
 
 #include "..\Callbacks\IddCallbacks.h"
@@ -6,7 +8,8 @@
 #include "IndirectDeviceContextWrapper.h"
 
 #include <string>
-#include <vdd_control_ioctl.h>
+
+extern "C" const GUID GUID_DEVINTERFACE_ZAKO_VDD_CONTROL = ZAKO_VDD_CONTROL_GUID_INIT;
 
 using namespace std;
 using namespace Microsoft::IndirectDisp;

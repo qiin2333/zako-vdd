@@ -5,6 +5,7 @@
 #include <array>
 #include <memory>
 #include <mutex>
+#include <vdd_control_ioctl.h>
 
 namespace Microsoft
 {
@@ -15,6 +16,7 @@ class SharedFrameExporter
 {
 public:
 	static constexpr UINT SharedFrameSlotCount = 3;
+	static VDD_FRAME_CHANNEL_CAPS FrameChannelCaps();
 
 	SharedFrameExporter(unsigned int monitorIndex, std::shared_ptr<Direct3DDevice> device);
 	~SharedFrameExporter();
@@ -25,19 +27,37 @@ public:
 	               UINT dirtyRectCount = 0);
 	void UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL);
 	void PublishModeMetadata(UINT width, UINT height);
+	NTSTATUS OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
+	                          HANDLE targetProcess,
+	                          VDD_FRAME_CHANNEL_OPEN_RESPONSE& response);
 
 private:
 	DXGI_FORMAT GuessMetadataFormat() const;
 	bool EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDesc);
 	bool EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& srcDesc);
+	void BeginMetadataWrite();
+	void EndMetadataWrite();
+	void BumpChannelGeneration();
+	UINT32 ComposeMetadataSequence(bool writing) const;
 	void TeardownTexture();
 	void Teardown();
+
+	class MetadataWriteScope
+	{
+	public:
+		explicit MetadataWriteScope(SharedFrameExporter& exporter);
+		~MetadataWriteScope();
+
+	private:
+		SharedFrameExporter& m_Exporter;
+	};
 
 	unsigned int m_MonitorIndex = 0;
 	std::shared_ptr<Direct3DDevice> m_Device;
 	std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, SharedFrameSlotCount> m_SharedTex;
 	std::array<Microsoft::WRL::ComPtr<IDXGIKeyedMutex>, SharedFrameSlotCount> m_KeyedMutex;
-	std::array<HANDLE, SharedFrameSlotCount> m_NtHandle = {};
+	std::array<HANDLE, SharedFrameSlotCount> m_NamedNtHandle = {};
+	std::array<HANDLE, SharedFrameSlotCount> m_SealedNtHandle = {};
 	std::mutex m_ExportMutex;
 	HANDLE m_FrameReadyEvent = nullptr;
 	HANDLE m_MetaMapping = nullptr;
@@ -47,6 +67,10 @@ private:
 	UINT m_CachedWidth = 0;
 	UINT m_CachedHeight = 0;
 	DXGI_FORMAT m_CachedFormat = DXGI_FORMAT_UNKNOWN;
+	// Metadata writes are serialized by m_ExportMutex and must be wrapped in
+	// MetadataWriteScope so consumers never accept a partially updated snapshot.
+	UINT16 m_ChannelGeneration = 1;
+	UINT16 m_MetadataSequenceCounter = 0;
 
 	bool m_PendingIsHdr = false;
 	float m_PendingMaxNits = 0.0f;

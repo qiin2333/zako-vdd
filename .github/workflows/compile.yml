@@ -8,7 +8,7 @@ on:
       - sunshine
     tags:
       - 'v*'
-  pull_request_target:
+  pull_request:
     branches:
       - main
       - master
@@ -24,7 +24,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -157,8 +157,8 @@ jobs:
         run: dir "${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
 
       - name: Sign driver with certificate
-        # Skip signing for PRs from forks to prevent secret exfiltration
-        if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
+        # PR builds do not receive signing secrets. Tag/main builds sign when the
+        # repository has a certificate configured.
         shell: pwsh
         env:
           SIGNING_CERT_PFX: ${{ secrets.SIGNING_CERT_PFX }}

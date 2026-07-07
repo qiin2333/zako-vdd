@@ -218,7 +218,7 @@ git clone https://github.com/qiin2333/zako-vdd.git
 cd Virtual-Display-Driver
 ```
 
-2. 使用 Visual Studio 打开 `Virtual Display Driver (HDR)/ZakoVDD/ZakoVDD.sln`
+2. 使用 Visual Studio 打开仓库根目录下的 `ZakoVDD.sln`
 
 3. 选择配置（Debug 或 Release）和平台（x64）
 
@@ -228,15 +228,19 @@ cd Virtual-Display-Driver
 
 ```
 Virtual-Display-Driver/
-├── Virtual Display Driver (HDR)/
-│   ├── ZakoVDD/              # 主驱动代码
-│   │   ├── Driver.cpp        # 驱动主逻辑
-│   │   ├── Driver.h          # 驱动头文件
-│   │   └── ZakoVDD.inf       # 驱动安装文件
-│   ├── vdd_settings.xml      # 默认配置文件
-│   └── *.edid                # EDID 文件
+├── ZakoVDD.sln               # Visual Studio 解决方案
+├── ZakoVDD/                  # 主驱动工程
+│   ├── Adapter/              # GPU 适配器选择
+│   ├── Callbacks/            # IddCx 回调实现
+│   ├── Config/               # 配置读取和写入
+│   ├── Control/              # 控制通道和命令处理
+│   ├── Device/               # WDF/IddCx 设备生命周期
+│   ├── Rendering/            # D3D 和交换链处理
+│   └── ZakoVDD.inf           # 驱动安装文件
+├── vdd_settings.xml          # 默认配置文件
 ├── Community Scripts/        # PowerShell 管理脚本
-├── Common/                   # 公共头文件
+├── Common/Include/           # 公共头文件和 IOCTL 协议
+├── tools/vdd_capture_test/   # 共享帧导出验证工具
 └── README.md                 # 本文件
 ```
 

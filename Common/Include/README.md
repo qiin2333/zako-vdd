@@ -1,1 +1,6 @@
-Required include(s). Plans to combine it into the driver to reduce includes.
+驱动和配套工具共享的头文件。
+
+- `vdd_control_ioctl.h` 定义控制通道的 IOCTL 协议。
+- `AdapterOption.h` 定义驱动模块之间共享的适配器选择状态。
+
+这个目录只放确实需要跨驱动子系统或被外部工具复用的头文件。

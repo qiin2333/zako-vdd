@@ -8,7 +8,9 @@
     }
  }
 
-$device =  Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq 'IddSampleDriver Device HDR' -or $_.FriendlyName -eq 'Virtual Display Driver' }
+$device = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object {
+    $_.FriendlyName -eq 'Zako Display Adapter'
+}
 
 if ($device) {
     if ($device.Status -eq 'OK') {

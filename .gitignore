@@ -246,6 +246,7 @@ ModelManifest.xml
 nul
 tools/nul
 tools/dist/
+tools/**/build/
 tools/VkLayer_hdr_inject/full_debug.txt
 tools/VkLayer_hdr_inject/hdr_inject_log.txt
 tools/VkLayer_hdr_inject/external/

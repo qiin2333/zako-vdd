@@ -63,7 +63,10 @@
     <ClInclude Include="Util\StringConversion.h" />
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="ZakoVDD.inf" />
+    <Inf Include="ZakoVDD.inf">
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+      <TimeStamp>$(DriverPackageVersion)</TimeStamp>
+    </Inf>
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{2D54CB75-8B17-4F11-97DC-847B0244CD46}</ProjectGuid>
@@ -73,6 +76,7 @@
     <Configuration>Debug</Configuration>
     <Platform Condition="'$(Platform)' == ''">x64</Platform>
     <RootNamespace>ZakoVDD</RootNamespace>
+    <DriverPackageVersion Condition="'$(DriverPackageVersion)' == ''">*</DriverPackageVersion>
   </PropertyGroup>
   <PropertyGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <PlatformToolset>WindowsUserModeDriver10.0</PlatformToolset>

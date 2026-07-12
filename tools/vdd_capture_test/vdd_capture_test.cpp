@@ -30,6 +30,7 @@
 #include <vector>
 #include <chrono>
 #include <fstream>
+#include <cmath>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -70,6 +71,12 @@ struct Args
     int frames = 5;
     std::string out = ".";
     DWORD timeoutMs = 2000;
+    int sampleX = -1;
+    int sampleY = -1;
+    float expectedRgb[3] {};
+    bool hasExpectedRgb = false;
+    float tolerance = 0.25f;
+    bool dumpFrames = true;
 };
 
 static Args ParseArgs(int argc, char** argv)
@@ -86,14 +93,66 @@ static Args ParseArgs(int argc, char** argv)
         else if (s == "--frames") a.frames = std::stoi(next("--frames"));
         else if (s == "--out") a.out = next("--out");
         else if (s == "--timeout") a.timeoutMs = static_cast<DWORD>(std::stoul(next("--timeout")));
+        else if (s == "--sample")
+        {
+            a.sampleX = std::stoi(next("--sample"));
+            a.sampleY = std::stoi(next("--sample"));
+        }
+        else if (s == "--expect-scrgb")
+        {
+            const float expected = std::stof(next("--expect-scrgb"));
+            a.expectedRgb[0] = a.expectedRgb[1] = a.expectedRgb[2] = expected;
+            a.hasExpectedRgb = true;
+        }
+        else if (s == "--expect-rgb")
+        {
+            a.expectedRgb[0] = std::stof(next("--expect-rgb"));
+            a.expectedRgb[1] = std::stof(next("--expect-rgb"));
+            a.expectedRgb[2] = std::stof(next("--expect-rgb"));
+            a.hasExpectedRgb = true;
+        }
+        else if (s == "--tolerance") a.tolerance = std::stof(next("--tolerance"));
+        else if (s == "--no-dump") a.dumpFrames = false;
         else if (s == "-h" || s == "--help")
         {
-            printf("vdd_capture_test [--monitor N] [--frames N] [--out DIR] [--timeout MS]\n");
+            printf("vdd_capture_test [--monitor N] [--frames N] [--out DIR] [--timeout MS] "
+                   "[--sample X Y] [--expect-scrgb V | --expect-rgb R G B] "
+                   "[--tolerance V] [--no-dump]\n");
             exit(0);
         }
         else { fprintf(stderr, "Unknown arg: %s\n", s.c_str()); exit(2); }
     }
     return a;
+}
+
+static float HalfToFloat(uint16_t half)
+{
+    const uint32_t sign = static_cast<uint32_t>(half & 0x8000u) << 16;
+    uint32_t exponent = (half >> 10) & 0x1fu;
+    uint32_t mantissa = half & 0x03ffu;
+    uint32_t bits = 0;
+    if (exponent == 0)
+    {
+        if (mantissa == 0) bits = sign;
+        else
+        {
+            int shift = 0;
+            while ((mantissa & 0x0400u) == 0) { mantissa <<= 1; ++shift; }
+            mantissa &= 0x03ffu;
+            bits = sign | (static_cast<uint32_t>(127 - 15 - shift) << 23) | (mantissa << 13);
+        }
+    }
+    else if (exponent == 31)
+    {
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    }
+    else
+    {
+        bits = sign | ((exponent + (127 - 15)) << 23) | (mantissa << 13);
+    }
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
 }
 
 static const char* DxgiFormatName(DXGI_FORMAT f)
@@ -331,6 +390,7 @@ int main(int argc, char** argv)
     }
 
     int captured = 0;
+    int matchingSamples = 0;
     auto t0 = std::chrono::steady_clock::now();
     UINT64 lastCounter = meta->FrameCounter;
 
@@ -383,8 +443,31 @@ int main(int argc, char** argv)
         snprintf(path, sizeof(path), "%s/vdd_frame_%03d.ppm", args.out.c_str(), captured);
 
         bool isBgr = (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM);
-        bool dumped = false;
-        if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+        bool dumped = !args.dumpFrames;
+        if (args.sampleX >= 0 && args.sampleY >= 0 &&
+            desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+            static_cast<UINT>(args.sampleX) < desc.Width &&
+            static_cast<UINT>(args.sampleY) < desc.Height)
+        {
+            const auto* pixel = reinterpret_cast<const uint16_t*>(
+                static_cast<const uint8_t*>(m.pData) + args.sampleY * m.RowPitch) + args.sampleX * 4;
+            const float r = HalfToFloat(pixel[0]);
+            const float g = HalfToFloat(pixel[1]);
+            const float b = HalfToFloat(pixel[2]);
+            const float a = HalfToFloat(pixel[3]);
+            const bool match = !args.hasExpectedRgb ||
+                (std::fabs(r - args.expectedRgb[0]) <= args.tolerance &&
+                 std::fabs(g - args.expectedRgb[1]) <= args.tolerance &&
+                 std::fabs(b - args.expectedRgb[2]) <= args.tolerance);
+            if (match) ++matchingSamples;
+            printf("[sample %3d] xy=%d,%d rgba=%.4f,%.4f,%.4f,%.4f match=%u\n",
+                   captured, args.sampleX, args.sampleY, r, g, b, a, match ? 1u : 0u);
+        }
+        if (!args.dumpFrames)
+        {
+            snprintf(path, sizeof(path), "<not-dumped>");
+        }
+        else if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
             desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
         {
             dumped = DumpPpm(path, static_cast<const uint8_t*>(m.pData),
@@ -419,9 +502,16 @@ int main(int argc, char** argv)
     auto t1 = std::chrono::steady_clock::now();
     double sec = std::chrono::duration<double>(t1 - t0).count();
     printf("[done] captured=%d in %.3fs (%.1f fps)\n", captured, sec, captured / (sec > 0 ? sec : 1.0));
+    if (args.hasExpectedRgb)
+    {
+        printf("[pixel-verification] expected=%.4f,%.4f,%.4f tolerance=%.4f matching=%d/%d status=%s\n",
+               args.expectedRgb[0], args.expectedRgb[1], args.expectedRgb[2],
+               args.tolerance, matchingSamples, captured,
+               matchingSamples > 0 ? "PASS" : "FAIL");
+    }
 
     UnmapViewOfFile(meta);
     CloseHandle(hMeta);
     CloseHandle(hEvent);
-    return captured > 0 ? 0 : 1;
+    return captured > 0 && (!args.hasExpectedRgb || matchingSamples > 0) ? 0 : 1;
 }

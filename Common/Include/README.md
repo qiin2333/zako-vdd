@@ -1,6 +1,12 @@
-驱动和配套工具共享的头文件。
+# Shared headers
 
-- `vdd_control_ioctl.h` 定义控制通道的 IOCTL 协议。
-- `AdapterOption.h` 定义驱动模块之间共享的适配器选择状态。
+This directory contains contracts shared across the driver and companion
+tools:
 
-这个目录只放确实需要跨驱动子系统或被外部工具复用的头文件。
+- `vdd_control_ioctl.h`: ZakoVDD control and sealed frame-channel IOCTL ABI.
+- `AdapterOption.h`: adapter-selection state shared by driver modules.
+- `vulkan_hdr_policy.h`: strict HDR surface-format injection policy.
+- `vulkan_hdr_capability_cache.h`: versioned GPU/driver/OS validation cache.
+
+Keep only cross-component contracts here. Driver-internal implementation
+details belong under `ZakoVDD`.

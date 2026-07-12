@@ -1,0 +1,17 @@
+{
+  "file_format_version": "1.0.0",
+  "layer": {
+    "name": "VK_LAYER_ZAKO_virtual_hdr",
+    "type": "GLOBAL",
+    "library_path": ".\\zako_vulkan_hdr_bridge.dll",
+    "api_version": "1.1.0",
+    "implementation_version": "1",
+    "description": "Expose verified HDR WSI formats on active ZakoVDD HDR displays",
+    "functions": {
+      "vkGetInstanceProcAddr": "vkGetInstanceProcAddr"
+    },
+    "disable_environment": {
+      "DISABLE_ZAKO_VIRTUAL_HDR": "1"
+    }
+  }
+}

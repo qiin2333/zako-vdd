@@ -105,6 +105,16 @@ jobs:
         run: |
           msbuild "ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
 
+      - name: Build Vulkan HDR diagnostics
+        shell: cmd
+        run: |
+          call tools\vulkan_hdr_policy_test\build_consumer.bat
+          call tools\vulkan_hdr_probe\build_consumer.bat
+          call tools\vulkan_hdr_bridge\build_consumer.bat
+          call tools\vdd_command\build_consumer.bat
+          call tools\desktop_hdr_capture\build_consumer.bat
+          call tools\vdd_capture_test\build_consumer.bat
+
       - name: Stamp driver version
         shell: pwsh
         run: |
@@ -239,6 +249,9 @@ jobs:
             ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\zakovdd.cat
             ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\vdd_settings.xml
             ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD.cer
+            tools\vulkan_hdr_bridge\build\zako_vulkan_hdr_bridge.dll
+            tools\vulkan_hdr_bridge\build\VkLayer_zako_virtual_hdr.json
+            tools\vulkan_hdr_probe\build\vulkan_hdr_probe.exe
 
   release:
     name: Create Release
@@ -262,10 +275,14 @@ jobs:
             ZakoVDD/ZakoVDD.inf \
             ZakoVDD/zakovdd.cat \
             ZakoVDD/vdd_settings.xml \
-            ZakoVDD.cer
+            ZakoVDD.cer \
+            tools/vulkan_hdr_bridge/build/zako_vulkan_hdr_bridge.dll \
+            tools/vulkan_hdr_bridge/build/VkLayer_zako_virtual_hdr.json \
+            tools/vulkan_hdr_probe/build/vulkan_hdr_probe.exe
           cd ..
           unzip -l zakovdd.zip
-          for required in ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml ZakoVDD.cer; do
+          for required in ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml ZakoVDD.cer \
+                          zako_vulkan_hdr_bridge.dll VkLayer_zako_virtual_hdr.json vulkan_hdr_probe.exe; do
             unzip -l zakovdd.zip "$required" >/dev/null
           done
           ls -la zakovdd.zip

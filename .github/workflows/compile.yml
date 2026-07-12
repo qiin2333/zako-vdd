@@ -108,12 +108,12 @@ jobs:
       - name: Build Vulkan HDR diagnostics
         shell: cmd
         run: |
-          call tools\vulkan_hdr_policy_test\build_consumer.bat
-          call tools\vulkan_hdr_probe\build_consumer.bat
-          call tools\vulkan_hdr_bridge\build_consumer.bat
-          call tools\vdd_command\build_consumer.bat
-          call tools\desktop_hdr_capture\build_consumer.bat
-          call tools\vdd_capture_test\build_consumer.bat
+          call tools\vulkan_hdr_policy_test\build_consumer.bat || exit /b 1
+          call tools\vulkan_hdr_probe\build_consumer.bat || exit /b 1
+          call tools\vulkan_hdr_bridge\build_consumer.bat || exit /b 1
+          call tools\vdd_command\build_consumer.bat || exit /b 1
+          call tools\desktop_hdr_capture\build_consumer.bat || exit /b 1
+          call tools\vdd_capture_test\build_consumer.bat || exit /b 1
 
       - name: Stamp driver version
         shell: pwsh

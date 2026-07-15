@@ -1,15 +1,11 @@
-# Self-elevate the script if required
-if (-Not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
-    if ([int](Get-CimInstance -Class Win32_OperatingSystem | Select-Object -ExpandProperty BuildNumber) -ge 6000) {
-        $CommandLine = "-File `"" + $MyInvocation.MyCommand.Path + "`" " + $MyInvocation.UnboundArguments
-        Start-Process -FilePath PowerShell.exe -Verb Runas -ArgumentList $CommandLine
-        Exit
-    }
-}
+#Requires -Version 5.1
 
-# Install dependencies if required
-. "$PSScriptRoot\set-dependencies.ps1"
+param(
+    [uint32]$DisplayId = 0
+)
 
-$disp = Get-DisplayInfo | Where-Object { $_.DisplayName -eq "VDD by MTT" }
+. "$PSScriptRoot\common.ps1"
 
-Set-DisplayPrimary -DisplayId $disp.DisplayId
+$display = Get-ZakoDisplayInfo -DisplayId $DisplayId
+Set-DisplayPrimary -DisplayId $display.DisplayId -ErrorAction Stop
+Write-Host "Zako display $($display.DisplayId) is now the primary display."

@@ -11,7 +11,7 @@
 - **硬件加速** - 利用 GPU 硬件加速进行渲染
 - **低延迟** - 优化的渲染管线，提供低延迟的虚拟显示体验
 - **多显示器支持** - 支持同时创建和管理多个虚拟显示器
-- **社区脚本** - 提供丰富的 PowerShell 脚本用于快速管理虚拟显示器
+- **社区脚本** - 提供范围明确的 PowerShell 脚本用于调整活动的虚拟显示器
 
 ## 📋 系统要求
 
@@ -41,7 +41,7 @@
 
 4. **配置虚拟显示器**
    - 编辑 `vdd_settings.xml` 文件来自定义虚拟显示器的设置
-   - 或使用提供的 PowerShell 脚本进行快速配置
+   - 使用社区 PowerShell 脚本调整当前活动显示器的分辨率、刷新率、缩放、旋转和 HDR 状态
 
 ### 配置文件说明
 
@@ -173,18 +173,24 @@
 
 ## 🛠️ 社区脚本
 
-项目提供了丰富的 PowerShell 脚本用于管理虚拟显示器：
+[`Community Scripts`](./Community%20Scripts/) 提供一组范围明确的 PowerShell 脚本，用于调整活动的 Zako 虚拟显示器：
 
-- `toggle-VDD.ps1` - 启用/禁用虚拟显示器
-- `changeres-VDD.ps1` - 更改虚拟显示器分辨率
-- `refreshrate-VDD.ps1` - 更改刷新率
-- `rotate-VDD.ps1` - 旋转虚拟显示器
-- `scale-VDD.ps1` - 调整缩放比例
-- `primary-VDD.ps1` - 设置为主显示器
-- `HDRswitch-VDD.ps1` - 切换 HDR 模式
-- `get_disp_num.ps1` - 获取显示器编号
+- 列出 Zako 显示器及 Display ID
+- 更改分辨率和刷新率
+- 调整旋转和缩放比例
+- 设置主显示器
+- 开启、关闭或切换 HDR
 
-> **注意**: 使用这些脚本需要管理员权限，并且需要对 PowerShell 有一定的了解。
+脚本使用 `DISPLAY\ZAK2333` 硬件标识定位当前驱动创建的显示器，并支持通过 `-DisplayId` 选择多个虚拟显示器中的某一个。脚本依赖 `DisplayConfig` 1.1.1 或更高版本：
+
+```powershell
+Install-Module DisplayConfig -Scope CurrentUser
+Set-Location '.\Community Scripts'
+.\list-VDD.ps1
+.\changeres-VDD.ps1 2560 1440 -DisplayId 2
+```
+
+完整命令、参数和限制请参阅[社区脚本说明](./Community%20Scripts/README.md)。脚本不会自动安装依赖、禁用 PnP 设备或隐式修改全局显示拓扑。
 
 ## 🔧 与 Foundation Sunshine 集成
 

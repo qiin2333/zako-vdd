@@ -1,1 +1,0 @@
-Get-Monitor | Where-Object { $_.InstanceName -like '*ZAK2333*' } | Sort-Object { [int] (($_.InstanceName -match 'UID(\d+)') -and $Matches[1]) } | Select-Object -First 1 -ExpandProperty LogicalDisplay | select-object Devicename

@@ -351,7 +351,11 @@ _Use_decl_annotations_
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorObject);
 	if (pContext && pContext->pContext)
 	{
-		pContext->pContext->UpdateMonitorHdrMetadata(MonitorObject, true, maxNits, minNits, maxFALL);
+		// This callback supplies default HDR10 mastering metadata for any
+		// HDR-capable monitor. It is not an indication that the active path is
+		// currently in HDR mode; CommitModes2 and per-frame surface color space
+		// are authoritative for that state.
+		pContext->pContext->UpdateMonitorHdrLuminanceMetadata(MonitorObject, maxNits, minNits, maxFALL);
 	}
 
 	VDD_LOG_DEBUG("Default HDR metadata set successfully.");

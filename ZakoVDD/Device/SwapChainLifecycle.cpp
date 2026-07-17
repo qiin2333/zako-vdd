@@ -52,17 +52,20 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 		auto modeIt = m_CommittedTargetModes.find(Monitor);
 		if (modeIt != m_CommittedTargetModes.end())
 		{
-			procIt->second->PublishModeMetadata(modeIt->second);
+			auto hdrIt = m_CommittedTargetHdrStates.find(Monitor);
+			const bool hasExpectedHdrState = hdrIt != m_CommittedTargetHdrStates.end();
+			procIt->second->PublishModeMetadata(modeIt->second,
+			                                    hasExpectedHdrState,
+			                                    hasExpectedHdrState && hdrIt->second);
 		}
 
 		lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
 		auto hdrIt = s_MonitorHdrSettingsMap.find(Monitor);
 		if (hdrIt != s_MonitorHdrSettingsMap.end())
 		{
-			procIt->second->UpdateHdrMetadata(hdrIt->second.isHdr,
-			                                hdrIt->second.maxNits,
-			                                hdrIt->second.minNits,
-			                                hdrIt->second.maxFALL);
+			procIt->second->UpdateHdrLuminanceMetadata(hdrIt->second.maxNits,
+			                                           hdrIt->second.minNits,
+			                                           hdrIt->second.maxFALL);
 		}
 	}
 
@@ -135,16 +138,18 @@ void IndirectDeviceContext::CommitModes(const IDARG_IN_COMMITMODES *pInArgs)
 		if ((path.Flags & IDDCX_PATH_FLAGS_ACTIVE) != 0)
 		{
 			m_CommittedTargetModes[path.MonitorObject] = path.TargetVideoSignalInfo;
+			m_CommittedTargetHdrStates.erase(path.MonitorObject);
 
 			auto procIt = m_ProcessingThreads.find(path.MonitorObject);
 			if (procIt != m_ProcessingThreads.end() && procIt->second)
 			{
-				procIt->second->PublishModeMetadata(path.TargetVideoSignalInfo);
+				procIt->second->PublishModeMetadata(path.TargetVideoSignalInfo, false, false);
 			}
 		}
 		else
 		{
 			m_CommittedTargetModes.erase(path.MonitorObject);
+			m_CommittedTargetHdrStates.erase(path.MonitorObject);
 
 			auto procIt = m_ProcessingThreads.find(path.MonitorObject);
 			if (procIt != m_ProcessingThreads.end() && procIt->second)
@@ -174,16 +179,31 @@ void IndirectDeviceContext::CommitModes2(const IDARG_IN_COMMITMODES2 *pInArgs)
 		if ((path.Flags & IDDCX_PATH_FLAGS_ACTIVE) != 0)
 		{
 			m_CommittedTargetModes[path.MonitorObject] = path.TargetVideoSignalInfo;
+			const bool hasExpectedHdrState =
+				path.WireFormatInfo.ColorSpace != IDDCX_COLOR_SPACE_UNINITIALIZED;
+			const bool expectedIsHdr =
+				path.WireFormatInfo.ColorSpace == IDDCX_COLOR_SPACE_G2084_P2020;
+			if (hasExpectedHdrState)
+			{
+				m_CommittedTargetHdrStates[path.MonitorObject] = expectedIsHdr;
+			}
+			else
+			{
+				m_CommittedTargetHdrStates.erase(path.MonitorObject);
+			}
 
 			auto procIt = m_ProcessingThreads.find(path.MonitorObject);
 			if (procIt != m_ProcessingThreads.end() && procIt->second)
 			{
-				procIt->second->PublishModeMetadata(path.TargetVideoSignalInfo);
+				procIt->second->PublishModeMetadata(path.TargetVideoSignalInfo,
+				                                    hasExpectedHdrState,
+				                                    expectedIsHdr);
 			}
 		}
 		else
 		{
 			m_CommittedTargetModes.erase(path.MonitorObject);
+			m_CommittedTargetHdrStates.erase(path.MonitorObject);
 
 			auto procIt = m_ProcessingThreads.find(path.MonitorObject);
 			if (procIt != m_ProcessingThreads.end() && procIt->second)
@@ -194,14 +214,13 @@ void IndirectDeviceContext::CommitModes2(const IDARG_IN_COMMITMODES2 *pInArgs)
 	}
 }
 
-void IndirectDeviceContext::UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool isHdr, float maxNits, float minNits, float maxFALL)
+void IndirectDeviceContext::UpdateMonitorHdrLuminanceMetadata(IDDCX_MONITOR Monitor, float maxNits, float minNits, float maxFALL)
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
 
 	{
 		lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
 		auto &hdrSettings = s_MonitorHdrSettingsMap[Monitor];
-		hdrSettings.isHdr = isHdr;
 		hdrSettings.maxNits = maxNits;
 		hdrSettings.minNits = minNits;
 		hdrSettings.maxFALL = maxFALL;
@@ -210,7 +229,7 @@ void IndirectDeviceContext::UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool
 	auto procIt = m_ProcessingThreads.find(Monitor);
 	if (procIt != m_ProcessingThreads.end() && procIt->second)
 	{
-		procIt->second->UpdateHdrMetadata(isHdr, maxNits, minNits, maxFALL);
+		procIt->second->UpdateHdrLuminanceMetadata(maxNits, minNits, maxFALL);
 	}
 }
 

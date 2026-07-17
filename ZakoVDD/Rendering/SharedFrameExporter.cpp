@@ -169,6 +169,23 @@ SharedFrameExporter::SharedFrameExporter(unsigned int monitorIndex, std::shared_
 {
 }
 
+bool SharedFrameExporter::IsHdrSurfaceColorSpace(DXGI_COLOR_SPACE_TYPE colorSpace)
+{
+	switch (colorSpace)
+	{
+	case DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709:
+	case DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020:
+	case DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020:
+	case DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020:
+	case DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020:
+	case DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020:
+	case DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020:
+		return true;
+	default:
+		return false;
+	}
+}
+
 SharedFrameExporter::~SharedFrameExporter()
 {
 	Teardown();
@@ -237,6 +254,8 @@ SharedFrameExporter::MetadataWriteScope::~MetadataWriteScope()
 }
 
 void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
+	                                DXGI_COLOR_SPACE_TYPE surfaceColorSpace,
+	                                bool hasSurfaceColorSpace,
                                     UINT64 presentDisplayQpc,
                                     UINT presentationFrameNumber,
                                     UINT dirtyRectCount)
@@ -256,39 +275,56 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 
 	D3D11_TEXTURE2D_DESC srcDesc = {};
 	srcTex->GetDesc(&srcDesc);
-
-	if (!EnsureSharedTexture(srcDesc))
-	{
-		return;
-	}
+	const bool isHdr = hasSurfaceColorSpace
+		? IsHdrSurfaceColorSpace(surfaceColorSpace)
+		: (m_HasExpectedHdrState ? m_ExpectedIsHdr : m_CachedIsHdr);
 
 	bool modeBecameReady = false;
-	if (m_ModePending && m_HasExpectedMode)
+	if (m_ModePending)
 	{
+		// An inactive path has no target mode. Discard any late frames from the
+		// retired swap chain instead of rebuilding a channel that cannot open.
+		if (!m_HasExpectedMode)
+		{
+			return;
+		}
+
 		const bool dimensionsMatch =
 			(m_ExpectedWidth == 0 || srcDesc.Width == m_ExpectedWidth) &&
 			(m_ExpectedHeight == 0 || srcDesc.Height == m_ExpectedHeight);
-		const bool formatMatches =
-			(m_ExpectedIsHdr && srcDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ||
-			(!m_ExpectedIsHdr && srcDesc.Format != DXGI_FORMAT_UNKNOWN);
+		// SurfaceColorSpace describes the current desktop signal. Do not infer
+		// HDR from texture format: Windows can legitimately supply FP16 for SDR.
+		const bool colorSpaceMatches =
+			!m_HasExpectedHdrState || !hasSurfaceColorSpace || isHdr == m_ExpectedIsHdr;
 
-		if (dimensionsMatch && formatMatches)
+		if (!dimensionsMatch || !colorSpaceMatches)
 		{
-			modeBecameReady = true;
-		}
-		else if (m_LastPendingLogWidth != srcDesc.Width ||
+			if (m_LastPendingLogWidth != srcDesc.Width ||
 		         m_LastPendingLogHeight != srcDesc.Height ||
-		         m_LastPendingLogFormat != srcDesc.Format)
-		{
-			m_LastPendingLogWidth = srcDesc.Width;
-			m_LastPendingLogHeight = srcDesc.Height;
-			m_LastPendingLogFormat = srcDesc.Format;
-			VDD_LOG_DEBUG_STREAM("[VddExport] Ignoring non-matching frame while mode is pending monitor="
-			                     << m_MonitorIndex << " actual=" << srcDesc.Width << "x" << srcDesc.Height
-			                     << " fmt=" << srcDesc.Format
-			                     << " expected=" << m_ExpectedWidth << "x" << m_ExpectedHeight
-			                     << " fmt=" << m_ExpectedFormat);
+		         m_LastPendingLogFormat != srcDesc.Format ||
+		         m_LastPendingLogColorSpace != surfaceColorSpace)
+			{
+				m_LastPendingLogWidth = srcDesc.Width;
+				m_LastPendingLogHeight = srcDesc.Height;
+				m_LastPendingLogFormat = srcDesc.Format;
+				m_LastPendingLogColorSpace = surfaceColorSpace;
+				VDD_LOG_DEBUG_STREAM("[VddExport] Ignoring non-matching frame while mode is pending monitor="
+				                     << m_MonitorIndex << " actual=" << srcDesc.Width << "x" << srcDesc.Height
+				                     << " fmt=" << srcDesc.Format
+				                     << " colorspace=" << surfaceColorSpace
+				                     << " hdr=" << (isHdr ? 1 : 0)
+				                     << " expected=" << m_ExpectedWidth << "x" << m_ExpectedHeight
+				                     << " hdr=" << (m_HasExpectedHdrState ? (m_ExpectedIsHdr ? "1" : "0") : "unknown"));
+			}
+			return;
 		}
+
+		modeBecameReady = true;
+	}
+
+	if (!EnsureSharedTexture(srcDesc, isHdr))
+	{
+		return;
 	}
 
 	// Best-effort acquire with 0 timeout. First try the normal empty-slot
@@ -392,10 +428,16 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 			m_MetaView->Width = srcDesc.Width;
 			m_MetaView->Height = srcDesc.Height;
 			m_MetaView->DxgiFormat = srcDesc.Format;
-			m_MetaView->IsHdr = m_PendingIsHdr ? 1u : 0u;
+			m_MetaView->IsHdr = isHdr ? 1u : 0u;
 			m_MetaView->MaxNits = m_PendingMaxNits;
 			m_MetaView->MinNits = m_PendingMinNits;
 			m_MetaView->MaxFALL = m_PendingMaxFALL;
+		}
+		else
+		{
+			// Keep active HDR state tied to the frame's color space even if a
+			// mode commit reused the existing channel.
+			m_MetaView->IsHdr = isHdr ? 1u : 0u;
 		}
 		m_MetaView->FrameCounter++;
 		m_MetaView->LastPresentQpc = presentDisplayQpc ? presentDisplayQpc : static_cast<UINT64>(qpc.QuadPart);
@@ -419,6 +461,8 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 		TeardownTexture();
 		return;
 	}
+	m_HasCachedColorSpace = hasSurfaceColorSpace;
+	m_CachedIsHdr = isHdr;
 	if (modeBecameReady)
 	{
 		// The channel becomes ready only after the matching frame was copied
@@ -427,9 +471,12 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 		m_LastPendingLogWidth = 0;
 		m_LastPendingLogHeight = 0;
 		m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
+		m_LastPendingLogColorSpace = DXGI_COLOR_SPACE_CUSTOM;
 		VDD_LOG_INFO_STREAM("[VddExport] Shared frame channel ready monitor=" << m_MonitorIndex
 		                    << " " << srcDesc.Width << "x" << srcDesc.Height
-		                    << " fmt=" << srcDesc.Format);
+		                    << " fmt=" << srcDesc.Format
+		                    << " colorspace=" << surfaceColorSpace
+		                    << " hdr=" << (isHdr ? 1 : 0));
 	}
 	m_NextPublishSlot = (selectedSlot + 1) % SharedFrameSlotCount;
 
@@ -439,53 +486,30 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 	}
 }
 
-void SharedFrameExporter::UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL)
+void SharedFrameExporter::UpdateHdrLuminanceMetadata(float maxNits, float minNits, float maxFALL)
 {
 	std::lock_guard<std::mutex> lock(m_ExportMutex);
 
-	const bool formatChanged = m_PendingIsHdr != isHdr;
-	m_PendingIsHdr = isHdr;
 	m_PendingMaxNits = maxNits;
 	m_PendingMinNits = minNits;
 	m_PendingMaxFALL = maxFALL;
 
-	if (formatChanged)
-	{
-		if (!m_HasExpectedMode)
-		{
-			m_ExpectedWidth = m_CachedWidth;
-			m_ExpectedHeight = m_CachedHeight;
-			m_HasExpectedMode = true;
-		}
-		// The driver can receive more than one valid SDR DXGI format, so
-		// only require the exact FP16 format for HDR transitions. Sunshine
-		// still validates the actual texture descriptor before attaching.
-		m_ExpectedFormat = m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
-		m_ExpectedIsHdr = m_PendingIsHdr;
-		m_ModePending = true;
-		m_LastPendingLogWidth = 0;
-		m_LastPendingLogHeight = 0;
-		m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
-	}
-
-	// Defer the metadata update while a new mode/format is pending. The next
-	// PushFrame() publishes dimensions, format, and HDR fields together with
-	// the matching shared textures.
-	if (m_MetaView && !m_ModePending)
+	// Default HDR10 mastering metadata is available for every HDR-capable
+	// monitor, including while the active path is SDR. It must never change
+	// channel readiness or active HDR state.
+	if (m_MetaView)
 	{
 		MetadataWriteScope metadataWrite(*this);
-		m_MetaView->IsHdr = isHdr ? 1u : 0u;
 		m_MetaView->MaxNits = maxNits;
 		m_MetaView->MinNits = minNits;
 		m_MetaView->MaxFALL = maxFALL;
-		if (m_CachedFormat == DXGI_FORMAT_UNKNOWN)
-		{
-			m_MetaView->DxgiFormat = GuessMetadataFormat();
-		}
 	}
 }
 
-void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
+void SharedFrameExporter::PublishModeMetadata(UINT width,
+                                              UINT height,
+                                              bool hasExpectedHdrState,
+                                              bool expectedIsHdr)
 {
 	std::lock_guard<std::mutex> lock(m_ExportMutex);
 
@@ -493,22 +517,21 @@ void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
 	{
 		m_ExpectedWidth = 0;
 		m_ExpectedHeight = 0;
-		m_ExpectedFormat = DXGI_FORMAT_UNKNOWN;
+		m_HasExpectedHdrState = false;
 		m_ExpectedIsHdr = false;
 		m_HasExpectedMode = false;
 		m_ModePending = true;
 		m_LastPendingLogWidth = 0;
 		m_LastPendingLogHeight = 0;
 		m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
+		m_LastPendingLogColorSpace = DXGI_COLOR_SPACE_CUSTOM;
 		return;
 	}
 
 	m_ExpectedWidth = width;
 	m_ExpectedHeight = height;
-	// Do not assume one specific SDR source format before the first frame;
-	// HDR is the only format family that needs an exact transition guard.
-	m_ExpectedFormat = m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
-	m_ExpectedIsHdr = m_PendingIsHdr;
+	m_HasExpectedHdrState = hasExpectedHdrState;
+	m_ExpectedIsHdr = expectedIsHdr;
 	m_HasExpectedMode = true;
 
 	// An active mode commit is also delivered when the existing swap chain is
@@ -529,23 +552,23 @@ void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
 			}
 		}
 	}
-	const bool cachedFormatMatches =
-		m_ExpectedIsHdr ? m_CachedFormat == DXGI_FORMAT_R16G16B16A16_FLOAT :
-		                  m_CachedFormat != DXGI_FORMAT_UNKNOWN;
+	const bool cachedHdrMatches =
+		!m_HasExpectedHdrState || !m_HasCachedColorSpace || m_CachedIsHdr == m_ExpectedIsHdr;
 	const bool modeWasAlreadyPending = m_ModePending;
-	m_ModePending = modeWasAlreadyPending || !cachedChannelReady || !cachedFormatMatches;
+	m_ModePending = modeWasAlreadyPending || !cachedChannelReady || !cachedHdrMatches;
 	m_LastPendingLogWidth = 0;
 	m_LastPendingLogHeight = 0;
 	m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
+	m_LastPendingLogColorSpace = DXGI_COLOR_SPACE_CUSTOM;
 
 	// CommitModes can arrive before the first frame of a replacement swap
 	// chain. Do not publish requested dimensions or format into a channel
 	// whose textures may still belong to the previous mode. PushFrame()
 	// publishes all metadata after the matching frame arrives.
-	VDD_LOG_INFO_STREAM("[VddExport] Armed expected mode monitor=" << m_MonitorIndex
+	VDD_LOG_INFO_STREAM("[VddExport] Committed expected mode monitor=" << m_MonitorIndex
 	                    << " " << width << "x" << height
-	                    << " fmt=" << m_ExpectedFormat
-	                    << "; waiting for the first matching frame");
+	                    << " hdr=" << (m_HasExpectedHdrState ? (m_ExpectedIsHdr ? "1" : "0") : "unknown")
+	                    << " channel_pending=" << (m_ModePending ? 1 : 0));
 }
 
 void SharedFrameExporter::ClearExpectedMode()
@@ -553,13 +576,14 @@ void SharedFrameExporter::ClearExpectedMode()
 	std::lock_guard<std::mutex> lock(m_ExportMutex);
 	m_ExpectedWidth = 0;
 	m_ExpectedHeight = 0;
-	m_ExpectedFormat = DXGI_FORMAT_UNKNOWN;
+	m_HasExpectedHdrState = false;
 	m_ExpectedIsHdr = false;
 	m_HasExpectedMode = false;
 	m_ModePending = true;
 	m_LastPendingLogWidth = 0;
 	m_LastPendingLogHeight = 0;
 	m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
+	m_LastPendingLogColorSpace = DXGI_COLOR_SPACE_CUSTOM;
 }
 
 bool SharedFrameExporter::IsReadyForExpectedMode() const
@@ -579,10 +603,9 @@ bool SharedFrameExporter::IsReadyForExpectedMode() const
 		return false;
 	}
 
-	const bool cachedFormatMatches =
-		m_ExpectedIsHdr ? m_CachedFormat == DXGI_FORMAT_R16G16B16A16_FLOAT :
-		                  m_CachedFormat != DXGI_FORMAT_UNKNOWN;
-	if (!cachedFormatMatches)
+	const bool cachedHdrMatches =
+		!m_HasExpectedHdrState || !m_HasCachedColorSpace || m_CachedIsHdr == m_ExpectedIsHdr;
+	if (!cachedHdrMatches)
 	{
 		return false;
 	}
@@ -668,12 +691,7 @@ NTSTATUS SharedFrameExporter::OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQU
 	return status;
 }
 
-DXGI_FORMAT SharedFrameExporter::GuessMetadataFormat() const
-{
-	return m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
-}
-
-bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDesc)
+bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDesc, bool isHdr)
 {
 	bool allSlotsReady = true;
 	for (const auto& tex : m_SharedTex)
@@ -790,7 +808,7 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	}
 	LocalFree(sd);
 
-	if (!EnsureEventAndMetadata(srcDesc))
+	if (!EnsureEventAndMetadata(srcDesc, isHdr))
 	{
 		TeardownTexture();
 		return false;
@@ -810,7 +828,7 @@ bool SharedFrameExporter::EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDes
 	return true;
 }
 
-bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& srcDesc)
+bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& srcDesc, bool isHdr)
 {
 	SECURITY_ATTRIBUTES sa = {};
 	PSECURITY_DESCRIPTOR sd = nullptr;
@@ -897,7 +915,7 @@ bool SharedFrameExporter::EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& src
 	m_MetaView->Width = srcDesc.Width;
 	m_MetaView->Height = srcDesc.Height;
 	m_MetaView->DxgiFormat = srcDesc.Format;
-	m_MetaView->IsHdr = m_PendingIsHdr ? 1u : 0u;
+	m_MetaView->IsHdr = isHdr ? 1u : 0u;
 	m_MetaView->MaxNits = m_PendingMaxNits;
 	m_MetaView->MinNits = m_PendingMinNits;
 	m_MetaView->MaxFALL = m_PendingMaxFALL;
@@ -941,6 +959,8 @@ void SharedFrameExporter::TeardownTexture()
 	m_CachedWidth = 0;
 	m_CachedHeight = 0;
 	m_CachedFormat = DXGI_FORMAT_UNKNOWN;
+	m_HasCachedColorSpace = false;
+	m_CachedIsHdr = false;
 }
 
 void SharedFrameExporter::Teardown()

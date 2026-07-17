@@ -35,7 +35,6 @@ struct GuidComparator
 
 struct MonitorHdrSettings
 {
-	bool isHdr;
 	float maxNits;
 	float minNits;
 	float maxFALL;

@@ -93,7 +93,9 @@ SwapChainProcessor::~SwapChainProcessor()
 	}
 }
 
-void SwapChainProcessor::PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO& mode)
+void SwapChainProcessor::PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO& mode,
+                                             bool hasExpectedHdrState,
+                                             bool expectedIsHdr)
 {
 	if (!m_Exporter)
 	{
@@ -102,7 +104,7 @@ void SwapChainProcessor::PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_IN
 
 	const UINT width = mode.activeSize.cx ? static_cast<UINT>(mode.activeSize.cx) : static_cast<UINT>(mode.totalSize.cx);
 	const UINT height = mode.activeSize.cy ? static_cast<UINT>(mode.activeSize.cy) : static_cast<UINT>(mode.totalSize.cy);
-	m_Exporter->PublishModeMetadata(width, height);
+	m_Exporter->PublishModeMetadata(width, height, hasExpectedHdrState, expectedIsHdr);
 }
 
 void SwapChainProcessor::ClearExpectedMode()
@@ -113,14 +115,14 @@ void SwapChainProcessor::ClearExpectedMode()
 	}
 }
 
-void SwapChainProcessor::UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL)
+void SwapChainProcessor::UpdateHdrLuminanceMetadata(float maxNits, float minNits, float maxFALL)
 {
 	if (!m_Exporter)
 	{
 		return;
 	}
 
-	m_Exporter->UpdateHdrMetadata(isHdr, maxNits, minNits, maxFALL);
+	m_Exporter->UpdateHdrLuminanceMetadata(maxNits, minNits, maxFALL);
 }
 
 NTSTATUS SwapChainProcessor::OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
@@ -276,6 +278,8 @@ void SwapChainProcessor::RunCore()
 		UINT64 presentDisplayQpc = 0;
 		UINT presentationFrameNumber = 0;
 		UINT dirtyRectCount = 0;
+		DXGI_COLOR_SPACE_TYPE surfaceColorSpace = DXGI_COLOR_SPACE_CUSTOM;
+		bool hasSurfaceColorSpace = false;
 
 		if (useBuffer2)
 		{
@@ -285,6 +289,8 @@ void SwapChainProcessor::RunCore()
 			presentDisplayQpc = Buffer.MetaData.PresentDisplayQPCTime;
 			presentationFrameNumber = Buffer.MetaData.PresentationFrameNumber;
 			dirtyRectCount = Buffer.MetaData.DirtyRectCount;
+			surfaceColorSpace = Buffer.MetaData.SurfaceColorSpace;
+			hasSurfaceColorSpace = surfaceColorSpace != DXGI_COLOR_SPACE_CUSTOM;
 		}
 		else
 		{
@@ -333,6 +339,8 @@ void SwapChainProcessor::RunCore()
 			if (m_Exporter)
 			{
 				m_Exporter->PushFrame(AcquiredBuffer.Get(),
+				                      surfaceColorSpace,
+				                      hasSurfaceColorSpace,
 				                      presentDisplayQpc,
 				                      presentationFrameNumber,
 				                      dirtyRectCount);

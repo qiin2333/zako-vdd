@@ -23,9 +23,11 @@ namespace Microsoft
 			SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex);
 			~SwapChainProcessor();
 
-			void PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO &mode);
+			void PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO &mode,
+			                         bool hasExpectedHdrState,
+			                         bool expectedIsHdr);
 			void ClearExpectedMode();
-			void UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL);
+			void UpdateHdrLuminanceMetadata(float maxNits, float minNits, float maxFALL);
 			NTSTATUS OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
 			                          HANDLE targetProcess,
 			                          VDD_FRAME_CHANNEL_OPEN_RESPONSE& response);

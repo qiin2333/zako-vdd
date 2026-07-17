@@ -28,7 +28,7 @@ namespace Microsoft
 			void UnassignSwapChain(IDDCX_MONITOR Monitor);
 			void CommitModes(const IDARG_IN_COMMITMODES *pInArgs);
 			void CommitModes2(const IDARG_IN_COMMITMODES2 *pInArgs);
-			void UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool isHdr, float maxNits, float minNits, float maxFALL);
+			void UpdateMonitorHdrLuminanceMetadata(IDDCX_MONITOR Monitor, float maxNits, float minNits, float maxFALL);
 			NTSTATUS OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
 			                          HANDLE targetProcess,
 			                          VDD_FRAME_CHANNEL_OPEN_RESPONSE& response);
@@ -49,6 +49,9 @@ namespace Microsoft
 			std::map<unsigned int, GUID> m_MonitorGuids;
 
 			std::map<IDDCX_MONITOR, DISPLAYCONFIG_VIDEO_SIGNAL_INFO> m_CommittedTargetModes;
+			// Presence in this map means CommitModes2 supplied an authoritative
+			// target color space. The bool is true for HDR10 and false for SDR/WCG.
+			std::map<IDDCX_MONITOR, bool> m_CommittedTargetHdrStates;
 			std::map<IDDCX_MONITOR, std::unique_ptr<SwapChainProcessor>> m_ProcessingThreads;
 			std::map<IDDCX_MONITOR, HANDLE> m_MouseEvents;
 

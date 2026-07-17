@@ -183,14 +183,13 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		{
 			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
 			MonitorHdrSettings hdrSettings;
-			hdrSettings.isHdr = false;
 			hdrSettings.maxNits = maxNits;
 			hdrSettings.minNits = minNits;
 			hdrSettings.maxFALL = maxFALL;
 			s_MonitorHdrSettingsMap[newMonitor] = hdrSettings;
 
-			VDD_LOG_DEBUG_STREAM("Stored HDR settings for monitor " << (index + 1)
-			                     << " - IsHdr: false, MaxNits: " << maxNits
+			VDD_LOG_DEBUG_STREAM("Stored HDR luminance settings for monitor " << (index + 1)
+			                     << " - MaxNits: " << maxNits
 			                     << ", MinNits: " << minNits
 			                     << ", MaxFALL: " << maxFALL);
 		}
@@ -243,6 +242,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 		}
 
 		m_CommittedTargetModes.erase(hMonitor);
+		m_CommittedTargetHdrStates.erase(hMonitor);
 
 		{
 			auto guidIt = m_MonitorGuids.find(index);

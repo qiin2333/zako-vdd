@@ -76,6 +76,7 @@ private:
 	UINT m_ExpectedWidth = 0;
 	UINT m_ExpectedHeight = 0;
 	DXGI_FORMAT m_ExpectedFormat = DXGI_FORMAT_UNKNOWN;
+	bool m_ExpectedIsHdr = false;
 	bool m_HasExpectedMode = false;
 	bool m_ModePending = false;
 	UINT m_LastPendingLogWidth = 0;

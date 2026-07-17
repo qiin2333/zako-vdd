@@ -269,7 +269,8 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 			(m_ExpectedWidth == 0 || srcDesc.Width == m_ExpectedWidth) &&
 			(m_ExpectedHeight == 0 || srcDesc.Height == m_ExpectedHeight);
 		const bool formatMatches =
-			m_ExpectedFormat == DXGI_FORMAT_UNKNOWN || srcDesc.Format == m_ExpectedFormat;
+			(m_ExpectedIsHdr && srcDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ||
+			(!m_ExpectedIsHdr && srcDesc.Format != DXGI_FORMAT_UNKNOWN);
 
 		if (dimensionsMatch && formatMatches)
 		{
@@ -460,6 +461,7 @@ void SharedFrameExporter::UpdateHdrMetadata(bool isHdr, float maxNits, float min
 		// only require the exact FP16 format for HDR transitions. Sunshine
 		// still validates the actual texture descriptor before attaching.
 		m_ExpectedFormat = m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
+		m_ExpectedIsHdr = m_PendingIsHdr;
 		m_ModePending = true;
 		m_LastPendingLogWidth = 0;
 		m_LastPendingLogHeight = 0;
@@ -492,6 +494,7 @@ void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
 		m_ExpectedWidth = 0;
 		m_ExpectedHeight = 0;
 		m_ExpectedFormat = DXGI_FORMAT_UNKNOWN;
+		m_ExpectedIsHdr = false;
 		m_HasExpectedMode = false;
 		m_ModePending = true;
 		m_LastPendingLogWidth = 0;
@@ -505,8 +508,32 @@ void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
 	// Do not assume one specific SDR source format before the first frame;
 	// HDR is the only format family that needs an exact transition guard.
 	m_ExpectedFormat = m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
+	m_ExpectedIsHdr = m_PendingIsHdr;
 	m_HasExpectedMode = true;
-	m_ModePending = true;
+
+	// An active mode commit is also delivered when the existing swap chain is
+	// reused without changing its actual mode. Do not unnecessarily close a
+	// ready channel in that case; a new processor has no cached textures and
+	// naturally remains pending until its first frame.
+	bool cachedChannelReady =
+		m_CachedWidth == width && m_CachedHeight == height &&
+		m_CachedFormat != DXGI_FORMAT_UNKNOWN;
+	if (cachedChannelReady)
+	{
+		for (const auto& texture : m_SharedTex)
+		{
+			if (!texture)
+			{
+				cachedChannelReady = false;
+				break;
+			}
+		}
+	}
+	const bool cachedFormatMatches =
+		m_ExpectedIsHdr ? m_CachedFormat == DXGI_FORMAT_R16G16B16A16_FLOAT :
+		                  m_CachedFormat != DXGI_FORMAT_UNKNOWN;
+	const bool modeWasAlreadyPending = m_ModePending;
+	m_ModePending = modeWasAlreadyPending || !cachedChannelReady || !cachedFormatMatches;
 	m_LastPendingLogWidth = 0;
 	m_LastPendingLogHeight = 0;
 	m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
@@ -527,6 +554,7 @@ void SharedFrameExporter::ClearExpectedMode()
 	m_ExpectedWidth = 0;
 	m_ExpectedHeight = 0;
 	m_ExpectedFormat = DXGI_FORMAT_UNKNOWN;
+	m_ExpectedIsHdr = false;
 	m_HasExpectedMode = false;
 	m_ModePending = true;
 	m_LastPendingLogWidth = 0;
@@ -551,7 +579,10 @@ bool SharedFrameExporter::IsReadyForExpectedMode() const
 		return false;
 	}
 
-	if (m_ExpectedFormat != DXGI_FORMAT_UNKNOWN && m_CachedFormat != m_ExpectedFormat)
+	const bool cachedFormatMatches =
+		m_ExpectedIsHdr ? m_CachedFormat == DXGI_FORMAT_R16G16B16A16_FLOAT :
+		                  m_CachedFormat != DXGI_FORMAT_UNKNOWN;
+	if (!cachedFormatMatches)
 	{
 		return false;
 	}

@@ -145,6 +145,12 @@ void IndirectDeviceContext::CommitModes(const IDARG_IN_COMMITMODES *pInArgs)
 		else
 		{
 			m_CommittedTargetModes.erase(path.MonitorObject);
+
+			auto procIt = m_ProcessingThreads.find(path.MonitorObject);
+			if (procIt != m_ProcessingThreads.end() && procIt->second)
+			{
+				procIt->second->ClearExpectedMode();
+			}
 		}
 	}
 }
@@ -178,6 +184,12 @@ void IndirectDeviceContext::CommitModes2(const IDARG_IN_COMMITMODES2 *pInArgs)
 		else
 		{
 			m_CommittedTargetModes.erase(path.MonitorObject);
+
+			auto procIt = m_ProcessingThreads.find(path.MonitorObject);
+			if (procIt != m_ProcessingThreads.end() && procIt->second)
+			{
+				procIt->second->ClearExpectedMode();
+			}
 		}
 	}
 }

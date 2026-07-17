@@ -262,6 +262,34 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 		return;
 	}
 
+	bool modeBecameReady = false;
+	if (m_ModePending && m_HasExpectedMode)
+	{
+		const bool dimensionsMatch =
+			(m_ExpectedWidth == 0 || srcDesc.Width == m_ExpectedWidth) &&
+			(m_ExpectedHeight == 0 || srcDesc.Height == m_ExpectedHeight);
+		const bool formatMatches =
+			m_ExpectedFormat == DXGI_FORMAT_UNKNOWN || srcDesc.Format == m_ExpectedFormat;
+
+		if (dimensionsMatch && formatMatches)
+		{
+			modeBecameReady = true;
+		}
+		else if (m_LastPendingLogWidth != srcDesc.Width ||
+		         m_LastPendingLogHeight != srcDesc.Height ||
+		         m_LastPendingLogFormat != srcDesc.Format)
+		{
+			m_LastPendingLogWidth = srcDesc.Width;
+			m_LastPendingLogHeight = srcDesc.Height;
+			m_LastPendingLogFormat = srcDesc.Format;
+			VDD_LOG_DEBUG_STREAM("[VddExport] Ignoring non-matching frame while mode is pending monitor="
+			                     << m_MonitorIndex << " actual=" << srcDesc.Width << "x" << srcDesc.Height
+			                     << " fmt=" << srcDesc.Format
+			                     << " expected=" << m_ExpectedWidth << "x" << m_ExpectedHeight
+			                     << " fmt=" << m_ExpectedFormat);
+		}
+	}
+
 	// Best-effort acquire with 0 timeout. First try the normal empty-slot
 	// key (0) across the ring. If all slots are already published but unread
 	// (key 1), reclaim one and overwrite it. That keeps WGC-like "latest frame
@@ -355,6 +383,19 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 		LARGE_INTEGER qpc{};
 		QueryPerformanceCounter(&qpc);
 		MetadataWriteScope metadataWrite(*this);
+		if (modeBecameReady)
+		{
+			// Publish the deferred mode/HDR state together with the first
+			// frame that made the channel ready. This also covers HDR
+			// luminance updates received while the mode was pending.
+			m_MetaView->Width = srcDesc.Width;
+			m_MetaView->Height = srcDesc.Height;
+			m_MetaView->DxgiFormat = srcDesc.Format;
+			m_MetaView->IsHdr = m_PendingIsHdr ? 1u : 0u;
+			m_MetaView->MaxNits = m_PendingMaxNits;
+			m_MetaView->MinNits = m_PendingMinNits;
+			m_MetaView->MaxFALL = m_PendingMaxFALL;
+		}
 		m_MetaView->FrameCounter++;
 		m_MetaView->LastPresentQpc = presentDisplayQpc ? presentDisplayQpc : static_cast<UINT64>(qpc.QuadPart);
 		m_MetaView->LastPublishQpc = static_cast<UINT64>(qpc.QuadPart);
@@ -377,6 +418,18 @@ void SharedFrameExporter::PushFrame(IDXGIResource* acquired,
 		TeardownTexture();
 		return;
 	}
+	if (modeBecameReady)
+	{
+		// The channel becomes ready only after the matching frame was copied
+		// and successfully published to the keyed-mutex ring.
+		m_ModePending = false;
+		m_LastPendingLogWidth = 0;
+		m_LastPendingLogHeight = 0;
+		m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
+		VDD_LOG_INFO_STREAM("[VddExport] Shared frame channel ready monitor=" << m_MonitorIndex
+		                    << " " << srcDesc.Width << "x" << srcDesc.Height
+		                    << " fmt=" << srcDesc.Format);
+	}
 	m_NextPublishSlot = (selectedSlot + 1) % SharedFrameSlotCount;
 
 	if (m_FrameReadyEvent)
@@ -389,11 +442,34 @@ void SharedFrameExporter::UpdateHdrMetadata(bool isHdr, float maxNits, float min
 {
 	std::lock_guard<std::mutex> lock(m_ExportMutex);
 
+	const bool formatChanged = m_PendingIsHdr != isHdr;
 	m_PendingIsHdr = isHdr;
 	m_PendingMaxNits = maxNits;
 	m_PendingMinNits = minNits;
 	m_PendingMaxFALL = maxFALL;
-	if (m_MetaView)
+
+	if (formatChanged)
+	{
+		if (!m_HasExpectedMode)
+		{
+			m_ExpectedWidth = m_CachedWidth;
+			m_ExpectedHeight = m_CachedHeight;
+			m_HasExpectedMode = true;
+		}
+		// The driver can receive more than one valid SDR DXGI format, so
+		// only require the exact FP16 format for HDR transitions. Sunshine
+		// still validates the actual texture descriptor before attaching.
+		m_ExpectedFormat = m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
+		m_ModePending = true;
+		m_LastPendingLogWidth = 0;
+		m_LastPendingLogHeight = 0;
+		m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
+	}
+
+	// Defer the metadata update while a new mode/format is pending. The next
+	// PushFrame() publishes dimensions, format, and HDR fields together with
+	// the matching shared textures.
+	if (m_MetaView && !m_ModePending)
 	{
 		MetadataWriteScope metadataWrite(*this);
 		m_MetaView->IsHdr = isHdr ? 1u : 0u;
@@ -409,33 +485,85 @@ void SharedFrameExporter::UpdateHdrMetadata(bool isHdr, float maxNits, float min
 
 void SharedFrameExporter::PublishModeMetadata(UINT width, UINT height)
 {
-	if (width == 0 || height == 0)
-	{
-		return;
-	}
-
 	std::lock_guard<std::mutex> lock(m_ExportMutex);
 
-	D3D11_TEXTURE2D_DESC desc = {};
-	desc.Width = width;
-	desc.Height = height;
-	desc.Format = GuessMetadataFormat();
-
-	if (!EnsureEventAndMetadata(desc))
+	if (width == 0 || height == 0)
 	{
-		std::stringstream ss;
-		ss << "[VddExport] Failed to publish mode metadata for monitor=" << m_MonitorIndex
-		   << " " << width << "x" << height;
-		VDD_LOG_ERROR(ss.str().c_str());
+		m_ExpectedWidth = 0;
+		m_ExpectedHeight = 0;
+		m_ExpectedFormat = DXGI_FORMAT_UNKNOWN;
+		m_HasExpectedMode = false;
+		m_ModePending = true;
+		m_LastPendingLogWidth = 0;
+		m_LastPendingLogHeight = 0;
+		m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
 		return;
 	}
 
-	std::stringstream ss;
-	ss << "[VddExport] Published mode metadata monitor=" << m_MonitorIndex
-	   << " " << width << "x" << height
-	   << " fmt=" << desc.Format
-	   << " hdr=" << (m_PendingIsHdr ? 1 : 0);
-	VDD_LOG_INFO(ss.str().c_str());
+	m_ExpectedWidth = width;
+	m_ExpectedHeight = height;
+	// Do not assume one specific SDR source format before the first frame;
+	// HDR is the only format family that needs an exact transition guard.
+	m_ExpectedFormat = m_PendingIsHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
+	m_HasExpectedMode = true;
+	m_ModePending = true;
+	m_LastPendingLogWidth = 0;
+	m_LastPendingLogHeight = 0;
+	m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
+
+	// CommitModes can arrive before the first frame of a replacement swap
+	// chain. Do not publish requested dimensions or format into a channel
+	// whose textures may still belong to the previous mode. PushFrame()
+	// publishes all metadata after the matching frame arrives.
+	VDD_LOG_INFO_STREAM("[VddExport] Armed expected mode monitor=" << m_MonitorIndex
+	                    << " " << width << "x" << height
+	                    << " fmt=" << m_ExpectedFormat
+	                    << "; waiting for the first matching frame");
+}
+
+void SharedFrameExporter::ClearExpectedMode()
+{
+	std::lock_guard<std::mutex> lock(m_ExportMutex);
+	m_ExpectedWidth = 0;
+	m_ExpectedHeight = 0;
+	m_ExpectedFormat = DXGI_FORMAT_UNKNOWN;
+	m_HasExpectedMode = false;
+	m_ModePending = true;
+	m_LastPendingLogWidth = 0;
+	m_LastPendingLogHeight = 0;
+	m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
+}
+
+bool SharedFrameExporter::IsReadyForExpectedMode() const
+{
+	if (m_ModePending)
+	{
+		return false;
+	}
+
+	if (!m_HasExpectedMode)
+	{
+		return true;
+	}
+
+	if (m_CachedWidth != m_ExpectedWidth || m_CachedHeight != m_ExpectedHeight)
+	{
+		return false;
+	}
+
+	if (m_ExpectedFormat != DXGI_FORMAT_UNKNOWN && m_CachedFormat != m_ExpectedFormat)
+	{
+		return false;
+	}
+
+	for (const auto& texture : m_SharedTex)
+	{
+		if (!texture)
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 NTSTATUS SharedFrameExporter::OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
@@ -466,6 +594,10 @@ NTSTATUS SharedFrameExporter::OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQU
 	}
 
 	std::lock_guard<std::mutex> lock(m_ExportMutex);
+	if (!IsReadyForExpectedMode())
+	{
+		return STATUS_DEVICE_NOT_READY;
+	}
 	if (!m_MetaMapping || !m_MetaView || !m_FrameReadyEvent)
 	{
 		return STATUS_DEVICE_NOT_READY;

@@ -105,6 +105,14 @@ void SwapChainProcessor::PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_IN
 	m_Exporter->PublishModeMetadata(width, height);
 }
 
+void SwapChainProcessor::ClearExpectedMode()
+{
+	if (m_Exporter)
+	{
+		m_Exporter->ClearExpectedMode();
+	}
+}
+
 void SwapChainProcessor::UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL)
 {
 	if (!m_Exporter)

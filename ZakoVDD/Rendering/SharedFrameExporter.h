@@ -27,6 +27,7 @@ public:
 	               UINT dirtyRectCount = 0);
 	void UpdateHdrMetadata(bool isHdr, float maxNits, float minNits, float maxFALL);
 	void PublishModeMetadata(UINT width, UINT height);
+	void ClearExpectedMode();
 	NTSTATUS OpenFrameChannel(const VDD_FRAME_CHANNEL_OPEN_REQUEST& request,
 	                          HANDLE targetProcess,
 	                          VDD_FRAME_CHANNEL_OPEN_RESPONSE& response);
@@ -35,6 +36,7 @@ private:
 	DXGI_FORMAT GuessMetadataFormat() const;
 	bool EnsureSharedTexture(const D3D11_TEXTURE2D_DESC& srcDesc);
 	bool EnsureEventAndMetadata(const D3D11_TEXTURE2D_DESC& srcDesc);
+	bool IsReadyForExpectedMode() const;
 	void BeginMetadataWrite();
 	void EndMetadataWrite();
 	void BumpChannelGeneration();
@@ -67,6 +69,18 @@ private:
 	UINT m_CachedWidth = 0;
 	UINT m_CachedHeight = 0;
 	DXGI_FORMAT m_CachedFormat = DXGI_FORMAT_UNKNOWN;
+	// A committed display mode is only a request. The shared texture becomes
+	// authoritative after the first frame from the replacement swap chain
+	// arrives. Keep the expected mode and readiness state separate so
+	// OpenFrameChannel() cannot expose a previous mode during that transition.
+	UINT m_ExpectedWidth = 0;
+	UINT m_ExpectedHeight = 0;
+	DXGI_FORMAT m_ExpectedFormat = DXGI_FORMAT_UNKNOWN;
+	bool m_HasExpectedMode = false;
+	bool m_ModePending = false;
+	UINT m_LastPendingLogWidth = 0;
+	UINT m_LastPendingLogHeight = 0;
+	DXGI_FORMAT m_LastPendingLogFormat = DXGI_FORMAT_UNKNOWN;
 	// Metadata writes are serialized by m_ExportMutex and must be wrapped in
 	// MetadataWriteScope so consumers never accept a partially updated snapshot.
 	UINT16 m_ChannelGeneration = 1;

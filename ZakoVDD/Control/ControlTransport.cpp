@@ -110,6 +110,13 @@ static NTSTATUS HandleOpenFrameChannel(WDFDEVICE Device,
 	{
 		return STATUS_INVALID_PARAMETER;
 	}
+	const ULONG requestorProcessId = WdfRequestGetRequestorProcessId(Request);
+	if (requestorProcessId == 0 || request.TargetProcessId != requestorProcessId)
+	{
+		VDD_LOG_WARNING_STREAM("[IOCTL] Rejected frame channel target pid="
+		                       << request.TargetProcessId << " for requestor pid=" << requestorProcessId);
+		return STATUS_ACCESS_DENIED;
+	}
 
 	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	if (!pContext || !pContext->pContext)
@@ -321,8 +328,8 @@ DWORD WINAPI NamedPipeServer(LPVOID lpParam)
 	{
 		hPipe = CreateNamedPipeW(
 			PIPE_NAME,
-			PIPE_ACCESS_DUPLEX,
-			PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+			PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+			PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
 			PIPE_UNLIMITED_INSTANCES,
 			512, 512,
 			0,
@@ -385,7 +392,7 @@ void StopNamedPipeServer()
 			0,
 			NULL,
 			OPEN_EXISTING,
-			0,
+			SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
 			NULL);
 
 		if (hPipe != INVALID_HANDLE_VALUE)

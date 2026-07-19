@@ -22,6 +22,12 @@ void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT V
 void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm)
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+	auto existingMonitor = m_Monitors.find(index);
+	if (existingMonitor != m_Monitors.end() && existingMonitor->second != nullptr)
+	{
+		VDD_LOG_INFO_STREAM("Monitor " << (index + 1) << " already exists; treating duplicate create as success");
+		return;
+	}
 
 	wstring logMessage = L"Creating Monitor: " + to_wstring(index + 1);
 	string narrowLogMessage = WStringToString(logMessage);
@@ -125,15 +131,6 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		pMonitorEdid = &s_KnownMonitorEdid;
 	}
 
-	if (pClientGuid != nullptr)
-	{
-		m_MonitorGuids[index] = *pClientGuid;
-	}
-	else
-	{
-		m_MonitorGuids.erase(index);
-	}
-
 	IDDCX_MONITOR_INFO MonitorInfo = {};
 	MonitorInfo.Size = sizeof(MonitorInfo);
 	MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
@@ -178,22 +175,6 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			return;
 		}
 
-		m_Monitors[index] = newMonitor;
-
-		{
-			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
-			MonitorHdrSettings hdrSettings;
-			hdrSettings.maxNits = maxNits;
-			hdrSettings.minNits = minNits;
-			hdrSettings.maxFALL = maxFALL;
-			s_MonitorHdrSettingsMap[newMonitor] = hdrSettings;
-
-			VDD_LOG_DEBUG_STREAM("Stored HDR luminance settings for monitor " << (index + 1)
-			                     << " - MaxNits: " << maxNits
-			                     << ", MinNits: " << minNits
-			                     << ", MaxFALL: " << maxFALL);
-		}
-
 		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(MonitorCreateOut.MonitorObject);
 		pContext->pContext = this;
 
@@ -201,11 +182,31 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		Status = IddCxMonitorArrival(newMonitor, &ArrivalOut);
 		if (NT_SUCCESS(Status))
 		{
+			m_Monitors[index] = newMonitor;
+			if (pClientGuid != nullptr)
+			{
+				m_MonitorGuids[index] = *pClientGuid;
+			}
+			else
+			{
+				m_MonitorGuids.erase(index);
+			}
+
+			{
+				lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
+				MonitorHdrSettings hdrSettings;
+				hdrSettings.maxNits = maxNits;
+				hdrSettings.minNits = minNits;
+				hdrSettings.maxFALL = maxFALL;
+				s_MonitorHdrSettingsMap[newMonitor] = hdrSettings;
+			}
+
 			VDD_LOG_DEBUG("Monitor arrival successfully reported.");
 		}
 		else
 		{
 			VDD_LOG_ERROR_STREAM("Failed to report monitor arrival. Status: " << Status);
+			WdfObjectDelete(newMonitor);
 		}
 	}
 	else
@@ -366,15 +367,6 @@ int IndirectDeviceContext::RefreshMonitorModes()
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
 		localModes = monitorModes;
-		s_KnownMonitorModes2.clear();
-		for (size_t i = 0; i < localModes.size(); ++i)
-		{
-			s_KnownMonitorModes2.push_back(dispinfo(
-				get<0>(localModes[i]),
-				get<1>(localModes[i]),
-				get<2>(localModes[i]),
-				get<3>(localModes[i])));
-		}
 	}
 
 	if (localModes.empty())

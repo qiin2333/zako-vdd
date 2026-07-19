@@ -37,7 +37,7 @@ HKR,, "UpperFilters",  %REG_MULTI_SZ%, "IndirectKmd"
 HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "ZakoVDDGroup"
 
 [MyDevice_DeviceSecurity]
-HKR,, "Security", %REG_SZ%, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+HKR,, "Security", %REG_SZ%, "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 
 [MyDevice_Install.NT.Services]
 AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall

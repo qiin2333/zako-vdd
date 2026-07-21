@@ -3,6 +3,7 @@
 #include "..\Logging\Logger.h"
 
 #include <cstring>
+#include <limits>
 #include <sddl.h>
 #include <sstream>
 #include <string>
@@ -12,39 +13,132 @@ namespace Microsoft
 namespace IndirectDisp
 {
 
-#pragma pack(push, 4)
-struct CursorSharedMetadata
-{
-	UINT32 Magic;
-	UINT32 Version;
-	UINT32 IsVisible;
-	INT32 PositionX;
-	INT32 PositionY;
-	UINT32 PositionId;
-	UINT32 ShapeId;
-	UINT32 ShapeType;
-	UINT32 Width;
-	UINT32 Height;
-	UINT32 Pitch;
-	INT32 XHot;
-	INT32 YHot;
-	UINT32 SdrWhiteLevelX1000;
-	UINT32 ShapeBufferSize;
-	UINT32 Reserved0;
-	UINT64 LastUpdateQpc;
-};
-#pragma pack(pop)
-
 namespace
 {
 
-static constexpr UINT32 ZAKO_CURSOR_MAGIC = 0x5A564355u; // 'ZVCU'
-static constexpr UINT32 ZAKO_CURSOR_VERSION = 1u;
-static constexpr UINT32 ZAKO_CURSOR_MAX_WIDTH = 256u;
-static constexpr UINT32 ZAKO_CURSOR_MAX_HEIGHT = 256u;
-static constexpr UINT32 ZAKO_CURSOR_MAX_BYTES = ZAKO_CURSOR_MAX_WIDTH * ZAKO_CURSOR_MAX_HEIGHT * 4u;
+static constexpr UINT32 DEFAULT_SDR_WHITE_LEVEL_NITS = 80u;
 
-static_assert(sizeof(CursorSharedMetadata) % 4 == 0, "CursorSharedMetadata must be 4-byte aligned");
+enum class CursorQueryApi
+{
+	Query1,
+	Query2,
+	Query3
+};
+
+struct CursorQueryResult
+{
+	BOOL IsCursorVisible = FALSE;
+	INT X = 0;
+	INT Y = 0;
+	BOOL IsCursorShapeUpdated = FALSE;
+	IDDCX_CURSOR_SHAPE_INFO CursorShapeInfo = {};
+	BOOL PositionValid = FALSE;
+	UINT PositionId = 0;
+	UINT SdrWhiteLevelNits = DEFAULT_SDR_WHITE_LEVEL_NITS;
+};
+
+template <typename T>
+void CopyCommonCursorResult(const T& source, CursorQueryResult& destination)
+{
+	destination.IsCursorVisible = source.IsCursorVisible;
+	destination.X = source.X;
+	destination.Y = source.Y;
+	destination.IsCursorShapeUpdated = source.IsCursorShapeUpdated;
+	destination.CursorShapeInfo = source.CursorShapeInfo;
+}
+
+CursorQueryApi SelectCursorQueryApi()
+{
+	if (IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorQueryHardwareCursor3))
+	{
+		return CursorQueryApi::Query3;
+	}
+	if (IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorQueryHardwareCursor2))
+	{
+		return CursorQueryApi::Query2;
+	}
+	return CursorQueryApi::Query1;
+}
+
+const char* CursorQueryApiName(CursorQueryApi api)
+{
+	switch (api)
+	{
+	case CursorQueryApi::Query3:
+		return "IddCxMonitorQueryHardwareCursor3";
+	case CursorQueryApi::Query2:
+		return "IddCxMonitorQueryHardwareCursor2";
+	default:
+		return "IddCxMonitorQueryHardwareCursor";
+	}
+}
+
+bool QueryHardwareCursor(CursorQueryApi api,
+	                     IDDCX_MONITOR monitor,
+	                     const IDARG_IN_QUERY_HWCURSOR& inArgs,
+	                     INT lastX,
+	                     INT lastY,
+	                     UINT lastPositionId,
+	                     CursorQueryResult& result)
+{
+	switch (api)
+	{
+	case CursorQueryApi::Query3:
+	{
+		IDARG_OUT_QUERY_HWCURSOR3 outArgs = {};
+		const HRESULT status = IddCxMonitorQueryHardwareCursor3(monitor, &inArgs, &outArgs);
+		if (FAILED(status))
+		{
+			return false;
+		}
+		CopyCommonCursorResult(outArgs, result);
+		result.PositionValid = outArgs.PositionValid;
+		result.PositionId = outArgs.PositionId;
+		result.SdrWhiteLevelNits = outArgs.SdrWhiteLevel;
+		return true;
+	}
+	case CursorQueryApi::Query2:
+	{
+		IDARG_OUT_QUERY_HWCURSOR2 outArgs = {};
+		const NTSTATUS status = IddCxMonitorQueryHardwareCursor2(monitor, &inArgs, &outArgs);
+		if (!NT_SUCCESS(status))
+		{
+			return false;
+		}
+		CopyCommonCursorResult(outArgs, result);
+		result.PositionValid = outArgs.PositionValid;
+		result.PositionId = outArgs.PositionId;
+		return true;
+	}
+	default:
+	{
+		IDARG_OUT_QUERY_HWCURSOR outArgs = {};
+		const NTSTATUS status = IddCxMonitorQueryHardwareCursor(monitor, &inArgs, &outArgs);
+		if (!NT_SUCCESS(status))
+		{
+			return false;
+		}
+		CopyCommonCursorResult(outArgs, result);
+		result.PositionValid = outArgs.IsCursorVisible;
+		result.PositionId = lastPositionId;
+		if (result.PositionValid && (outArgs.X != lastX || outArgs.Y != lastY))
+		{
+			result.PositionId++;
+		}
+		return true;
+	}
+	}
+}
+
+UINT32 ScaleSdrWhiteLevel(UINT sdrWhiteLevelNits)
+{
+	constexpr UINT32 scale = 1000u;
+	if (sdrWhiteLevelNits > std::numeric_limits<UINT32>::max() / scale)
+	{
+		return std::numeric_limits<UINT32>::max();
+	}
+	return static_cast<UINT32>(sdrWhiteLevelNits) * scale;
+}
 
 const wchar_t* CursorMapName(unsigned int monitorIndex)
 {
@@ -142,10 +236,12 @@ DWORD WINAPI CursorExporter::ThreadProc(LPVOID arg)
 
 void CursorExporter::Run()
 {
-	std::vector<BYTE> shapeBuffer(ZAKO_CURSOR_MAX_BYTES);
+	std::vector<BYTE> shapeBuffer(VDD_CURSOR_MAX_BYTES);
 	UINT lastShapeId = 0;
 	UINT lastPositionId = 0;
-	UINT publishedPositionId = 0;
+	const CursorQueryApi queryApi = SelectCursorQueryApi();
+
+	VDD_LOG_INFO_STREAM("[VddCursor] Cursor query API: " << CursorQueryApiName(queryApi));
 
 	HANDLE waits[2] = {m_hCursorDataAvailable, m_hTerminateEvent};
 
@@ -167,27 +263,33 @@ void CursorExporter::Run()
 		inArgs.ShapeBufferSizeInBytes = static_cast<UINT>(shapeBuffer.size());
 		inArgs.pShapeBuffer = shapeBuffer.data();
 
-		IDARG_OUT_QUERY_HWCURSOR3 outArgs = {};
-		const NTSTATUS status = IddCxMonitorQueryHardwareCursor3(m_Monitor, &inArgs, &outArgs);
-		if (!NT_SUCCESS(status))
+		CursorQueryResult queryResult = {};
+		if (!QueryHardwareCursor(queryApi,
+		                         m_Monitor,
+		                         inArgs,
+		                         m_LastX,
+		                         m_LastY,
+		                         lastPositionId,
+		                         queryResult))
 		{
 			continue;
 		}
 
-		const bool shapeUpdated = outArgs.IsCursorShapeUpdated != FALSE;
+		const bool shapeUpdated = queryResult.IsCursorShapeUpdated != FALSE;
 		if (shapeUpdated)
 		{
-			lastShapeId = outArgs.CursorShapeInfo.ShapeId;
-			m_CachedShape.ShapeId = outArgs.CursorShapeInfo.ShapeId;
-			m_CachedShape.Type = static_cast<UINT32>(outArgs.CursorShapeInfo.CursorType);
-			m_CachedShape.Width = outArgs.CursorShapeInfo.Width;
-			m_CachedShape.Height = outArgs.CursorShapeInfo.Height;
-			m_CachedShape.Pitch = outArgs.CursorShapeInfo.Pitch;
-			m_CachedShape.XHot = static_cast<INT32>(outArgs.CursorShapeInfo.XHot);
-			m_CachedShape.YHot = static_cast<INT32>(outArgs.CursorShapeInfo.YHot);
+			lastShapeId = queryResult.CursorShapeInfo.ShapeId;
+			m_CachedShape.ShapeId = queryResult.CursorShapeInfo.ShapeId;
+			m_CachedShape.Type = static_cast<UINT32>(queryResult.CursorShapeInfo.CursorType);
+			m_CachedShape.Width = queryResult.CursorShapeInfo.Width;
+			m_CachedShape.Height = queryResult.CursorShapeInfo.Height;
+			m_CachedShape.Pitch = queryResult.CursorShapeInfo.Pitch;
+			m_CachedShape.XHot = static_cast<INT32>(queryResult.CursorShapeInfo.XHot);
+			m_CachedShape.YHot = static_cast<INT32>(queryResult.CursorShapeInfo.YHot);
 
-			const UINT32 needed = static_cast<UINT32>(outArgs.CursorShapeInfo.Pitch) * outArgs.CursorShapeInfo.Height;
-			m_CachedShape.BufferSize = needed <= ZAKO_CURSOR_MAX_BYTES ? needed : 0;
+			const UINT64 needed = static_cast<UINT64>(queryResult.CursorShapeInfo.Pitch) *
+			                      static_cast<UINT64>(queryResult.CursorShapeInfo.Height);
+			m_CachedShape.BufferSize = needed <= VDD_CURSOR_MAX_BYTES ? static_cast<UINT32>(needed) : 0;
 			if (m_CachedShape.BufferSize > 0)
 			{
 				m_CachedShape.Buffer.assign(shapeBuffer.begin(), shapeBuffer.begin() + m_CachedShape.BufferSize);
@@ -195,24 +297,29 @@ void CursorExporter::Run()
 			else
 			{
 				m_CachedShape.Buffer.clear();
+				if (needed > VDD_CURSOR_MAX_BYTES)
+				{
+					VDD_LOG_WARNING_STREAM("[VddCursor] Cursor shape exceeds shared buffer: " << needed
+					                       << " > " << VDD_CURSOR_MAX_BYTES);
+				}
 			}
 		}
 
 		// IddCx reports the desktop-relative top-left of the cursor image.
 		// The hot spot has already been applied; do not subtract it again.
 		bool positionUpdated = false;
-		if (outArgs.PositionValid)
+		if (queryResult.PositionValid)
 		{
-			if (outArgs.PositionId != lastPositionId)
+			if (queryResult.PositionId != lastPositionId)
 			{
-				lastPositionId = outArgs.PositionId;
+				lastPositionId = queryResult.PositionId;
 				positionUpdated = true;
 			}
-			m_LastX = outArgs.X;
-			m_LastY = outArgs.Y;
+			m_LastX = queryResult.X;
+			m_LastY = queryResult.Y;
 		}
 
-		const UINT32 visibility = outArgs.IsCursorVisible ? 1u : 0u;
+		const UINT32 visibility = queryResult.IsCursorVisible ? 1u : 0u;
 		const bool visibilityChanged = m_LastVisibility != visibility;
 		if (!shapeUpdated && !positionUpdated && !visibilityChanged)
 		{
@@ -225,53 +332,57 @@ void CursorExporter::Run()
 			continue;
 		}
 
-		CursorSharedMetadata snap = {};
-		snap.Magic = ZAKO_CURSOR_MAGIC;
-		snap.Version = ZAKO_CURSOR_VERSION;
-		snap.IsVisible = visibility;
-		snap.SdrWhiteLevelX1000 = static_cast<UINT32>(outArgs.SdrWhiteLevel);
-		snap.ShapeId = m_CachedShape.ShapeId;
-		snap.ShapeType = m_CachedShape.Type;
-		snap.Width = m_CachedShape.Width;
-		snap.Height = m_CachedShape.Height;
-		snap.Pitch = m_CachedShape.Pitch;
-		snap.XHot = m_CachedShape.XHot;
-		snap.YHot = m_CachedShape.YHot;
-		snap.ShapeBufferSize = m_CachedShape.BufferSize;
-		snap.PositionX = m_LastX;
-		snap.PositionY = m_LastY;
-		snap.PositionId = ++publishedPositionId;
-
 		LARGE_INTEGER qpc = {};
 		QueryPerformanceCounter(&qpc);
-		snap.LastUpdateQpc = static_cast<UINT64>(qpc.QuadPart);
 
-		CursorSharedMetadata* dst = m_MetaView;
+		VDD_CURSOR_SHARED_METADATA* dst = m_MetaView;
+		volatile LONG* sequence = reinterpret_cast<volatile LONG*>(&dst->PublicationSequence);
+		InterlockedIncrement(sequence); // Odd: a snapshot update is in progress.
+		MemoryBarrier();
+
 		if (shapeUpdated && m_CachedShape.BufferSize > 0)
 		{
 			BYTE* shapeDst = reinterpret_cast<BYTE*>(dst + 1);
 			std::memcpy(shapeDst, m_CachedShape.Buffer.data(), m_CachedShape.BufferSize);
 		}
 
-		// Publish the payload before Magic so consumers can use Magic as a
-		// lightweight publication marker after waking on the ready event.
-		dst->Version = snap.Version;
-		dst->IsVisible = snap.IsVisible;
-		dst->PositionX = snap.PositionX;
-		dst->PositionY = snap.PositionY;
-		dst->PositionId = snap.PositionId;
-		dst->ShapeId = snap.ShapeId;
-		dst->ShapeType = snap.ShapeType;
-		dst->Width = snap.Width;
-		dst->Height = snap.Height;
-		dst->Pitch = snap.Pitch;
-		dst->XHot = snap.XHot;
-		dst->YHot = snap.YHot;
-		dst->SdrWhiteLevelX1000 = snap.SdrWhiteLevelX1000;
-		dst->ShapeBufferSize = snap.ShapeBufferSize;
-		dst->Reserved0 = 0;
-		dst->LastUpdateQpc = snap.LastUpdateQpc;
-		dst->Magic = snap.Magic;
+		dst->Version = VDD_CURSOR_VERSION;
+		dst->IsVisible = visibility;
+		if (queryResult.PositionValid)
+		{
+			dst->PositionX = m_LastX;
+			dst->PositionY = m_LastY;
+		}
+		dst->SdrWhiteLevelX1000 = ScaleSdrWhiteLevel(queryResult.SdrWhiteLevelNits);
+		dst->LastUpdateQpc = static_cast<UINT64>(qpc.QuadPart);
+
+		if (shapeUpdated)
+		{
+			dst->ShapeType = m_CachedShape.Type;
+			dst->Width = m_CachedShape.Width;
+			dst->Height = m_CachedShape.Height;
+			dst->Pitch = m_CachedShape.Pitch;
+			dst->XHot = m_CachedShape.XHot;
+			dst->YHot = m_CachedShape.YHot;
+			dst->ShapeBufferSize = m_CachedShape.BufferSize;
+		}
+
+		MemoryBarrier();
+		if (shapeUpdated)
+		{
+			InterlockedExchange(reinterpret_cast<volatile LONG*>(&dst->ShapeId),
+			                    static_cast<LONG>(m_CachedShape.ShapeId));
+		}
+		if (positionUpdated)
+		{
+			InterlockedExchange(reinterpret_cast<volatile LONG*>(&dst->PositionId),
+			                    static_cast<LONG>(lastPositionId));
+		}
+
+		InterlockedExchange(reinterpret_cast<volatile LONG*>(&dst->Magic),
+		                    static_cast<LONG>(VDD_CURSOR_MAGIC));
+		MemoryBarrier();
+		InterlockedIncrement(sequence); // Even: the snapshot is stable.
 
 		if (m_hCursorReadyEvent)
 		{
@@ -287,7 +398,7 @@ bool CursorExporter::EnsureSharedObjects()
 	SECURITY_ATTRIBUTES sa = {};
 	PSECURITY_DESCRIPTOR sd = nullptr;
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-	        L"D:(A;;GA;;;BA)(A;;GA;;;IU)", SDDL_REVISION_1, &sd, nullptr))
+	        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;IU)", SDDL_REVISION_1, &sd, nullptr))
 	{
 		VDD_LOG_ERROR_STREAM("[VddCursor] Failed to build SDDL: " << GetLastError());
 		return false;
@@ -297,7 +408,7 @@ bool CursorExporter::EnsureSharedObjects()
 	sa.lpSecurityDescriptor = sd;
 	sa.bInheritHandle = FALSE;
 
-	const SIZE_T mapSize = sizeof(CursorSharedMetadata) + ZAKO_CURSOR_MAX_BYTES;
+	const SIZE_T mapSize = sizeof(VDD_CURSOR_SHARED_METADATA) + VDD_CURSOR_MAX_BYTES;
 	m_MetaMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0,
 	                                   static_cast<DWORD>(mapSize), CursorMapName(m_MonitorIndex));
 	if (!m_MetaMapping)
@@ -307,7 +418,7 @@ bool CursorExporter::EnsureSharedObjects()
 		return false;
 	}
 
-	m_MetaView = static_cast<CursorSharedMetadata*>(MapViewOfFile(m_MetaMapping, FILE_MAP_WRITE, 0, 0, mapSize));
+	m_MetaView = static_cast<VDD_CURSOR_SHARED_METADATA*>(MapViewOfFile(m_MetaMapping, FILE_MAP_WRITE, 0, 0, mapSize));
 	if (!m_MetaView)
 	{
 		VDD_LOG_ERROR_STREAM("[VddCursor] MapViewOfFile failed: " << GetLastError());
@@ -315,8 +426,7 @@ bool CursorExporter::EnsureSharedObjects()
 		return false;
 	}
 	ZeroMemory(m_MetaView, mapSize);
-	m_MetaView->Magic = ZAKO_CURSOR_MAGIC;
-	m_MetaView->Version = ZAKO_CURSOR_VERSION;
+	m_MetaView->Version = VDD_CURSOR_VERSION;
 
 	m_hCursorReadyEvent = CreateEventW(&sa, FALSE, FALSE, CursorReadyEventName(m_MonitorIndex));
 	if (!m_hCursorReadyEvent)

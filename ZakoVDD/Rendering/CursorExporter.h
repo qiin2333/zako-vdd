@@ -1,6 +1,7 @@
 #pragma once
 
 #include "..\Driver.h"
+#include "vdd_cursor_shared.h"
 
 #include <vector>
 
@@ -8,8 +9,6 @@ namespace Microsoft
 {
 namespace IndirectDisp
 {
-
-struct CursorSharedMetadata;
 
 class CursorExporter
 {
@@ -46,7 +45,7 @@ private:
 	HANDLE m_hTerminateEvent = nullptr;
 	HANDLE m_hThread = nullptr;
 	HANDLE m_MetaMapping = nullptr;
-	CursorSharedMetadata* m_MetaView = nullptr;
+	VDD_CURSOR_SHARED_METADATA* m_MetaView = nullptr;
 	HANDLE m_hCursorReadyEvent = nullptr;
 
 	INT32 m_LastX = 0;

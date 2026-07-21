@@ -243,6 +243,7 @@ ModelManifest.xml
 .fake/
 
 # Local tooling/debug artifacts
+.analysis/
 nul
 tools/nul
 tools/dist/

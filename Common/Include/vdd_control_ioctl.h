@@ -1,49 +1,135 @@
-// Shared IOCTL contract between the ZakoVDD UMDF driver and external callers
-// (currently Sunshine). This header MUST stay byte-compatible across both
-// projects; if you change anything here, mirror the change to the consumer
-// (e.g. Sunshine src/display_device/vdd_control_ioctl.h).
-//
-// Why IOCTL instead of the legacy named pipe (\\.\pipe\ZakoVDDPipe):
-//   The pipe server lives inside the WUDFHost.exe process that hosts the
-//   indirect display driver. When the last IDDCX monitor is destroyed, the
-//   reflector eventually recycles WUDFHost.exe and the pipe vanishes,
-//   leaving subsequent connect attempts to time out for ~6s before a costly
-//   DevManView disable_enable kicks the device back to life. Using a control
-//   device interface lets CreateFile() PnP-wake the driver transparently and
-//   removes the race entirely.
+/**
+ * @file vdd_control_ioctl.h
+ * @brief Authoritative IOCTL contract between Sunshine and the ZakoVDD driver.
+ *
+ * This header MUST stay byte-for-byte identical across the Sunshine and
+ * Virtual-Display-Driver repositories. The canonical copy paths are:
+ *   Sunshine: `src/display_device/vdd_control_ioctl.h`
+ *   VDD: `Common/Include/vdd_control_ioctl.h`
+ * The copies are intentionally duplicated to keep each repo self-contained.
+ *
+ * Transport summary:
+ *   The driver exposes a custom WDF device interface
+ *   (`GUID_DEVINTERFACE_ZAKO_VDD_CONTROL`). Opening this interface with
+ *   `CreateFileW` PnP-wakes the IddCx driver back into D0, eliminating the
+ *   race that the old named pipe transport had with WUDFHost recycling.
+ *
+ *   `IOCTL_VDD_COMMAND` carries the same NUL-terminated UTF-16 command
+ *   buffer grammar as the legacy pipe protocol (e.g. `RELOAD_DRIVER`,
+ *   `CREATEMONITOR ...`, `DESTROYMONITOR`). The in-driver dispatcher is
+ *   shared verbatim between both transports, so callers do not need to
+ *   re-encode anything when migrating from pipe to IOCTL.
+ *
+ *   `IOCTL_VDD_PING` is a cheap liveness probe (no payload).
+ *
+ *   `IOCTL_VDD_QUERY_FRAME_CHANNEL_CAPS` is the v2 frame-channel negotiation
+ *   probe. Drivers that do not implement it are treated as legacy named-object
+ *   frame producers by Sunshine.
+ *
+ *   `IOCTL_VDD_OPEN_FRAME_CHANNEL` asks the driver to duplicate an unnamed
+ *   producer-owned frame channel into the requesting Sunshine process. The
+ *   returned handle values are valid only in `TargetProcessId`, which must be
+ *   the process that issued the IOCTL.
+ *
+ *   `DesiredSlots` is a compatibility guard, not a request for the driver to
+ *   resize its producer ring. Use 0 for the driver default, or the exact
+ *   `MaxSharedSlots` value returned by `IOCTL_VDD_QUERY_FRAME_CHANNEL_CAPS`.
+ */
 
 #pragma once
 
-#include <initguid.h>
+#if defined(_WIN32) || defined(_WIN64)
+
+#if defined(INITGUID)
+#define VDD_CONTROL_RESTORE_INITGUID
+#undef INITGUID
+#endif
+
 #include <Windows.h>
+#include <winioctl.h>
+
+#if defined(VDD_CONTROL_RESTORE_INITGUID)
+#define INITGUID
+#undef VDD_CONTROL_RESTORE_INITGUID
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 // {DA9F8C2B-7E4F-49A1-9D4E-6F2B0E1A0C4D}
+#define ZAKO_VDD_CONTROL_GUID_INIT \
+  { 0xDA9F8C2B, 0x7E4F, 0x49A1, { 0x9D, 0x4E, 0x6F, 0x2B, 0x0E, 0x1A, 0x0C, 0x4D } }
+
 DEFINE_GUID(GUID_DEVINTERFACE_ZAKO_VDD_CONTROL,
-    0xDA9F8C2B, 0x7E4F, 0x49A1, 0x9D, 0x4E, 0x6F, 0x2B, 0x0E, 0x1A, 0x0C, 0x4D);
+  0xDA9F8C2B, 0x7E4F, 0x49A1, 0x9D, 0x4E, 0x6F, 0x2B, 0x0E, 0x1A, 0x0C, 0x4D);
 
-// Single dispatch IOCTL. The input buffer is a null-terminated UTF-16 string
-// using the same command grammar as the legacy named pipe protocol so the
-// in-driver dispatcher can be shared verbatim. The output buffer (optional)
-// receives a response payload (UTF-8 or UTF-16 depending on the command;
-// today only PING/GETSETTINGS write a response and the SDR/HDR commands
-// do not, matching the pipe behaviour).
-//
-// METHOD_BUFFERED: the kernel copies the input/output buffers, so the
-// driver works on stable, non-volatile memory and we don't have to worry
-// about the caller's buffer disappearing mid-handler.
-//
-// FILE_WRITE_DATA matches the pipe's GENERIC_READ|GENERIC_WRITE access mask
-// expectations and matches the SDDL-allows-everyone semantics of the legacy
-// pipe (D:(A;;GA;;;WD)). If you tighten this later remember to update both
-// the driver registration and the Sunshine SetupDi code path.
-#define ZAKO_VDD_DEVICE_TYPE   FILE_DEVICE_UNKNOWN
-
+// IOCTL function codes carved out of the driver-defined range (0x800+).
 #define IOCTL_VDD_COMMAND \
-    CTL_CODE(ZAKO_VDD_DEVICE_TYPE, 0x800, METHOD_BUFFERED, FILE_WRITE_DATA)
+  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_WRITE_DATA)
 
-// Optional probe IOCTL. Returns STATUS_SUCCESS with no payload if the
-// driver is alive. Sunshine uses this as a cheap "is the IOCTL channel
-// available?" check so it can short-circuit to disable_enable when the
-// driver is missing instead of hanging on slow command IOCTLs.
 #define IOCTL_VDD_PING \
-    CTL_CODE(ZAKO_VDD_DEVICE_TYPE, 0x801, METHOD_BUFFERED, FILE_READ_ACCESS)
+  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+#define IOCTL_VDD_QUERY_FRAME_CHANNEL_CAPS \
+  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+#define IOCTL_VDD_OPEN_FRAME_CHANNEL \
+  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
+
+#define VDD_FRAME_CHANNEL_CAPS_VERSION 1u
+#define VDD_FRAME_CHANNEL_OPEN_VERSION 1u
+#define VDD_FRAME_CHANNEL_MAX_SLOTS 8u
+#define VDD_FRAME_CHANNEL_FLAG_SEALED_BORROW 0x00000001u
+#define VDD_FRAME_CHANNEL_FLAG_UNNAMED_HANDLES 0x00000002u
+#define VDD_FRAME_CHANNEL_FLAG_STRICT_DACL 0x00000004u
+
+typedef struct VDD_FRAME_CHANNEL_CAPS {
+  UINT32 Size;
+  UINT32 Version;
+  UINT32 Flags;
+  UINT32 MaxSharedSlots;
+  UINT32 MetadataSize;
+  UINT32 Reserved0;
+  UINT64 Reserved1;
+} VDD_FRAME_CHANNEL_CAPS;
+
+typedef struct VDD_FRAME_CHANNEL_OPEN_REQUEST {
+  UINT32 Size;
+  UINT32 Version;
+  UINT32 MonitorIndex;
+  UINT32 RequiredFlags;
+  UINT32 TargetProcessId;
+  UINT32 DesiredSlots;
+  UINT32 AdapterLuidLowPart;
+  INT32 AdapterLuidHighPart;
+  UINT64 Reserved0;
+} VDD_FRAME_CHANNEL_OPEN_REQUEST;
+
+typedef struct VDD_FRAME_CHANNEL_SLOT_HANDLE {
+  UINT64 TextureHandle;
+  UINT64 Reserved0;
+} VDD_FRAME_CHANNEL_SLOT_HANDLE;
+
+typedef struct VDD_FRAME_CHANNEL_OPEN_RESPONSE {
+  UINT32 Size;
+  UINT32 Version;
+  UINT32 Flags;
+  UINT32 SlotCount;
+  UINT32 MetadataSize;
+  UINT32 Reserved0;
+  UINT64 MetadataHandle;
+  UINT64 FrameReadyEventHandle;
+  VDD_FRAME_CHANNEL_SLOT_HANDLE Slots[VDD_FRAME_CHANNEL_MAX_SLOTS];
+} VDD_FRAME_CHANNEL_OPEN_RESPONSE;
+
+#ifdef __cplusplus
+}
+
+static_assert(sizeof(VDD_FRAME_CHANNEL_CAPS) == 32, "VDD_FRAME_CHANNEL_CAPS layout must stay stable");
+static_assert(sizeof(VDD_FRAME_CHANNEL_OPEN_REQUEST) == 40, "VDD_FRAME_CHANNEL_OPEN_REQUEST layout must stay stable");
+static_assert(sizeof(VDD_FRAME_CHANNEL_SLOT_HANDLE) == 16, "VDD_FRAME_CHANNEL_SLOT_HANDLE layout must stay stable");
+static_assert(sizeof(VDD_FRAME_CHANNEL_OPEN_RESPONSE) == 40 + 16 * VDD_FRAME_CHANNEL_MAX_SLOTS, "VDD_FRAME_CHANNEL_OPEN_RESPONSE layout must stay stable");
+#endif
+
+#endif  // _WIN32 || _WIN64

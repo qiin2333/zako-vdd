@@ -15,7 +15,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set "VDD_BIN=c:\Users\mohaha\Program\github\Virtual-Display-Driver\Virtual Display Driver (HDR)\x64\Release"
+for %%I in ("%~dp0..\..") do set "REPO_ROOT=%%~fI"
+set "VDD_BIN=%REPO_ROOT%\x64\Release"
 set "TEST_DIR=%~dp0"
 set "OUT_DIR=%TEMP%\vdd_capture_test_out"
 

@@ -3,17 +3,19 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - master
       - sunshine
     tags:
       - 'v*'
-  pull_request_target:
+  pull_request:
     branches:
+      - main
       - master
       - sunshine
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       matrix:
         configuration: [Release]
@@ -22,20 +24,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[17.0,18.0)'
 
       - name: Install WDK
         shell: pwsh
         run: |
-          # Check if WDK is already installed
+          # Check if WDK and its VS2022 MSBuild tasks are installed.
+          $requiredVsVersion = "17.0"
+          $wdkTaskPattern = "C:\Program Files*\Windows Kits\10\build\*\bin\Microsoft.DriverKit.Build.Tasks.$requiredVsVersion.dll"
           $wdfHeader = Get-ChildItem "C:\Program Files*\Windows Kits\10\Include\*\wdf" -Directory -ErrorAction SilentlyContinue |
                        Sort-Object { $_.Parent.Name } -Descending |
                        Select-Object -First 1
-          if ($wdfHeader) {
+          $wdkTask = Get-ChildItem $wdkTaskPattern -ErrorAction SilentlyContinue |
+                     Sort-Object { $_.Directory.Parent.Name } -Descending |
+                     Select-Object -First 1
+
+          if ($wdfHeader -and $wdkTask) {
             Write-Host "WDK already installed at: $($wdfHeader.FullName)"
+            Write-Host "WDK MSBuild task found at: $($wdkTask.FullName)"
           } else {
             Write-Host "Installing WDK..."
             $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2272234"
@@ -43,24 +54,66 @@ jobs:
             Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
             $proc = Start-Process -FilePath $wdkInstaller -ArgumentList "/quiet", "/norestart", "/features", "+" -Wait -NoNewWindow -PassThru
             Write-Host "WDK installer exit code: $($proc.ExitCode)"
-          }
-
-          # Install WDK VSIX for MSBuild integration
-          $vsixFiles = Get-ChildItem "C:\Program Files*\Windows Kits\10\Vsix\*\WDK.vsix" -Recurse -ErrorAction SilentlyContinue
-          if ($vsixFiles) {
-            $vsixInstaller = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\VSIXInstaller.exe"
-            if (Test-Path $vsixInstaller) {
-              foreach ($vsix in $vsixFiles) {
-                Write-Host "Installing VSIX: $($vsix.FullName)"
-                $p = Start-Process -FilePath $vsixInstaller -ArgumentList "/q", $vsix.FullName -Wait -NoNewWindow -PassThru
-                Write-Host "VSIX installer exit code: $($p.ExitCode)"
-              }
+            if ($proc.ExitCode -ne 0) {
+              Write-Error "WDK installer failed with exit code $($proc.ExitCode)"
+              exit 1
             }
           }
 
+          # Install WDK VSIX for MSBuild integration into the selected VS2022 instance.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            Write-Error "vswhere.exe not found"
+            exit 1
+          }
+
+          $vsInstall = & $vswhere -products * -requires Microsoft.Component.MSBuild -version "[17.0,18.0)" -property installationPath -latest
+          if (-not $vsInstall) {
+            Write-Error "Visual Studio 2022 with MSBuild was not found"
+            exit 1
+          }
+          Write-Host "Using Visual Studio: $vsInstall"
+
+          $vsixInstaller = Join-Path $vsInstall "Common7\IDE\VSIXInstaller.exe"
+          if (-not (Test-Path $vsixInstaller)) {
+            Write-Error "VSIXInstaller.exe not found at $vsixInstaller"
+            exit 1
+          }
+
+          $vsixFiles = Get-ChildItem "C:\Program Files*\Windows Kits\10\Vsix\*\WDK.vsix" -Recurse -ErrorAction SilentlyContinue
+          if (-not $vsixFiles) {
+            Write-Error "WDK.vsix not found"
+            exit 1
+          }
+
+          foreach ($vsix in $vsixFiles) {
+            Write-Host "Installing VSIX: $($vsix.FullName)"
+            $p = Start-Process -FilePath $vsixInstaller -ArgumentList "/q", $vsix.FullName -Wait -NoNewWindow -PassThru
+            Write-Host "VSIX installer exit code: $($p.ExitCode)"
+          }
+
+          $wdkTask = Get-ChildItem $wdkTaskPattern -ErrorAction SilentlyContinue |
+                     Sort-Object { $_.Directory.Parent.Name } -Descending |
+                     Select-Object -First 1
+          if (-not $wdkTask) {
+            Write-Error "WDK MSBuild task for VS $requiredVsVersion not found ($wdkTaskPattern)"
+            exit 1
+          }
+          Write-Host "Verified WDK MSBuild task: $($wdkTask.FullName)"
+
       - name: Build the driver
         run: |
-          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
+          msbuild "ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
+
+      - name: Build Vulkan HDR diagnostics
+        shell: cmd
+        run: |
+          call tools\vulkan_hdr_policy_test\build_consumer.bat || exit /b 1
+          call tools\vulkan_hdr_probe\build_consumer.bat || exit /b 1
+          call tools\vulkan_hdr_bridge\build_consumer.bat || exit /b 1
+          call tools\vdd_command\build_consumer.bat || exit /b 1
+          call tools\desktop_hdr_capture\build_consumer.bat || exit /b 1
+          call tools\vdd_capture_test\build_consumer.bat || exit /b 1
 
       - name: Stamp driver version
         shell: pwsh
@@ -75,12 +128,22 @@ jobs:
           }
           Write-Host "Using stampinf: $($stampinf.FullName)"
 
-          $infPath = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf"
+          $infPath = "${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf"
 
-          # Extract version from tag (e.g. v0.13 -> 100.13.0.0) or use date-based version
+          # Extract numeric version from tag (e.g. v0.13 -> 100.0.13.0,
+          # v0.15.3-zak2333 -> 100.0.15.3) or use date-based version.
+          # DriverVer must be numeric dotted-quad. Keep release labels in the
+          # Git tag name only; suffixes such as "-zak2333" make Windows unable
+          # to parse/display the installed driver version correctly.
           $ref = "${{ github.ref }}"
           if ($ref -match '^refs/tags/v(.+)$') {
-            $ver = $Matches[1]
+            $tagVersion = $Matches[1]
+            $numericMatch = [regex]::Match($tagVersion, '^\d+(?:\.\d+){0,3}')
+            if (-not $numericMatch.Success) {
+              Write-Error "Tag '$tagVersion' does not start with a numeric version"
+              exit 1
+            }
+            $ver = $numericMatch.Value
             # Prefix with 100 to ensure CI builds always outrank local builds
             # v0.13 -> 100.0.13.0, v1.2.3 -> 100.1.2.3
             $parts = $ver.Split('.')
@@ -101,11 +164,11 @@ jobs:
 
       - name: List build directory
         continue-on-error: true
-        run: dir "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
+        run: dir "${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
 
       - name: Sign driver with certificate
-        # Skip signing for PRs from forks to prevent secret exfiltration
-        if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
+        # PR builds do not receive signing secrets. Tag/main builds sign when the
+        # repository has a certificate configured.
         shell: pwsh
         env:
           SIGNING_CERT_PFX: ${{ secrets.SIGNING_CERT_PFX }}
@@ -137,7 +200,7 @@ jobs:
           }
           Write-Host "Using signtool: $($signtool.FullName)"
 
-          $buildDir = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
+          $buildDir = "${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
           
           # Search for inf2cat in both x64 and x86 (MSBuild uses x86)
           $inf2cat = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\inf2cat.exe","C:\Program Files*\Windows Kits\10\bin\*\x86\inf2cat.exe" -ErrorAction SilentlyContinue |
@@ -171,7 +234,7 @@ jobs:
           }
 
           # Export the signing certificate as .cer (overrides the self-signed test cert from MSBuild)
-          $cerPath = Join-Path $buildDir "ZakoVDD.cer"
+          $cerPath = Join-Path (Split-Path $buildDir -Parent) "ZakoVDD.cer"
           Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT | Out-Null
           Write-Host "Exported signing certificate to $cerPath"
 
@@ -181,11 +244,14 @@ jobs:
         with:
           name: Built-Driver-${{ matrix.configuration }}-${{ matrix.platform }}
           path: |
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.dll
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\zakovdd.cat
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\vdd_settings.xml
-            Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.cer
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.dll
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\zakovdd.cat
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\vdd_settings.xml
+            ${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD.cer
+            tools\vulkan_hdr_bridge\build\zako_vulkan_hdr_bridge.dll
+            tools\vulkan_hdr_bridge\build\VkLayer_zako_virtual_hdr.json
+            tools\vulkan_hdr_probe\build\vulkan_hdr_probe.exe
 
   release:
     name: Create Release
@@ -204,10 +270,22 @@ jobs:
       - name: Package release zip
         run: |
           cd driver-x64
-          zip -j ../zakovdd.zip ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml ZakoVDD.cer
+          zip -j ../zakovdd.zip \
+            x64/Release/ZakoVDD/ZakoVDD.dll \
+            x64/Release/ZakoVDD/ZakoVDD.inf \
+            x64/Release/ZakoVDD/zakovdd.cat \
+            x64/Release/ZakoVDD/vdd_settings.xml \
+            x64/Release/ZakoVDD.cer \
+            tools/vulkan_hdr_bridge/build/zako_vulkan_hdr_bridge.dll \
+            tools/vulkan_hdr_bridge/build/VkLayer_zako_virtual_hdr.json \
+            tools/vulkan_hdr_probe/build/vulkan_hdr_probe.exe
           cd ..
+          unzip -l zakovdd.zip
+          for required in ZakoVDD.dll ZakoVDD.inf zakovdd.cat vdd_settings.xml ZakoVDD.cer \
+                          zako_vulkan_hdr_bridge.dll VkLayer_zako_virtual_hdr.json vulkan_hdr_probe.exe; do
+            unzip -l zakovdd.zip "$required" >/dev/null
+          done
           ls -la zakovdd.zip
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

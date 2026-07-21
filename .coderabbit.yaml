@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "zh-CN"
+early_access: false
+
+reviews:
+  # Keep reviews focused on actionable defects in this driver codebase.
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+
+  # Build outputs and locally generated binaries are not useful review inputs.
+  path_filters:
+    - "!x64/**"
+    - "!**/build/**"
+
+  path_instructions:
+    - path: "ZakoVDD/**"
+      instructions: |
+        Review this as production Windows Indirect Display Driver code. Pay close
+        attention to WDF and COM/Direct3D object lifetime, reference counting,
+        cleanup on partial failure, thread safety, synchronization, IRQL/context
+        requirements, and monitor/swap-chain/device lifecycle transitions. Check
+        HRESULT, NTSTATUS, and Win32 error handling and flag silent failure that
+        can leave the driver in an inconsistent state.
+        Treat changes involving display modes, EDID, HDR, frame export, or GPU
+        selection as behavior-sensitive and look for regressions across reconnect,
+        teardown, and repeated initialization paths.
+
+    - path: "Common/Include/**"
+      instructions: |
+        Treat these headers as shared driver/tool ABI. Check IOCTL numbers,
+        structure sizes, packing, alignment, enum values, versioning, handle and
+        buffer validation, and backward compatibility. Flag changes that could
+        allow malformed or untrusted user-mode input to reach kernel-mode code.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        Review GitHub Actions changes for least-privilege permissions, safe fork
+        pull-request behavior, accidental exposure of signing or dispatch tokens,
+        command injection through GitHub-controlled values, pinned and supported
+        action versions, and reliable failure propagation in PowerShell/cmd steps.
+
+    - path: "Community Scripts/**"
+      instructions: |
+        Review PowerShell scripts for correct quoting and parameter handling,
+        elevation and device-selection behavior, idempotency, meaningful exit
+        codes, and safe handling of commands that modify display or driver state.
+
+    - path: "tools/**"
+      instructions: |
+        Check native diagnostic tools and build scripts for input validation,
+        resource cleanup, clear error propagation, architecture/configuration
+        mismatches, and compatibility with the driver-side IOCTL or shared-header
+        contract.
+
+chat:
+  auto_reply: true

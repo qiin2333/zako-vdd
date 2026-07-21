@@ -33,6 +33,28 @@ static ColourSettingsSnapshot GetColourSettingsSnapshot()
 	return {ColourFormat, SDRCOLOUR, HDRCOLOUR};
 }
 
+template <typename BitsField>
+static void ApplyBitsPerComponent(BitsField &target, const ColourSettingsSnapshot &colourSettings)
+{
+	const auto combined = colourSettings.sdr | colourSettings.hdr;
+	if (colourSettings.format == L"YCbCr444")
+	{
+		target.YCbCr444 = combined;
+	}
+	else if (colourSettings.format == L"YCbCr422")
+	{
+		target.YCbCr422 = combined;
+	}
+	else if (colourSettings.format == L"YCbCr420")
+	{
+		target.YCbCr420 = combined;
+	}
+	else
+	{
+		target.Rgb = combined;
+	}
+}
+
 _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_IN_ADAPTER_INIT_FINISHED *pInArgs)
@@ -178,27 +200,7 @@ void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT V
 
 	Mode.Size = sizeof(Mode);
 	const auto colourSettings = GetColourSettingsSnapshot();
-
-	if (colourSettings.format == L"RGB")
-	{
-		Mode.BitsPerComponent.Rgb = colourSettings.sdr | colourSettings.hdr;
-	}
-	else if (colourSettings.format == L"YCbCr444")
-	{
-		Mode.BitsPerComponent.YCbCr444 = colourSettings.sdr | colourSettings.hdr;
-	}
-	else if (colourSettings.format == L"YCbCr422")
-	{
-		Mode.BitsPerComponent.YCbCr422 = colourSettings.sdr | colourSettings.hdr;
-	}
-	else if (colourSettings.format == L"YCbCr420")
-	{
-		Mode.BitsPerComponent.YCbCr420 = colourSettings.sdr | colourSettings.hdr;
-	}
-	else
-	{
-		Mode.BitsPerComponent.Rgb = colourSettings.sdr | colourSettings.hdr; // Default to RGB
-	}
+	ApplyBitsPerComponent(Mode.BitsPerComponent, colourSettings);
 
 	VDD_LOG_DEBUG_STREAM("IDDCX_TARGET_MODE2 configured with Size: " << Mode.Size
 	                     << " and colour format " << WStringToString(colourSettings.format));
@@ -292,27 +294,7 @@ _Use_decl_annotations_
 
 	pOutArgs->TargetCaps = IDDCX_TARGET_CAPS_HIGH_COLOR_SPACE | IDDCX_TARGET_CAPS_WIDE_COLOR_SPACE;
 	const auto colourSettings = GetColourSettingsSnapshot();
-
-	if (colourSettings.format == L"RGB")
-	{
-		pOutArgs->DitheringSupport.Rgb = colourSettings.sdr | colourSettings.hdr;
-	}
-	else if (colourSettings.format == L"YCbCr444")
-	{
-		pOutArgs->DitheringSupport.YCbCr444 = colourSettings.sdr | colourSettings.hdr;
-	}
-	else if (colourSettings.format == L"YCbCr422")
-	{
-		pOutArgs->DitheringSupport.YCbCr422 = colourSettings.sdr | colourSettings.hdr;
-	}
-	else if (colourSettings.format == L"YCbCr420")
-	{
-		pOutArgs->DitheringSupport.YCbCr420 = colourSettings.sdr | colourSettings.hdr;
-	}
-	else
-	{
-		pOutArgs->DitheringSupport.Rgb = colourSettings.sdr | colourSettings.hdr; // Default to RGB
-	}
+	ApplyBitsPerComponent(pOutArgs->DitheringSupport, colourSettings);
 
 	VDD_LOG_DEBUG_STREAM("Target capabilities set to: " << pOutArgs->TargetCaps
 	                     << "\nDithering support colour format set to: " << WStringToString(colourSettings.format));
@@ -436,27 +418,7 @@ _Use_decl_annotations_
 			monitorModesOutput[ModeIndex].Size = sizeof(IDDCX_MONITOR_MODE2);
 			monitorModesOutput[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
 			monitorModesOutput[ModeIndex].MonitorVideoSignalInfo = knownMonitorModes[ModeIndex];
-
-			if (colourSettings.format == L"RGB")
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.Rgb = colourSettings.sdr | colourSettings.hdr;
-			}
-			else if (colourSettings.format == L"YCbCr444")
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.YCbCr444 = colourSettings.sdr | colourSettings.hdr;
-			}
-			else if (colourSettings.format == L"YCbCr422")
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.YCbCr422 = colourSettings.sdr | colourSettings.hdr;
-			}
-			else if (colourSettings.format == L"YCbCr420")
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.YCbCr420 = colourSettings.sdr | colourSettings.hdr;
-			}
-			else
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.Rgb = colourSettings.sdr | colourSettings.hdr; // Default to RGB
-			}
+			ApplyBitsPerComponent(monitorModesOutput[ModeIndex].BitsPerComponent, colourSettings);
 
 		}
 

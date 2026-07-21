@@ -15,6 +15,10 @@ class CursorExporter
 public:
 	CursorExporter(unsigned int monitorIndex, IDDCX_MONITOR monitor, HANDLE hNewCursorDataAvailable);
 	~CursorExporter();
+	CursorExporter(const CursorExporter&) = delete;
+	CursorExporter& operator=(const CursorExporter&) = delete;
+	CursorExporter(CursorExporter&&) = delete;
+	CursorExporter& operator=(CursorExporter&&) = delete;
 
 	bool Start();
 	void Stop();

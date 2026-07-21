@@ -337,7 +337,10 @@ void CursorExporter::Run()
 
 		VDD_CURSOR_SHARED_METADATA* dst = m_MetaView;
 		volatile LONG* sequence = reinterpret_cast<volatile LONG*>(&dst->PublicationSequence);
-		InterlockedIncrement(sequence); // Odd: a snapshot update is in progress.
+		// There is one producer per monitor. Setting the low bit also recovers an
+		// interrupted publication that left an existing mapping at an odd value.
+		const ULONG previousSequence = static_cast<ULONG>(InterlockedOr(sequence, 1));
+		const LONG stableSequence = static_cast<LONG>((previousSequence | 1u) + 1u);
 		MemoryBarrier();
 
 		if (shapeUpdated && m_CachedShape.BufferSize > 0)
@@ -382,7 +385,7 @@ void CursorExporter::Run()
 		InterlockedExchange(reinterpret_cast<volatile LONG*>(&dst->Magic),
 		                    static_cast<LONG>(VDD_CURSOR_MAGIC));
 		MemoryBarrier();
-		InterlockedIncrement(sequence); // Even: the snapshot is stable.
+		InterlockedExchange(sequence, stableSequence); // Even: the snapshot is stable.
 
 		if (m_hCursorReadyEvent)
 		{
@@ -395,48 +398,71 @@ void CursorExporter::Run()
 
 bool CursorExporter::EnsureSharedObjects()
 {
-	SECURITY_ATTRIBUTES sa = {};
-	PSECURITY_DESCRIPTOR sd = nullptr;
+	SECURITY_ATTRIBUTES mappingSa = {};
+	PSECURITY_DESCRIPTOR mappingSd = nullptr;
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-	        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;IU)", SDDL_REVISION_1, &sd, nullptr))
+	        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00000004;;;IU)",
+	        SDDL_REVISION_1,
+	        &mappingSd,
+	        nullptr))
 	{
-		VDD_LOG_ERROR_STREAM("[VddCursor] Failed to build SDDL: " << GetLastError());
+		VDD_LOG_ERROR_STREAM("[VddCursor] Failed to build mapping SDDL: " << GetLastError());
 		return false;
 	}
 
-	sa.nLength = sizeof(sa);
-	sa.lpSecurityDescriptor = sd;
-	sa.bInheritHandle = FALSE;
+	mappingSa.nLength = sizeof(mappingSa);
+	mappingSa.lpSecurityDescriptor = mappingSd;
+	mappingSa.bInheritHandle = FALSE;
 
 	const SIZE_T mapSize = sizeof(VDD_CURSOR_SHARED_METADATA) + VDD_CURSOR_MAX_BYTES;
-	m_MetaMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0,
+	m_MetaMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &mappingSa, PAGE_READWRITE, 0,
 	                                   static_cast<DWORD>(mapSize), CursorMapName(m_MonitorIndex));
+	const DWORD mappingError = GetLastError();
+	LocalFree(mappingSd);
 	if (!m_MetaMapping)
 	{
-		VDD_LOG_ERROR_STREAM("[VddCursor] CreateFileMappingW failed: " << GetLastError());
-		LocalFree(sd);
+		VDD_LOG_ERROR_STREAM("[VddCursor] CreateFileMappingW failed: " << mappingError);
 		return false;
 	}
+	const bool mappingAlreadyExists = mappingError == ERROR_ALREADY_EXISTS;
 
 	m_MetaView = static_cast<VDD_CURSOR_SHARED_METADATA*>(MapViewOfFile(m_MetaMapping, FILE_MAP_WRITE, 0, 0, mapSize));
 	if (!m_MetaView)
 	{
 		VDD_LOG_ERROR_STREAM("[VddCursor] MapViewOfFile failed: " << GetLastError());
-		LocalFree(sd);
 		return false;
 	}
-	ZeroMemory(m_MetaView, mapSize);
-	m_MetaView->Version = VDD_CURSOR_VERSION;
+	if (!mappingAlreadyExists)
+	{
+		ZeroMemory(m_MetaView, mapSize);
+		m_MetaView->Version = VDD_CURSOR_VERSION;
+	}
 
-	m_hCursorReadyEvent = CreateEventW(&sa, FALSE, FALSE, CursorReadyEventName(m_MonitorIndex));
+	SECURITY_ATTRIBUTES eventSa = {};
+	PSECURITY_DESCRIPTOR eventSd = nullptr;
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+	        L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100000;;;IU)",
+	        SDDL_REVISION_1,
+	        &eventSd,
+	        nullptr))
+	{
+		VDD_LOG_ERROR_STREAM("[VddCursor] Failed to build event SDDL: " << GetLastError());
+		return false;
+	}
+
+	eventSa.nLength = sizeof(eventSa);
+	eventSa.lpSecurityDescriptor = eventSd;
+	eventSa.bInheritHandle = FALSE;
+
+	m_hCursorReadyEvent = CreateEventW(&eventSa, FALSE, FALSE, CursorReadyEventName(m_MonitorIndex));
+	const DWORD eventError = GetLastError();
+	LocalFree(eventSd);
 	if (!m_hCursorReadyEvent)
 	{
-		VDD_LOG_ERROR_STREAM("[VddCursor] CreateEventW (cursor ready) failed: " << GetLastError());
-		LocalFree(sd);
+		VDD_LOG_ERROR_STREAM("[VddCursor] CreateEventW (cursor ready) failed: " << eventError);
 		return false;
 	}
 
-	LocalFree(sd);
 	VDD_LOG_INFO_STREAM("[VddCursor] Shared objects ready monitor=" << m_MonitorIndex << " bytes=" << mapSize);
 	return true;
 }

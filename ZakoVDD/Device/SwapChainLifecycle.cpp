@@ -81,7 +81,7 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 			hwCursor.hNewCursorDataAvailable = hMouseEvent;
 
 			const NTSTATUS status = IddCxMonitorSetupHardwareCursor(Monitor, &hwCursor);
-			if (FAILED(status))
+			if (!NT_SUCCESS(status))
 			{
 				CloseHandle(hMouseEvent);
 				m_MouseEvents.erase(Monitor);

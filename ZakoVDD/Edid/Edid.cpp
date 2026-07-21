@@ -329,9 +329,11 @@ static vector<BYTE> LoadEdid(const string &filePath)
 	streamsize size = file.tellg();
 	file.seekg(0, ios::beg);
 
-	if (size <= 0 || size > 1024 * 1024)
+	constexpr streamsize edidBlockSize = 128;
+	constexpr streamsize maxEdidSize = edidBlockSize * 256;
+	if (size < edidBlockSize || size > maxEdidSize || (size % edidBlockSize) != 0)
 	{
-		VDD_LOG_ERROR("Custom edid file size invalid (must be >0 and <=1MB)");
+		VDD_LOG_ERROR("Custom edid file size invalid (must be 1-256 complete 128-byte blocks)");
 		VDD_LOG_INFO("Using hardcoded edid");
 		return hardcodedEdid;
 	}
@@ -339,12 +341,28 @@ static vector<BYTE> LoadEdid(const string &filePath)
 	vector<BYTE> buffer(static_cast<size_t>(size));
 	if (file.read(reinterpret_cast<char *>(buffer.data()), size))
 	{
-		BYTE calculatedChecksum = CalculateEdidChecksum(buffer);
-		if (calculatedChecksum != buffer[127])
+		const size_t blockCount = buffer.size() / static_cast<size_t>(edidBlockSize);
+		if (buffer[126] != blockCount - 1)
 		{
-			VDD_LOG_ERROR("Custom edid failed due to invalid checksum");
+			VDD_LOG_ERROR("Custom edid extension count does not match file size");
 			VDD_LOG_INFO("Using hardcoded edid");
 			return hardcodedEdid;
+		}
+
+		for (size_t block = 0; block < blockCount; ++block)
+		{
+			unsigned int checksum = 0;
+			const size_t blockOffset = block * static_cast<size_t>(edidBlockSize);
+			for (size_t i = 0; i < static_cast<size_t>(edidBlockSize); ++i)
+			{
+				checksum += buffer[blockOffset + i];
+			}
+			if ((checksum & 0xFFu) != 0)
+			{
+				VDD_LOG_ERROR_STREAM("Custom edid block " << block << " failed checksum validation");
+				VDD_LOG_INFO("Using hardcoded edid");
+				return hardcodedEdid;
+			}
 		}
 
 		if (edidCeaOverride)

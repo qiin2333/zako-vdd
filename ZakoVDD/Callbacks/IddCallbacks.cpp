@@ -16,10 +16,44 @@ using namespace std;
 using namespace Microsoft::IndirectDisp;
 
 extern std::mutex g_DataMutex;
-extern std::vector<DISPLAYCONFIG_VIDEO_SIGNAL_INFO> s_KnownMonitorModes2;
 extern std::wstring ColourFormat;
 extern IDDCX_BITS_PER_COMPONENT SDRCOLOUR;
 extern IDDCX_BITS_PER_COMPONENT HDRCOLOUR;
+
+struct ColourSettingsSnapshot
+{
+	wstring format;
+	IDDCX_BITS_PER_COMPONENT sdr = IDDCX_BITS_PER_COMPONENT_8;
+	IDDCX_BITS_PER_COMPONENT hdr = IDDCX_BITS_PER_COMPONENT_10;
+};
+
+static ColourSettingsSnapshot GetColourSettingsSnapshot()
+{
+	lock_guard<mutex> dataLock(g_DataMutex);
+	return {ColourFormat, SDRCOLOUR, HDRCOLOUR};
+}
+
+template <typename BitsField>
+static void ApplyBitsPerComponent(BitsField &target, const ColourSettingsSnapshot &colourSettings)
+{
+	const auto combined = colourSettings.sdr | colourSettings.hdr;
+	if (colourSettings.format == L"YCbCr444")
+	{
+		target.YCbCr444 = combined;
+	}
+	else if (colourSettings.format == L"YCbCr422")
+	{
+		target.YCbCr422 = combined;
+	}
+	else if (colourSettings.format == L"YCbCr420")
+	{
+		target.YCbCr420 = combined;
+	}
+	else
+	{
+		target.Rgb = combined;
+	}
+}
 
 _Use_decl_annotations_
 	NTSTATUS
@@ -68,12 +102,11 @@ VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTI
 		localModes = monitorModes;
 	}
 
-	// Clear previous monitor modes to prevent accumulation on reload
-	s_KnownMonitorModes2.clear();
-
-	for (int i = 0; i < localModes.size(); i++)
+	vector<DISPLAYCONFIG_VIDEO_SIGNAL_INFO> knownMonitorModes;
+	knownMonitorModes.reserve(localModes.size());
+	for (const auto &mode : localModes)
 	{
-		s_KnownMonitorModes2.push_back(dispinfo(std::get<0>(localModes[i]), std::get<1>(localModes[i]), std::get<2>(localModes[i]), std::get<3>(localModes[i])));
+		knownMonitorModes.push_back(dispinfo(get<0>(mode), get<1>(mode), get<2>(mode), get<3>(mode)));
 	}
 	pOutArgs->MonitorModeBufferOutputCount = (UINT)localModes.size();
 
@@ -99,7 +132,7 @@ VirtualDisplayDriverParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTI
 		{
 			monitorModesOutput[ModeIndex].Size = sizeof(IDDCX_MONITOR_MODE);
 			monitorModesOutput[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
-			monitorModesOutput[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
+			monitorModesOutput[ModeIndex].MonitorVideoSignalInfo = knownMonitorModes[ModeIndex];
 		}
 
 		// Set the preferred mode as represented in the EDID
@@ -166,30 +199,11 @@ void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT V
 	                     << ", VSyncDen: " << VSyncDen);
 
 	Mode.Size = sizeof(Mode);
-
-	if (ColourFormat == L"RGB")
-	{
-		Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;
-	}
-	else if (ColourFormat == L"YCbCr444")
-	{
-		Mode.BitsPerComponent.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
-	}
-	else if (ColourFormat == L"YCbCr422")
-	{
-		Mode.BitsPerComponent.YCbCr422 = SDRCOLOUR | HDRCOLOUR;
-	}
-	else if (ColourFormat == L"YCbCr420")
-	{
-		Mode.BitsPerComponent.YCbCr420 = SDRCOLOUR | HDRCOLOUR;
-	}
-	else
-	{
-		Mode.BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
-	}
+	const auto colourSettings = GetColourSettingsSnapshot();
+	ApplyBitsPerComponent(Mode.BitsPerComponent, colourSettings);
 
 	VDD_LOG_DEBUG_STREAM("IDDCX_TARGET_MODE2 configured with Size: " << Mode.Size
-	                     << " and colour format " << WStringToString(ColourFormat));
+	                     << " and colour format " << WStringToString(colourSettings.format));
 
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
@@ -279,30 +293,11 @@ _Use_decl_annotations_
 	UNREFERENCED_PARAMETER(pInArgs);
 
 	pOutArgs->TargetCaps = IDDCX_TARGET_CAPS_HIGH_COLOR_SPACE | IDDCX_TARGET_CAPS_WIDE_COLOR_SPACE;
-
-	if (ColourFormat == L"RGB")
-	{
-		pOutArgs->DitheringSupport.Rgb = SDRCOLOUR | HDRCOLOUR;
-	}
-	else if (ColourFormat == L"YCbCr444")
-	{
-		pOutArgs->DitheringSupport.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
-	}
-	else if (ColourFormat == L"YCbCr422")
-	{
-		pOutArgs->DitheringSupport.YCbCr422 = SDRCOLOUR | HDRCOLOUR;
-	}
-	else if (ColourFormat == L"YCbCr420")
-	{
-		pOutArgs->DitheringSupport.YCbCr420 = SDRCOLOUR | HDRCOLOUR;
-	}
-	else
-	{
-		pOutArgs->DitheringSupport.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
-	}
+	const auto colourSettings = GetColourSettingsSnapshot();
+	ApplyBitsPerComponent(pOutArgs->DitheringSupport, colourSettings);
 
 	VDD_LOG_DEBUG_STREAM("Target capabilities set to: " << pOutArgs->TargetCaps
-	                     << "\nDithering support colour format set to: " << WStringToString(ColourFormat));
+	                     << "\nDithering support colour format set to: " << WStringToString(colourSettings.format));
 
 	return STATUS_SUCCESS;
 }
@@ -371,9 +366,11 @@ _Use_decl_annotations_
 {
 	// Take a local snapshot of monitorModes under lock to prevent data races
 	vector<tuple<int, int, int, int>> localModes;
+	ColourSettingsSnapshot colourSettings;
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
 		localModes = monitorModes;
+		colourSettings = {ColourFormat, SDRCOLOUR, HDRCOLOUR};
 	}
 
 	VDD_LOG_DEBUG_STREAM("Parsing monitor description:"
@@ -393,12 +390,11 @@ _Use_decl_annotations_
 		return logStream.str();
 	});
 
-	// Clear previous monitor modes to prevent accumulation on reload
-	s_KnownMonitorModes2.clear();
-
-	for (int i = 0; i < localModes.size(); i++)
+	vector<DISPLAYCONFIG_VIDEO_SIGNAL_INFO> knownMonitorModes;
+	knownMonitorModes.reserve(localModes.size());
+	for (const auto &mode : localModes)
 	{
-		s_KnownMonitorModes2.push_back(dispinfo(std::get<0>(localModes[i]), std::get<1>(localModes[i]), std::get<2>(localModes[i]), std::get<3>(localModes[i])));
+		knownMonitorModes.push_back(dispinfo(get<0>(mode), get<1>(mode), get<2>(mode), get<3>(mode)));
 	}
 	pOutArgs->MonitorModeBufferOutputCount = (UINT)localModes.size();
 
@@ -421,28 +417,8 @@ _Use_decl_annotations_
 		{
 			monitorModesOutput[ModeIndex].Size = sizeof(IDDCX_MONITOR_MODE2);
 			monitorModesOutput[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
-			monitorModesOutput[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
-
-			if (ColourFormat == L"RGB")
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR;
-			}
-			else if (ColourFormat == L"YCbCr444")
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.YCbCr444 = SDRCOLOUR | HDRCOLOUR;
-			}
-			else if (ColourFormat == L"YCbCr422")
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.YCbCr422 = SDRCOLOUR | HDRCOLOUR;
-			}
-			else if (ColourFormat == L"YCbCr420")
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.YCbCr420 = SDRCOLOUR | HDRCOLOUR;
-			}
-			else
-			{
-				monitorModesOutput[ModeIndex].BitsPerComponent.Rgb = SDRCOLOUR | HDRCOLOUR; // Default to RGB
-			}
+			monitorModesOutput[ModeIndex].MonitorVideoSignalInfo = knownMonitorModes[ModeIndex];
+			ApplyBitsPerComponent(monitorModesOutput[ModeIndex].BitsPerComponent, colourSettings);
 
 		}
 
@@ -455,7 +431,7 @@ _Use_decl_annotations_
 				logStream << "\n  ModeIndex: " << ModeIndex
 				          << "\n    Size: " << monitorModesOutput[ModeIndex].Size
 				          << "\n    Origin: " << monitorModesOutput[ModeIndex].Origin
-				          << "\n    Colour Format: " << WStringToString(ColourFormat);
+				          << "\n    Colour Format: " << WStringToString(colourSettings.format);
 			}
 			return logStream.str();
 		});
@@ -481,9 +457,11 @@ _Use_decl_annotations_
 
 	// Take a local snapshot of monitorModes under lock to prevent data races
 	vector<tuple<int, int, int, int>> localModes;
+	wstring colourFormat;
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
 		localModes = monitorModes;
+		colourFormat = ColourFormat;
 	}
 
 	vector<IDDCX_TARGET_MODE2> TargetModes(localModes.size());
@@ -527,7 +505,7 @@ _Use_decl_annotations_
 			{
 				logStream << "\n  TargetModeIndex: " << i
 				          << "\n    Size: " << TargetModes[i].Size
-				          << "\n    ColourFormat: " << WStringToString(ColourFormat);
+				          << "\n    ColourFormat: " << WStringToString(colourFormat);
 			}
 			return logStream.str();
 		});

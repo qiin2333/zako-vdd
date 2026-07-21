@@ -103,9 +103,15 @@ void LoadDriverSettings()
 	// colour
 	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
 	SDR10 = EnabledQuery(L"SDR10Enabled");
-	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
-	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
-	ColourFormat = GetStringSetting(L"ColourFormat");
+	const auto hdrColour = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
+	const auto sdrColour = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
+	const auto colourFormat = GetStringSetting(L"ColourFormat");
+	{
+		lock_guard<mutex> dataLock(g_DataMutex);
+		HDRCOLOUR = hdrColour;
+		SDRCOLOUR = sdrColour;
+		ColourFormat = colourFormat;
+	}
 
 	// EDID profile: Auto -> resolved via host OS build number (issue #612).
 	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));

@@ -1,12 +1,11 @@
 #include "DriverState.h"
 
 std::mutex g_Mutex;
-std::mutex g_DataMutex; // Protects monitorModes, s_KnownMonitorModes2, numVirtualDisplays, gpuname
+std::mutex g_DataMutex; // Protects monitorModes, display colour settings, numVirtualDisplays, gpuname
 WDFDEVICE g_GlobalDevice = nullptr;
 
 DriverOptions Options;
 std::vector<std::tuple<int, int, int, int>> monitorModes;
-std::vector<DISPLAYCONFIG_VIDEO_SIGNAL_INFO> s_KnownMonitorModes2;
 UINT numVirtualDisplays = 1;
 std::wstring gpuname = L"";
 std::wstring confpath = []()

@@ -15,7 +15,6 @@ extern WDFDEVICE g_GlobalDevice;
 
 extern DriverOptions Options;
 extern std::vector<std::tuple<int, int, int, int>> monitorModes;
-extern std::vector<DISPLAYCONFIG_VIDEO_SIGNAL_INFO> s_KnownMonitorModes2;
 extern UINT numVirtualDisplays;
 extern std::wstring gpuname;
 extern std::wstring confpath;

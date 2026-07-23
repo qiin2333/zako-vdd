@@ -491,7 +491,9 @@ void HandleRefreshModesCommand(HANDLE, wchar_t *)
 		return;
 	}
 
-	int n = pContext->pContext->RefreshMonitorModes();
+	// REFRESHMODES is the explicit force-republish command for mode lists that
+	// may have been changed outside SETMODES.
+	int n = pContext->pContext->RefreshMonitorModes(true);
 	VDD_LOG_INFO_STREAM("REFRESHMODES: published modes to " << n << " monitor(s)");
 }
 
@@ -531,12 +533,13 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 		return;
 	}
 
-	// Keep the in-memory list and any live monitor publication atomic with
-	// respect to create/destroy commands. This also ensures a monitor arrival
-	// and its recorded description snapshot observe the same mode generation.
+	// Compare, replace and publish the list atomically with respect to
+	// create/destroy commands.
 	lock_guard<mutex> lock(g_Mutex);
+	bool modeListChanged = false;
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
+		modeListChanged = monitorModes != parsed;
 		monitorModes = parsed;
 	}
 	VDD_LOG_INFO_STREAM("SETMODES: applied " << parsed.size() << " modes (in-memory only)");
@@ -546,7 +549,7 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 		if (pContext && pContext->pContext)
 		{
-			int n = pContext->pContext->RefreshMonitorModes();
+			int n = pContext->pContext->RefreshMonitorModes(modeListChanged);
 			VDD_LOG_INFO_STREAM("SETMODES: published to " << n << " live monitor(s)");
 		}
 	}

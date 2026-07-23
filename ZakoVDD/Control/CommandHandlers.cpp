@@ -539,10 +539,13 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 	bool modeListChanged = false;
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
+		// Mode order is significant because the parse callbacks report index 0
+		// as the preferred monitor mode.
 		modeListChanged = monitorModes != parsed;
 		monitorModes = parsed;
 	}
-	VDD_LOG_INFO_STREAM("SETMODES: applied " << parsed.size() << " modes (in-memory only)");
+	VDD_LOG_INFO_STREAM("SETMODES: staged " << parsed.size()
+	                    << " modes (modeListChanged=" << (modeListChanged ? "true" : "false") << ")");
 
 	if (g_GlobalDevice != nullptr)
 	{

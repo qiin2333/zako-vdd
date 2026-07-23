@@ -397,6 +397,9 @@ bool IndirectDeviceContext::RecreateMonitor(unsigned int index)
 	const bool recreated = m_Monitors.count(index) > 0;
 	if (!recreated)
 	{
+		// Preserve the parameters so a later forced refresh can retry this
+		// monitor instead of losing its configuration permanently.
+		m_MonitorCreationParams[index] = params;
 		VDD_LOG_ERROR_STREAM("RecreateMonitor: failed to re-enumerate monitor index=" << index);
 	}
 	return recreated;
@@ -421,8 +424,8 @@ int IndirectDeviceContext::RefreshMonitorModes(bool refreshMonitorDescription)
 	if (refreshMonitorDescription)
 	{
 		vector<unsigned int> monitorIndices;
-		monitorIndices.reserve(m_Monitors.size());
-		for (const auto &pair : m_Monitors)
+		monitorIndices.reserve(m_MonitorCreationParams.size());
+		for (const auto &pair : m_MonitorCreationParams)
 		{
 			monitorIndices.push_back(pair.first);
 		}

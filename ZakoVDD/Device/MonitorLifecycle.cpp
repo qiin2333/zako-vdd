@@ -192,6 +192,15 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 				m_MonitorGuids.erase(index);
 			}
 
+			m_MonitorCreationParams[index] = {
+				pClientGuid != nullptr,
+				pClientGuid != nullptr ? *pClientGuid : GUID{},
+				maxNits,
+				minNits,
+				maxFALL,
+				widthCm,
+				heightCm};
+
 			{
 				lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
 				MonitorHdrSettings hdrSettings;
@@ -223,6 +232,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 	if (monIt == m_Monitors.end() || monIt->second == nullptr)
 	{
 		VDD_LOG_WARNING_STREAM("Monitor handle for index " << index << " is already null or not found");
+		m_MonitorCreationParams.erase(index);
 		return;
 	}
 
@@ -333,6 +343,8 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 		VDD_LOG_ERROR("Unknown exception during monitor destruction");
 		m_Monitors.erase(index);
 	}
+
+	m_MonitorCreationParams.erase(index);
 }
 
 void IndirectDeviceContext::DestroyAllMonitors()
@@ -355,14 +367,46 @@ void IndirectDeviceContext::DestroyAllMonitors()
 	}
 }
 
-int IndirectDeviceContext::RefreshMonitorModes()
+bool IndirectDeviceContext::RecreateMonitor(unsigned int index)
 {
-	if (!IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorUpdateModes2))
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
+	auto paramsIt = m_MonitorCreationParams.find(index);
+	if (paramsIt == m_MonitorCreationParams.end())
 	{
-		VDD_LOG_WARNING("RefreshMonitorModes: IddCxMonitorUpdateModes2 not available on this OS");
-		return -1;
+		VDD_LOG_ERROR_STREAM("RecreateMonitor: creation parameters missing for monitor index=" << index);
+		return false;
 	}
 
+	const MonitorCreationParams params = paramsIt->second;
+	VDD_LOG_INFO_STREAM("RecreateMonitor: re-enumerating monitor index=" << index
+	                    << " so Windows reparses its monitor description");
+
+	DestroyMonitor(index);
+	Sleep(100);
+
+	const GUID *pClientGuid = params.hasClientGuid ? &params.clientGuid : nullptr;
+	CreateMonitor(index,
+	              pClientGuid,
+	              params.maxNits,
+	              params.minNits,
+	              params.maxFALL,
+	              params.widthCm,
+	              params.heightCm);
+
+	const bool recreated = m_Monitors.count(index) > 0;
+	if (!recreated)
+	{
+		// Preserve the parameters so a later forced refresh can retry this
+		// monitor instead of losing its configuration permanently.
+		m_MonitorCreationParams[index] = params;
+		VDD_LOG_ERROR_STREAM("RecreateMonitor: failed to re-enumerate monitor index=" << index);
+	}
+	return recreated;
+}
+
+int IndirectDeviceContext::RefreshMonitorModes(bool refreshMonitorDescription)
+{
 	vector<tuple<int, int, int, int>> localModes;
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
@@ -375,6 +419,40 @@ int IndirectDeviceContext::RefreshMonitorModes()
 		return 0;
 	}
 
+	int refreshed = 0;
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+	if (refreshMonitorDescription)
+	{
+		vector<unsigned int> monitorIndices;
+		monitorIndices.reserve(m_MonitorCreationParams.size());
+		for (const auto &pair : m_MonitorCreationParams)
+		{
+			monitorIndices.push_back(pair.first);
+		}
+
+		// Updating target modes cannot add a mode that is absent from the
+		// monitor-description list cached by Windows. Callers request this
+		// path only when that description must be republished.
+		for (unsigned int index : monitorIndices)
+		{
+			if (RecreateMonitor(index))
+			{
+				++refreshed;
+			}
+		}
+
+		VDD_LOG_INFO_STREAM("RefreshMonitorModes: re-enumerated " << refreshed << "/"
+		                    << monitorIndices.size() << " monitor(s) with " << localModes.size()
+		                    << " updated monitor-description modes");
+		return refreshed;
+	}
+
+	if (!IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorUpdateModes2))
+	{
+		VDD_LOG_WARNING("RefreshMonitorModes: IddCxMonitorUpdateModes2 not available on this OS");
+		return -1;
+	}
+
 	vector<IDDCX_TARGET_MODE2> targetModes(localModes.size());
 	for (size_t i = 0; i < localModes.size(); ++i)
 	{
@@ -385,12 +463,9 @@ int IndirectDeviceContext::RefreshMonitorModes()
 			static_cast<UINT>(get<3>(localModes[i])));
 	}
 
-	int refreshed = 0;
-	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
 	for (const auto &pair : m_Monitors)
 	{
-		IDDCX_MONITOR hMonitor = pair.second;
-		if (hMonitor == nullptr)
+		if (pair.second == nullptr)
 		{
 			continue;
 		}
@@ -400,7 +475,7 @@ int IndirectDeviceContext::RefreshMonitorModes()
 		inArgs.TargetModeCount = static_cast<UINT>(targetModes.size());
 		inArgs.pTargetModes = targetModes.data();
 
-		NTSTATUS status = IddCxMonitorUpdateModes2(hMonitor, &inArgs);
+		NTSTATUS status = IddCxMonitorUpdateModes2(pair.second, &inArgs);
 		if (NT_SUCCESS(status))
 		{
 			++refreshed;
@@ -414,7 +489,7 @@ int IndirectDeviceContext::RefreshMonitorModes()
 		}
 	}
 
-	VDD_LOG_INFO_STREAM("RefreshMonitorModes: pushed " << refreshed << "/" << m_Monitors.size()
-	                    << " monitors with " << targetModes.size() << " modes (no departure)");
+	VDD_LOG_INFO_STREAM("RefreshMonitorModes: updated target modes for " << refreshed << "/"
+	                    << m_Monitors.size() << " monitor(s) with " << targetModes.size() << " modes");
 	return refreshed;
 }

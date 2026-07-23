@@ -49,10 +49,12 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 
 	BYTE freeSyncMinHz = 48;
 	BYTE freeSyncMaxHz = 60;
+	vector<tuple<int, int, int, int>> descriptionModes;
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
+		descriptionModes = monitorModes;
 		float maxHz = 0.0f;
-		for (const auto &m : monitorModes)
+		for (const auto &m : descriptionModes)
 		{
 			int num = get<2>(m);
 			int den = get<3>(m);
@@ -192,6 +194,20 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 				m_MonitorGuids.erase(index);
 			}
 
+			MonitorCreationParams creationParams;
+			if (pClientGuid != nullptr)
+			{
+				creationParams.hasClientGuid = true;
+				creationParams.clientGuid = *pClientGuid;
+			}
+			creationParams.maxNits = maxNits;
+			creationParams.minNits = minNits;
+			creationParams.maxFALL = maxFALL;
+			creationParams.widthCm = widthCm;
+			creationParams.heightCm = heightCm;
+			m_MonitorCreationParams[index] = creationParams;
+			m_MonitorDescriptionModes[index] = descriptionModes;
+
 			{
 				lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
 				MonitorHdrSettings hdrSettings;
@@ -223,6 +239,8 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 	if (monIt == m_Monitors.end() || monIt->second == nullptr)
 	{
 		VDD_LOG_WARNING_STREAM("Monitor handle for index " << index << " is already null or not found");
+		m_MonitorCreationParams.erase(index);
+		m_MonitorDescriptionModes.erase(index);
 		return;
 	}
 
@@ -319,6 +337,8 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 		VDD_LOG_DEBUG("Deleting monitor WDF object");
 		WdfObjectDelete(hMonitor);
 		m_Monitors.erase(monIt);
+		m_MonitorCreationParams.erase(index);
+		m_MonitorDescriptionModes.erase(index);
 		VDD_LOG_DEBUG("Monitor WDF object deleted successfully");
 
 		VDD_LOG_INFO_STREAM("Monitor object destroyed successfully (Index: " << index << ")");
@@ -327,11 +347,15 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 	{
 		VDD_LOG_ERROR_STREAM("Exception during monitor destruction (Index: " << index << "): " << e.what());
 		m_Monitors.erase(index);
+		m_MonitorCreationParams.erase(index);
+		m_MonitorDescriptionModes.erase(index);
 	}
 	catch (...)
 	{
 		VDD_LOG_ERROR("Unknown exception during monitor destruction");
 		m_Monitors.erase(index);
+		m_MonitorCreationParams.erase(index);
+		m_MonitorDescriptionModes.erase(index);
 	}
 }
 
@@ -355,14 +379,43 @@ void IndirectDeviceContext::DestroyAllMonitors()
 	}
 }
 
-int IndirectDeviceContext::RefreshMonitorModes()
+bool IndirectDeviceContext::RecreateMonitor(unsigned int index)
 {
-	if (!IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorUpdateModes2))
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
+	auto paramsIt = m_MonitorCreationParams.find(index);
+	if (paramsIt == m_MonitorCreationParams.end())
 	{
-		VDD_LOG_WARNING("RefreshMonitorModes: IddCxMonitorUpdateModes2 not available on this OS");
-		return -1;
+		VDD_LOG_ERROR_STREAM("RecreateMonitor: creation parameters missing for monitor index=" << index);
+		return false;
 	}
 
+	const MonitorCreationParams params = paramsIt->second;
+	VDD_LOG_INFO_STREAM("RecreateMonitor: re-enumerating monitor index=" << index
+	                    << " so Windows reparses its monitor description");
+
+	DestroyMonitor(index);
+	Sleep(100);
+
+	const GUID *pClientGuid = params.hasClientGuid ? &params.clientGuid : nullptr;
+	CreateMonitor(index,
+	              pClientGuid,
+	              params.maxNits,
+	              params.minNits,
+	              params.maxFALL,
+	              params.widthCm,
+	              params.heightCm);
+
+	const bool recreated = m_Monitors.count(index) > 0;
+	if (!recreated)
+	{
+		VDD_LOG_ERROR_STREAM("RecreateMonitor: failed to re-enumerate monitor index=" << index);
+	}
+	return recreated;
+}
+
+int IndirectDeviceContext::RefreshMonitorModes()
+{
 	vector<tuple<int, int, int, int>> localModes;
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
@@ -386,12 +439,35 @@ int IndirectDeviceContext::RefreshMonitorModes()
 	}
 
 	int refreshed = 0;
+	int targetModeUpdates = 0;
+	int recreatedMonitors = 0;
+	int failedMonitors = 0;
+	vector<unsigned int> monitorsToRecreate;
+	const bool canUpdateTargetModes = IDD_IS_FUNCTION_AVAILABLE(IddCxMonitorUpdateModes2);
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
 	for (const auto &pair : m_Monitors)
 	{
 		IDDCX_MONITOR hMonitor = pair.second;
 		if (hMonitor == nullptr)
 		{
+			continue;
+		}
+
+		auto descriptionModesIt = m_MonitorDescriptionModes.find(pair.first);
+		// Updating target modes cannot add a mode that is absent from the
+		// monitor-description list cached by Windows. Re-enumerate only when
+		// that description changed; unchanged lists retain the fast path.
+		if (descriptionModesIt == m_MonitorDescriptionModes.end() || descriptionModesIt->second != localModes)
+		{
+			monitorsToRecreate.push_back(pair.first);
+			continue;
+		}
+
+		if (!canUpdateTargetModes)
+		{
+			++failedMonitors;
+			VDD_LOG_WARNING_STREAM("RefreshMonitorModes: IddCxMonitorUpdateModes2 is unavailable for monitor index="
+			                       << pair.first);
 			continue;
 		}
 
@@ -404,17 +480,35 @@ int IndirectDeviceContext::RefreshMonitorModes()
 		if (NT_SUCCESS(status))
 		{
 			++refreshed;
+			++targetModeUpdates;
 			VDD_LOG_DEBUG_STREAM("RefreshMonitorModes: monitor index=" << pair.first
 			                     << " status=0x" << hex << status << " modeCount=" << dec << targetModes.size());
 		}
 		else
 		{
+			++failedMonitors;
 			VDD_LOG_WARNING_STREAM("RefreshMonitorModes: monitor index=" << pair.first
 			                       << " status=0x" << hex << status << " modeCount=" << dec << targetModes.size());
 		}
 	}
 
-	VDD_LOG_INFO_STREAM("RefreshMonitorModes: pushed " << refreshed << "/" << m_Monitors.size()
-	                    << " monitors with " << targetModes.size() << " modes (no departure)");
+	for (unsigned int index : monitorsToRecreate)
+	{
+		if (RecreateMonitor(index))
+		{
+			++refreshed;
+			++recreatedMonitors;
+		}
+		else
+		{
+			++failedMonitors;
+		}
+	}
+
+	VDD_LOG_INFO_STREAM("RefreshMonitorModes: published " << refreshed << "/"
+	                    << (refreshed + failedMonitors) << " monitor(s) with " << targetModes.size()
+	                    << " modes (target updates=" << targetModeUpdates
+	                    << ", re-enumerations=" << recreatedMonitors
+	                    << ", failures=" << failedMonitors << ")");
 	return refreshed;
 }

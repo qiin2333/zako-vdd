@@ -492,7 +492,7 @@ void HandleRefreshModesCommand(HANDLE, wchar_t *)
 	}
 
 	int n = pContext->pContext->RefreshMonitorModes();
-	VDD_LOG_INFO_STREAM("REFRESHMODES: refreshed " << n << " monitor(s) without departure");
+	VDD_LOG_INFO_STREAM("REFRESHMODES: published modes to " << n << " monitor(s)");
 }
 
 void HandleSetModesCommand(HANDLE, wchar_t *param)
@@ -531,6 +531,10 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 		return;
 	}
 
+	// Keep the in-memory list and any live monitor publication atomic with
+	// respect to create/destroy commands. This also ensures a monitor arrival
+	// and its recorded description snapshot observe the same mode generation.
+	lock_guard<mutex> lock(g_Mutex);
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
 		monitorModes = parsed;
@@ -539,12 +543,11 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 
 	if (g_GlobalDevice != nullptr)
 	{
-		lock_guard<mutex> lock(g_Mutex);
 		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 		if (pContext && pContext->pContext)
 		{
 			int n = pContext->pContext->RefreshMonitorModes();
-			VDD_LOG_INFO_STREAM("SETMODES: pushed to " << n << " live monitor(s)");
+			VDD_LOG_INFO_STREAM("SETMODES: published to " << n << " live monitor(s)");
 		}
 	}
 }

@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <tuple>
 #include <vector>
 
 namespace Microsoft
@@ -42,11 +43,29 @@ namespace Microsoft
 			int RefreshMonitorModes();
 
 		protected:
+			struct MonitorCreationParams
+			{
+				bool hasClientGuid = false;
+				GUID clientGuid{};
+				float maxNits = 1000.0f;
+				float minNits = 0.0001f;
+				float maxFALL = 0.0f;
+				float widthCm = 0.0f;
+				float heightCm = 0.0f;
+			};
+
+			bool RecreateMonitor(unsigned int index);
+
 			WDFDEVICE m_WdfDevice;
 			IDDCX_ADAPTER m_Adapter;
 			mutable std::recursive_mutex m_monitorsMutex;
 			std::map<unsigned int, IDDCX_MONITOR> m_Monitors;
 			std::map<unsigned int, GUID> m_MonitorGuids;
+			std::map<unsigned int, MonitorCreationParams> m_MonitorCreationParams;
+			// IddCxMonitorUpdateModes2 updates target modes only. Keep the
+			// monitor-description snapshot from arrival so mode-list changes
+			// can trigger a new arrival and force Windows to reparse it.
+			std::map<unsigned int, std::vector<std::tuple<int, int, int, int>>> m_MonitorDescriptionModes;
 
 			std::map<IDDCX_MONITOR, DISPLAYCONFIG_VIDEO_SIGNAL_INFO> m_CommittedTargetModes;
 			// Presence in this map means CommitModes2 supplied an authoritative

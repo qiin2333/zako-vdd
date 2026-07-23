@@ -62,28 +62,6 @@ bool open_control_device(Handle& output, std::wstring& path, DWORD& native_error
   }
 }
 
-bool send_legacy_pipe_command(const std::wstring& command, DWORD& native_error) {
-  constexpr wchar_t kPipePath[] = L"\\\\.\\pipe\\ZakoVDDPipe";
-  if (!WaitNamedPipeW(kPipePath, 3000)) {
-    native_error = GetLastError();
-    return false;
-  }
-  Handle pipe;
-  pipe.value = CreateFileW(kPipePath, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-  if (pipe.value == INVALID_HANDLE_VALUE) {
-    native_error = GetLastError();
-    return false;
-  }
-  DWORD written = 0;
-  const DWORD bytes = static_cast<DWORD>(command.size() * sizeof(wchar_t));
-  if (!WriteFile(pipe.value, command.data(), bytes, &written, nullptr) || written != bytes) {
-    native_error = GetLastError();
-    return false;
-  }
-  FlushFileBuffers(pipe.value);
-  return true;
-}
-
 bool target_hdr_enabled(const DISPLAYCONFIG_PATH_INFO& path) {
   struct AdvancedColorInfo2 {
     DISPLAYCONFIG_DEVICE_INFO_HEADER header;
@@ -310,14 +288,8 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring path;
   DWORD native_error = ERROR_SUCCESS;
   if (!open_control_device(device, path, native_error)) {
-    const DWORD interface_error = native_error;
-    if (!send_legacy_pipe_command(command, native_error)) {
-      std::wcerr << L"open_control_device=FAILED native_error=" << interface_error
-                 << L" legacy_pipe=FAILED native_error=" << native_error << L'\n';
-      return 3;
-    }
-    std::wcout << L"transport=legacy_pipe command=" << command << L" status=SUCCESS\n";
-    return 0;
+    std::wcerr << L"open_control_device=FAILED native_error=" << native_error << L'\n';
+    return 3;
   }
 
   DWORD returned = 0;

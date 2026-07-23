@@ -2,7 +2,6 @@
 #include "..\Adapter\GpuAdapterSelection.h"
 #include "..\Adapter\GpuStatus.h"
 #include "..\Config\DriverSettings.h"
-#include "..\Control\ControlTransport.h"
 #include "..\Core\DriverState.h"
 #include "..\Edid\Edid.h"
 #include "..\Logging\Logger.h"
@@ -220,6 +219,5 @@ void IndirectDeviceContext::InitAdapter()
 void IndirectDeviceContext::FinishInit()
 {
 	Options.Adapter.apply(m_Adapter);
-	SendLegacyPipeMessage("FinishInit");
 	VDD_LOG_INFO("Applied Adapter configs.");
 }

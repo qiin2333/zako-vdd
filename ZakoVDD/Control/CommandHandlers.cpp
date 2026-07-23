@@ -4,7 +4,6 @@
 #include "..\Adapter\GpuAdapterSelection.h"
 #include "..\Adapter\GpuStatus.h"
 #include "..\Config\DriverSettings.h"
-#include "..\Control\ControlTransport.h"
 #include "..\Device\IndirectDeviceContextWrapper.h"
 #include "..\Diagnostics\DriverDiagnostics.h"
 #include "..\Core\DriverState.h"
@@ -26,27 +25,25 @@ using namespace std;
 
 namespace
 {
-void ToggleSetting(HANDLE hPipe, wchar_t *param, const wchar_t *settingName, const char *enableMsg, const char *disableMsg)
+void ToggleSetting(wchar_t *param, const wchar_t *settingName, const char *enableMsg, const char *disableMsg)
 {
 	if (wcsncmp(param, L"true", 4) == 0)
 	{
 		UpdateXmlToggleSetting(true, settingName);
 		VDD_LOG_INFO(enableMsg);
-		ReloadDriver(hPipe);
+		ReloadDriver();
 	}
 	else if (wcsncmp(param, L"false", 5) == 0)
 	{
 		UpdateXmlToggleSetting(false, settingName);
 		VDD_LOG_INFO(disableMsg);
-		ReloadDriver(hPipe);
+		ReloadDriver();
 	}
 }
 }
 
-void ReloadDriver(HANDLE hPipe)
+void ReloadDriver()
 {
-	UNREFERENCED_PARAMETER(hPipe);
-
 	VDD_LOG_INFO("Starting driver reload process");
 
 	if (g_GlobalDevice == nullptr)
@@ -127,38 +124,38 @@ void ReloadDriver(HANDLE hPipe)
 	}
 }
 
-void HandleReloadDriverCommand(HANDLE hPipe, wchar_t *)
+void HandleReloadDriverCommand(wchar_t *)
 {
 	VDD_LOG_INFO("Reloading the driver");
-	ReloadDriver(hPipe);
+	ReloadDriver();
 }
 
-void HandleHdrPlusCommand(HANDLE hPipe, wchar_t *param)
+void HandleHdrPlusCommand(wchar_t *param)
 {
-	ToggleSetting(hPipe, param, L"HDRPlus", "HDR+ Enabled", "HDR+ Disabled");
+	ToggleSetting(param, L"HDRPlus", "HDR+ Enabled", "HDR+ Disabled");
 }
 
-void HandleSdr10Command(HANDLE hPipe, wchar_t *param)
+void HandleSdr10Command(wchar_t *param)
 {
-	ToggleSetting(hPipe, param, L"SDR10bit", "SDR 10 Bit Enabled", "SDR 10 Bit Disabled");
+	ToggleSetting(param, L"SDR10bit", "SDR 10 Bit Enabled", "SDR 10 Bit Disabled");
 }
 
-void HandleCustomEdidCommand(HANDLE hPipe, wchar_t *param)
+void HandleCustomEdidCommand(wchar_t *param)
 {
-	ToggleSetting(hPipe, param, L"CustomEdid", "Custom Edid Enabled", "Custom Edid Disabled");
+	ToggleSetting(param, L"CustomEdid", "Custom Edid Enabled", "Custom Edid Disabled");
 }
 
-void HandlePreventSpoofCommand(HANDLE hPipe, wchar_t *param)
+void HandlePreventSpoofCommand(wchar_t *param)
 {
-	ToggleSetting(hPipe, param, L"PreventSpoof", "Prevent Spoof Enabled", "Prevent Spoof Disabled");
+	ToggleSetting(param, L"PreventSpoof", "Prevent Spoof Enabled", "Prevent Spoof Disabled");
 }
 
-void HandleCeaOverrideCommand(HANDLE hPipe, wchar_t *param)
+void HandleCeaOverrideCommand(wchar_t *param)
 {
-	ToggleSetting(hPipe, param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
+	ToggleSetting(param, L"EdidCeaOverride", "Cea override Enabled", "Cea override Disabled");
 }
 
-void HandleEdidProfileCommand(HANDLE, wchar_t *param)
+void HandleEdidProfileCommand(wchar_t *param)
 {
 	if (!param || *param == 0)
 	{
@@ -177,37 +174,37 @@ void HandleEdidProfileCommand(HANDLE, wchar_t *param)
 	VDD_LOG_INFO("EDID profile updated; recreate monitors to take effect");
 }
 
-void HandleVrrCommand(HANDLE hPipe, wchar_t *param)
+void HandleVrrCommand(wchar_t *param)
 {
-	ToggleSetting(hPipe, param, L"Vrr", "VRR Enabled", "VRR Disabled");
+	ToggleSetting(param, L"Vrr", "VRR Enabled", "VRR Disabled");
 }
 
-void HandleHardwareCursorCommand(HANDLE hPipe, wchar_t *param)
+void HandleHardwareCursorCommand(wchar_t *param)
 {
-	ToggleSetting(hPipe, param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
+	ToggleSetting(param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
 }
 
-void HandleD3DDeviceGpuCommand(HANDLE, wchar_t *)
+void HandleD3DDeviceGpuCommand(wchar_t *)
 {
 	VDD_LOG_INFO("Retrieving D3D GPU (This information may be inaccurate without reloading the driver first)");
 	InitializeD3DDeviceAndLogGPU();
 	VDD_LOG_INFO("Retrieved D3D GPU");
 }
 
-void HandleIddCxVersionCommand(HANDLE, wchar_t *)
+void HandleIddCxVersionCommand(wchar_t *)
 {
 	VDD_LOG_INFO("Logging iddcx version");
 	LogIddCxVersion();
 }
 
-void HandleGetAssignedGpuCommand(HANDLE, wchar_t *)
+void HandleGetAssignedGpuCommand(wchar_t *)
 {
 	VDD_LOG_INFO("Retrieving Assigned GPU");
 	GetGpuInfo();
 	VDD_LOG_INFO("Retrieved Assigned GPU");
 }
 
-void HandleGetAllGpusCommand(HANDLE, wchar_t *)
+void HandleGetAllGpusCommand(wchar_t *)
 {
 	VDD_LOG_INFO("Logging all GPUs");
 	VDD_LOG_INFO("Any GPUs which show twice but you only have one, will most likely be the GPU the driver is attached to");
@@ -215,7 +212,7 @@ void HandleGetAllGpusCommand(HANDLE, wchar_t *)
 	VDD_LOG_INFO("Logged all GPUs");
 }
 
-void HandleSetGpuCommand(HANDLE hPipe, wchar_t *param)
+void HandleSetGpuCommand(wchar_t *param)
 {
 	wstring gpuName = param;
 	gpuName = gpuName.substr(1, gpuName.size() - 2);
@@ -231,10 +228,10 @@ void HandleSetGpuCommand(HANDLE hPipe, wchar_t *param)
 	{
 		VDD_LOG_ERROR("Failed to update GPU setting in XML. Restarting anyway");
 	}
-	ReloadDriver(hPipe);
+	ReloadDriver();
 }
 
-void HandleSetDisplayCountCommand(HANDLE hPipe, wchar_t *param)
+void HandleSetDisplayCountCommand(wchar_t *param)
 {
 	VDD_LOG_INFO("Setting Display Count");
 
@@ -252,28 +249,10 @@ void HandleSetDisplayCountCommand(HANDLE hPipe, wchar_t *param)
 	{
 		VDD_LOG_ERROR("Failed to update display count setting in XML. Restarting anyway");
 	}
-	ReloadDriver(hPipe);
+	ReloadDriver();
 }
 
-void HandleGetSettingsCommand(HANDLE hPipe, wchar_t *)
-{
-	wstring settingsResponse = L"SETTINGS LOG=ETW";
-
-	if (hPipe != INVALID_HANDLE_VALUE && hPipe != NULL)
-	{
-		DWORD bytesWritten;
-		DWORD bytesToWrite = static_cast<DWORD>((settingsResponse.length() + 1) * sizeof(wchar_t));
-		WriteFile(hPipe, settingsResponse.c_str(), bytesToWrite, &bytesWritten, NULL);
-	}
-}
-
-void HandlePingCommand(HANDLE, wchar_t *)
-{
-	SendLegacyPipeMessage("PONG");
-	VDD_LOG_VERBOSE("Heartbeat Ping");
-}
-
-void HandleCreateMonitorCommand(HANDLE, wchar_t *param)
+void HandleCreateMonitorCommand(wchar_t *param)
 {
 	if (g_GlobalDevice == nullptr)
 	{
@@ -436,7 +415,7 @@ void HandleCreateMonitorCommand(HANDLE, wchar_t *param)
 	}
 }
 
-void HandleDestroyMonitorCommand(HANDLE, wchar_t *)
+void HandleDestroyMonitorCommand(wchar_t *)
 {
 	if (g_GlobalDevice == nullptr)
 	{
@@ -475,7 +454,7 @@ void HandleDestroyMonitorCommand(HANDLE, wchar_t *)
 	}
 }
 
-void HandleRefreshModesCommand(HANDLE, wchar_t *)
+void HandleRefreshModesCommand(wchar_t *)
 {
 	if (g_GlobalDevice == nullptr)
 	{
@@ -495,7 +474,7 @@ void HandleRefreshModesCommand(HANDLE, wchar_t *)
 	VDD_LOG_INFO_STREAM("REFRESHMODES: refreshed " << n << " monitor(s) without departure");
 }
 
-void HandleSetModesCommand(HANDLE, wchar_t *param)
+void HandleSetModesCommand(wchar_t *param)
 {
 	if (param == nullptr || *param == L'\0')
 	{
@@ -549,7 +528,7 @@ void HandleSetModesCommand(HANDLE, wchar_t *param)
 	}
 }
 
-void HandleUnknownCommand(HANDLE, wchar_t *buffer)
+void HandleUnknownCommand(wchar_t *buffer)
 {
 	VDD_LOG_ERROR("Unknown command");
 	VDD_LOG_ERROR(WStringToString(buffer).c_str());

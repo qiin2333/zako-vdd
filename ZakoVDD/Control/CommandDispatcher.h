@@ -1,6 +1,6 @@
 #pragma once
 
-#include <windows.h>
+#include <wchar.h>
 
-void ReloadDriver(HANDLE hPipe);
-void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t* buffer);
+void ReloadDriver();
+void DispatchVddCommandBuffer(wchar_t *buffer);

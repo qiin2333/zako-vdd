@@ -14,7 +14,6 @@ Environment:
 
 #include "Driver.h"
 #include "Config\DriverSettings.h"
-#include "Control\ControlTransport.h"
 #include "Core\DriverState.h"
 #include "Device\WdfDeviceLifecycle.h"
 #include "Diagnostics\DriverDiagnostics.h"
@@ -57,9 +56,6 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	{
 		return Status;
 	}
-
-	// [LEGACY-PIPE]
-	StartNamedPipeServer();
 
 	return Status;
 }

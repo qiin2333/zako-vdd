@@ -226,14 +226,10 @@ _Use_decl_annotations_
 	Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
 	if (!NT_SUCCESS(Status))
 	{
-		VDD_LOG_ERROR_STREAM("WdfDeviceCreateDeviceInterface failed with status: " << Status
-		                     << " - IOCTL transport will be unavailable, pipe transport still works");
-		// Non-fatal: pipe transport remains usable, so don't abort device add.
+		VDD_LOG_ERROR_STREAM("WdfDeviceCreateDeviceInterface failed with status: " << Status);
+		return Status;
 	}
-	else
-	{
-		VDD_LOG_DEBUG("Registered Zako VDD control device interface");
-	}
+	VDD_LOG_DEBUG("Registered Zako VDD control device interface");
 
 	// Create a new device context object and attach it to the WDF device object
 	/*

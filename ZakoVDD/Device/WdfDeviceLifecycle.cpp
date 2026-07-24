@@ -73,9 +73,6 @@ VOID EvtDriverUnload(
 		Sleep(100);
 	}
 
-	// [LEGACY-PIPE] Stop the named pipe server
-	StopNamedPipeServer();
-
 	VDD_LOG_INFO("Driver unload completed");
 }
 
@@ -225,20 +222,14 @@ _Use_decl_annotations_
 	// Expose a custom device interface so external callers (Sunshine) can
 	// reach us via DeviceIoControl over CreateFile(\\?\GUID...). This is the
 	// transport that survives WUDFHost recycling: opening the interface
-	// PnP-wakes the driver back into D0 transparently. The legacy named pipe
-	// transport remains active in parallel for backwards compatibility but
-	// is now only the fallback path.
+	// PnP-wakes the driver back into D0 transparently.
 	Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
 	if (!NT_SUCCESS(Status))
 	{
-		VDD_LOG_ERROR_STREAM("WdfDeviceCreateDeviceInterface failed with status: " << Status
-		                     << " - IOCTL transport will be unavailable, pipe transport still works");
-		// Non-fatal: pipe transport remains usable, so don't abort device add.
+		VDD_LOG_ERROR_STREAM("WdfDeviceCreateDeviceInterface failed with status: " << Status);
+		return Status;
 	}
-	else
-	{
-		VDD_LOG_DEBUG("Registered Zako VDD control device interface");
-	}
+	VDD_LOG_DEBUG("Registered Zako VDD control device interface");
 
 	// Create a new device context object and attach it to the WDF device object
 	/*

@@ -1,28 +1,26 @@
 #pragma once
 
-#include <windows.h>
+#include <wchar.h>
 
-using VddCommandAction = void (*)(HANDLE, wchar_t *);
+using VddCommandAction = void (*)(wchar_t *);
 
-void HandleReloadDriverCommand(HANDLE hPipe, wchar_t *param);
-void HandleHdrPlusCommand(HANDLE hPipe, wchar_t *param);
-void HandleSdr10Command(HANDLE hPipe, wchar_t *param);
-void HandleCustomEdidCommand(HANDLE hPipe, wchar_t *param);
-void HandlePreventSpoofCommand(HANDLE hPipe, wchar_t *param);
-void HandleCeaOverrideCommand(HANDLE hPipe, wchar_t *param);
-void HandleEdidProfileCommand(HANDLE hPipe, wchar_t *param);
-void HandleVrrCommand(HANDLE hPipe, wchar_t *param);
-void HandleHardwareCursorCommand(HANDLE hPipe, wchar_t *param);
-void HandleD3DDeviceGpuCommand(HANDLE hPipe, wchar_t *param);
-void HandleIddCxVersionCommand(HANDLE hPipe, wchar_t *param);
-void HandleGetAssignedGpuCommand(HANDLE hPipe, wchar_t *param);
-void HandleGetAllGpusCommand(HANDLE hPipe, wchar_t *param);
-void HandleSetGpuCommand(HANDLE hPipe, wchar_t *param);
-void HandleSetDisplayCountCommand(HANDLE hPipe, wchar_t *param);
-void HandleGetSettingsCommand(HANDLE hPipe, wchar_t *param);
-void HandlePingCommand(HANDLE hPipe, wchar_t *param);
-void HandleCreateMonitorCommand(HANDLE hPipe, wchar_t *param);
-void HandleDestroyMonitorCommand(HANDLE hPipe, wchar_t *param);
-void HandleRefreshModesCommand(HANDLE hPipe, wchar_t *param);
-void HandleSetModesCommand(HANDLE hPipe, wchar_t *param);
-void HandleUnknownCommand(HANDLE hPipe, wchar_t *buffer);
+void HandleReloadDriverCommand(wchar_t *param);
+void HandleHdrPlusCommand(wchar_t *param);
+void HandleSdr10Command(wchar_t *param);
+void HandleCustomEdidCommand(wchar_t *param);
+void HandlePreventSpoofCommand(wchar_t *param);
+void HandleCeaOverrideCommand(wchar_t *param);
+void HandleEdidProfileCommand(wchar_t *param);
+void HandleVrrCommand(wchar_t *param);
+void HandleHardwareCursorCommand(wchar_t *param);
+void HandleD3DDeviceGpuCommand(wchar_t *param);
+void HandleIddCxVersionCommand(wchar_t *param);
+void HandleGetAssignedGpuCommand(wchar_t *param);
+void HandleGetAllGpusCommand(wchar_t *param);
+void HandleSetGpuCommand(wchar_t *param);
+void HandleSetDisplayCountCommand(wchar_t *param);
+void HandleCreateMonitorCommand(wchar_t *param);
+void HandleDestroyMonitorCommand(wchar_t *param);
+void HandleRefreshModesCommand(wchar_t *param);
+void HandleSetModesCommand(wchar_t *param);
+void HandleUnknownCommand(wchar_t *buffer);

@@ -11,7 +11,7 @@ struct Command
 	VddCommandAction action;
 };
 
-void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
+void DispatchVddCommandBuffer(wchar_t *buffer)
 {
 	Command commands[] = {
 		{L"RELOAD_DRIVER", 13, HandleReloadDriverCommand},
@@ -29,8 +29,6 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		{L"GETALLGPUS", 10, HandleGetAllGpusCommand},
 		{L"SETGPU", 6, HandleSetGpuCommand},
 		{L"SETDISPLAYCOUNT", 15, HandleSetDisplayCountCommand},
-		{L"GETSETTINGS", 11, HandleGetSettingsCommand},
-		{L"PING", 4, HandlePingCommand},
 		{L"REFRESHMODES", 12, HandleRefreshModesCommand},
 		{L"SETMODES", 8, HandleSetModesCommand},
 		{L"CREATEMONITOR", 13, HandleCreateMonitorCommand},
@@ -46,10 +44,10 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 			{
 				param++;
 			}
-			cmd.action(hPipeForResponse, param);
+			cmd.action(param);
 			return;
 		}
 	}
 
-	HandleUnknownCommand(hPipeForResponse, buffer);
+	HandleUnknownCommand(buffer);
 }

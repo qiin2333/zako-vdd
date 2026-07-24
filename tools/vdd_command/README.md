@@ -1,8 +1,7 @@
 # VDD command utility
 
 `vdd_command` sends UTF-16 commands through the ZakoVDD IOCTL device
-interface. It falls back to the administrator-only legacy pipe for older
-installed driver builds.
+interface.
 
 ```cmd
 build\vdd_command.exe CREATEMONITOR

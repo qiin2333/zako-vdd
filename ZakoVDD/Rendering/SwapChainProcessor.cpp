@@ -12,7 +12,8 @@ namespace Microsoft
 namespace IndirectDisp
 {
 
-SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex)
+SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent,
+	                                       unsigned int MonitorIndex, IDDCX_MONITOR Monitor, HANDLE hMouseEvent)
 	: m_hSwapChain(hSwapChain), m_Device(Device), m_hAvailableBufferEvent(NewFrameEvent), m_MonitorIndex(MonitorIndex)
 {
 	VDD_LOG_DEBUG_STREAM("Constructing SwapChainProcessor:"
@@ -30,6 +31,31 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Di
 	{
 		VDD_LOG_ERROR("[VddExport] Failed to construct SharedFrameExporter (non-fatal)");
 		m_Exporter.reset();
+	}
+
+	// The cursor is rendered by IddCx out-of-band and is not present in the
+	// framebuffer copied by SharedFrameExporter. Export its metadata alongside
+	// the frame channel when hardware-cursor setup provided an event.
+	if (Monitor && hMouseEvent)
+	{
+		try
+		{
+			m_CursorExporter = std::make_unique<CursorExporter>(MonitorIndex, Monitor, hMouseEvent);
+			if (!m_CursorExporter->Start())
+			{
+				VDD_LOG_WARNING("[VddCursor] Start failed; cursor will not be exported for this monitor");
+				m_CursorExporter.reset();
+			}
+		}
+		catch (...)
+		{
+			VDD_LOG_ERROR("[VddCursor] Failed to construct CursorExporter (non-fatal)");
+			m_CursorExporter.reset();
+		}
+	}
+	else
+	{
+		VDD_LOG_DEBUG("[VddCursor] Skipping CursorExporter (no monitor handle or hardware cursor disabled)");
 	}
 
 	m_hTerminateEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));

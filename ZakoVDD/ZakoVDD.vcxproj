@@ -31,6 +31,7 @@
     <ClCompile Include="Edid\Edid.cpp" />
     <ClCompile Include="Logging\Logger.cpp" />
     <ClCompile Include="Rendering\Direct3DDevice.cpp" />
+    <ClCompile Include="Rendering\CursorExporter.cpp" />
     <ClCompile Include="Rendering\SharedFrameExporter.cpp" />
     <ClCompile Include="Rendering\SwapChainProcessor.cpp" />
     <ClCompile Include="Util\RefreshRate.cpp" />
@@ -57,6 +58,7 @@
     <ClInclude Include="Edid\Edid.h" />
     <ClInclude Include="Logging\Logger.h" />
     <ClInclude Include="Rendering\Direct3DDevice.h" />
+    <ClInclude Include="Rendering\CursorExporter.h" />
     <ClInclude Include="Rendering\SharedFrameExporter.h" />
     <ClInclude Include="Rendering\SwapChainProcessor.h" />
     <ClInclude Include="Util\RefreshRate.h" />

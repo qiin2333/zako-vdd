@@ -44,7 +44,63 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 		}
 	}
 
-	m_ProcessingThreads[Monitor] = unique_ptr<SwapChainProcessor>(new SwapChainProcessor(SwapChain, Device, NewFrameEvent, monitorIndex));
+	// Set up the IddCx hardware-cursor event before constructing the processor;
+	// CursorExporter uses the same event handle to observe cursor changes.
+	HANDLE hMouseEventForProcessor = nullptr;
+	auto meIt = m_MouseEvents.find(Monitor);
+	if (meIt != m_MouseEvents.end())
+	{
+		if (meIt->second != nullptr)
+		{
+			CloseHandle(meIt->second);
+		}
+		m_MouseEvents.erase(meIt);
+		VDD_LOG_DEBUG("Cleaned up existing mouse event handle");
+	}
+
+	if (hardwareCursor)
+	{
+		HANDLE hMouseEvent = CreateEventA(nullptr, false, false, nullptr);
+		if (!hMouseEvent)
+		{
+			VDD_LOG_ERROR("Failed to create mouse event. No hardware cursor supported!");
+		}
+		else
+		{
+			m_MouseEvents[Monitor] = hMouseEvent;
+
+			IDDCX_CURSOR_CAPS cursorInfo = {};
+			cursorInfo.Size = sizeof(cursorInfo);
+			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
+			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
+			cursorInfo.MaxX = CursorMaxX;
+			cursorInfo.MaxY = CursorMaxY;
+
+			IDARG_IN_SETUP_HWCURSOR hwCursor = {};
+			hwCursor.CursorInfo = cursorInfo;
+			hwCursor.hNewCursorDataAvailable = hMouseEvent;
+
+			const NTSTATUS status = IddCxMonitorSetupHardwareCursor(Monitor, &hwCursor);
+			if (!NT_SUCCESS(status))
+			{
+				CloseHandle(hMouseEvent);
+				m_MouseEvents.erase(Monitor);
+				VDD_LOG_ERROR_STREAM("Failed to setup hardware cursor. Status: 0x" << std::hex << status);
+			}
+			else
+			{
+				hMouseEventForProcessor = hMouseEvent;
+				VDD_LOG_DEBUG("Hardware cursor setup completed successfully.");
+			}
+		}
+	}
+	else
+	{
+		VDD_LOG_DEBUG("Hardware cursor is disabled, Skipped creation.");
+	}
+
+	m_ProcessingThreads[Monitor] = unique_ptr<SwapChainProcessor>(
+	    new SwapChainProcessor(SwapChain, Device, NewFrameEvent, monitorIndex, Monitor, hMouseEventForProcessor));
 
 	auto procIt = m_ProcessingThreads.find(Monitor);
 	if (procIt != m_ProcessingThreads.end() && procIt->second)
@@ -69,54 +125,6 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 		}
 	}
 
-	if (hardwareCursor)
-	{
-		auto meIt = m_MouseEvents.find(Monitor);
-		if (meIt != m_MouseEvents.end())
-		{
-			if (meIt->second != nullptr)
-			{
-				CloseHandle(meIt->second);
-			}
-			m_MouseEvents.erase(meIt);
-			VDD_LOG_DEBUG("Cleaned up existing mouse event handle");
-		}
-
-		HANDLE hMouseEvent = CreateEventA(nullptr, false, false, nullptr);
-		if (!hMouseEvent)
-		{
-			VDD_LOG_ERROR("Failed to create mouse event. No hardware cursor supported!");
-			return;
-		}
-
-		m_MouseEvents[Monitor] = hMouseEvent;
-
-		IDDCX_CURSOR_CAPS cursorInfo = {};
-		cursorInfo.Size = sizeof(cursorInfo);
-		cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
-		cursorInfo.AlphaCursorSupport = alphaCursorSupport;
-		cursorInfo.MaxX = CursorMaxX;
-		cursorInfo.MaxY = CursorMaxY;
-
-		IDARG_IN_SETUP_HWCURSOR hwCursor = {};
-		hwCursor.CursorInfo = cursorInfo;
-		hwCursor.hNewCursorDataAvailable = hMouseEvent;
-
-		NTSTATUS Status = IddCxMonitorSetupHardwareCursor(Monitor, &hwCursor);
-		if (FAILED(Status))
-		{
-			CloseHandle(hMouseEvent);
-			m_MouseEvents.erase(Monitor);
-			VDD_LOG_ERROR("Failed to setup hardware cursor");
-			return;
-		}
-
-		VDD_LOG_DEBUG("Hardware cursor setup completed successfully.");
-	}
-	else
-	{
-		VDD_LOG_DEBUG("Hardware cursor is disabled, Skipped creation.");
-	}
 }
 
 void IndirectDeviceContext::CommitModes(const IDARG_IN_COMMITMODES *pInArgs)

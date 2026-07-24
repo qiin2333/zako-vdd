@@ -150,6 +150,9 @@
     <ClInclude Include="Rendering\Direct3DDevice.h">
       <Filter>Header Files\Rendering</Filter>
     </ClInclude>
+    <ClInclude Include="Rendering\CursorExporter.h">
+      <Filter>Header Files\Rendering</Filter>
+    </ClInclude>
     <ClInclude Include="Rendering\SharedFrameExporter.h">
       <Filter>Header Files\Rendering</Filter>
     </ClInclude>
@@ -222,6 +225,9 @@
       <Filter>Source Files\Logging</Filter>
     </ClCompile>
     <ClCompile Include="Rendering\Direct3DDevice.cpp">
+      <Filter>Source Files\Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="Rendering\CursorExporter.cpp">
       <Filter>Source Files\Rendering</Filter>
     </ClCompile>
     <ClCompile Include="Rendering\SharedFrameExporter.cpp">

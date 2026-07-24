@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Direct3DDevice.h"
+#include "CursorExporter.h"
 #include "SharedFrameExporter.h"
 
 #include <memory>
@@ -20,7 +21,8 @@ namespace Microsoft
 		class SwapChainProcessor
 		{
 		public:
-			SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent, unsigned int MonitorIndex);
+			SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, std::shared_ptr<Direct3DDevice> Device, HANDLE NewFrameEvent,
+			                    unsigned int MonitorIndex, IDDCX_MONITOR Monitor, HANDLE hMouseEvent);
 			~SwapChainProcessor();
 
 			void PublishModeMetadata(const DISPLAYCONFIG_VIDEO_SIGNAL_INFO &mode,
@@ -46,6 +48,7 @@ namespace Microsoft
 			Microsoft::WRL::Wrappers::Event m_hTerminateEvent;
 			unsigned int m_MonitorIndex;
 			std::unique_ptr<SharedFrameExporter> m_Exporter;
+			std::unique_ptr<CursorExporter> m_CursorExporter;
 		};
 	}
 }

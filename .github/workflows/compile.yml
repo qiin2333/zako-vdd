@@ -281,4 +281,4 @@ jobs:
           token: ${{ secrets.SUNSHINE_DISPATCH_TOKEN }}
           repository: qiin2333/foundation-sunshine
           event-type: driver-release
-          client-payload: '{"component": "vdd", "version": "${{ github.ref_name }}"}'
+          client-payload: '{"component": "vdd-win10", "version": "${{ github.ref_name }}"}'

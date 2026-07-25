@@ -45,7 +45,6 @@
         
     </resolutions>
 	<logging>
-		<SendLogsThroughPipe>true</SendLogsThroughPipe> <!-- Can only send logs through pipe if logging is enabled-->
 		<logging>false</logging>
 		<!-- DEBUG LOGGING FOR EXPERTS ONLY!-->
 		<debuglogging>false</debuglogging>

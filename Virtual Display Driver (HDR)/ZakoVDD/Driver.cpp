@@ -43,40 +43,21 @@ Environment:
 #include <set>
 #include <atomic>
 
-// =====================================================================
-// Transitional named-pipe transport
-// ---------------------------------------------------------------------
-// All pipe-related code in this translation unit is marked with the
-// tag [LEGACY-PIPE] in a leading comment so it can be removed in a
-// single mechanical pass once every Sunshine release in the wild
-// speaks IOCTL natively. To strip:
-//   1. grep -nE '\[LEGACY-PIPE\]' Driver.cpp and delete each tagged
-//      block (signature + body, plus the call site in DriverEntry /
-//      EvtDriverUnload).
-//   2. Drop PIPE_NAME, hPipeThread, g_Running (pipe-only), g_pipeHandle,
-//      sendLogsThroughPipe, SendToPipe, the SendLogsThroughPipe registry
-//      hook, HandleClient, StartNamedPipeServer, StopNamedPipeServer.
-//   3. Drop the `hPipeForResponse` parameter on DispatchVddCommandBuffer
-//      and remove the GETSETTINGS WriteFile guarded branch.
-// The IOCTL transport (VirtualDisplayDriverIoDeviceControl +
-// GUID_DEVINTERFACE_ZAKO_VDD_CONTROL) and DispatchVddCommandBuffer
-// remain untouched.
-// =====================================================================
+extern "C" const GUID GUID_DEVINTERFACE_ZAKO_VDD_CONTROL = ZAKO_VDD_CONTROL_GUID_INIT;
 
-// [LEGACY-PIPE]
-#define PIPE_NAME L"\\\\.\\pipe\\ZakoVDDPipe"
+#define ZAKO_IDDCX_STRUCT_INIT(obj, type) \
+	do \
+	{ \
+		RtlZeroMemory(&(obj), sizeof(obj)); \
+		(obj).Size = IDD_STRUCTURE_SIZE(type); \
+	} while (0)
 
 #pragma comment(lib, "xmllite.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
 
-// [LEGACY-PIPE]
-HANDLE hPipeThread = NULL;
-std::atomic<bool> g_Running{true};
 mutex g_Mutex;
 mutex g_DataMutex; // Protects monitorModes, s_KnownMonitorModes2, numVirtualDisplays, gpuname
-// [LEGACY-PIPE]
-HANDLE g_pipeHandle = INVALID_HANDLE_VALUE;
 WDFDEVICE g_GlobalDevice = nullptr;
 
 using namespace std;
@@ -178,9 +159,6 @@ std::atomic<bool> vrrEnabled{false};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
 std::atomic<bool> edidCeaOverride{false};
-// [LEGACY-PIPE]
-std::atomic<bool> sendLogsThroughPipe{true};
-
 // Mouse settings
 std::atomic<bool> alphaCursorSupport{true};
 int CursorMaxX = 128;
@@ -200,7 +178,6 @@ std::map<std::wstring, std::pair<std::wstring, std::wstring>> SettingsQueryMap =
 
 	{L"PreventMonitorSpoof", {L"PREVENTMONITORSPOOF", L"PreventSpoof"}},
 	{L"EdidCeaOverride", {L"EDIDCEAOVERRIDE", L"EdidCeaOverride"}},
-	{L"SendLogsThroughPipe", {L"SENDLOGSTHROUGHPIPE", L"SendLogsThroughPipe"}},
 	// Cursor Begin
 	{L"HardwareCursorEnabled", {L"HARDWARECURSOR", L"HardwareCursor"}},
 	{L"AlphaCursorSupport", {L"ALPHACURSORSUPPORT", L"AlphaCursorSupport"}},
@@ -692,17 +669,6 @@ void float_to_vsync(float refresh_rate, int &num, int &den)
 	den /= divisor;
 }
 
-// [LEGACY-PIPE] entire function
-void SendToPipe(const std::string &logMessage)
-{
-	if (g_pipeHandle != INVALID_HANDLE_VALUE)
-	{
-		DWORD bytesWritten;
-		DWORD logMessageSize = static_cast<DWORD>(logMessage.size());
-		WriteFile(g_pipeHandle, logMessage.c_str(), logMessageSize, &bytesWritten, NULL);
-	}
-}
-
 void vddlog(const char *type, const char *message)
 {
 	// Emit to ETW first - independent of file-logging toggle. TraceLogging
@@ -744,7 +710,7 @@ void vddlog(const char *type, const char *message)
 		logType = "INFO";
 		break;
 	case 'p':
-		logType = "PIPE";
+		logType = "CONTROL";
 		break;
 	case 'd':
 		logType = "DEBUG";
@@ -854,14 +820,6 @@ void vddlog(const char *type, const char *message)
 	fprintf(logFile, "[%s] [%s] %s\n", ss.str().c_str(), logType.c_str(), message);
 	fflush(logFile); // Ensure data is written immediately
 
-	// [LEGACY-PIPE] Send through pipe if enabled
-	if (sendLogsThroughPipe && g_pipeHandle != INVALID_HANDLE_VALUE)
-	{
-		string logMessage = ss.str() + " [" + logType + "] " + message + "\n";
-		DWORD bytesWritten;
-		DWORD logMessageSize = static_cast<DWORD>(logMessage.size());
-		WriteFile(g_pipeHandle, logMessage.c_str(), logMessageSize, &bytesWritten, NULL);
-	}
 }
 
 void LogIddCxVersion()
@@ -999,7 +957,7 @@ static const char *VddTypeToCategory(const char *type)
 	case 'i': return "info";
 	case 'c': return "companion";
 	case 'd': return "debug";
-	case 'p': return "pipe";
+	case 'p': return "control";
 	case 't': return "test";
 	default:  return "log";
 	}
@@ -1642,16 +1600,9 @@ void toggleSettingImpl(HANDLE hPipe, wchar_t *param, const wchar_t *settingName,
 	}
 }
 
-// Centralised command-buffer dispatch shared by both the legacy named-pipe
-// transport (HandleClient) and the new IOCTL transport
-// (VirtualDisplayDriverIoDeviceControl).
-//
-// `buffer` MUST be a writable, null-terminated UTF-16 string of at most
-// 2048 wchar_t. `hPipeForResponse` is the response sink for the few
-// commands that write back via WriteFile/SendToPipe (GETSETTINGS / PING);
-// pass INVALID_HANDLE_VALUE for IOCTL callers and those response handlers
-// will silently no-op (Sunshine never relies on the response payload of
-// any command it sends, so this is intentional and safe).
+// Dispatch a writable, null-terminated UTF-16 command received through IOCTL.
+// The response handle is reserved for legacy command handlers; Sunshine does
+// not request response payloads.
 void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 {
 	struct Command
@@ -1669,7 +1620,7 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 
 	auto handleLogDebug = [](HANDLE hPipe, wchar_t *param)
 	{
-		toggleSettingImpl(hPipe, param, L"debuglogging", "Pipe debugging enabled", "Debugging disabled");
+		toggleSettingImpl(hPipe, param, L"debuglogging", "Debug logging enabled", "Debug logging disabled");
 	};
 
 	auto handleLogging = [](HANDLE hPipe, wchar_t *param)
@@ -1834,10 +1785,7 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 
 	auto handlePing = [](HANDLE, wchar_t *)
 	{
-		// SendToPipe checks g_pipeHandle internally; for IOCTL callers
-		// g_pipeHandle is INVALID_HANDLE_VALUE so this is a logged no-op.
-		SendToPipe("PONG");
-		vddlog("p", "Heartbeat Ping");
+		vddlog("d", "IOCTL heartbeat ping");
 	};
 
 	auto handleCreateMonitor = [](HANDLE, wchar_t *param)
@@ -2192,28 +2140,6 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 	}
 }
 
-// [LEGACY-PIPE] entire function -- pipe-side wrapper around DispatchVddCommandBuffer
-void HandleClient(HANDLE hPipe)
-{
-	g_pipeHandle = hPipe;
-	vddlog("p", "Client Handling Enabled");
-	wchar_t buffer[2048];
-	DWORD bytesRead;
-	BOOL result = ReadFile(hPipe, buffer, sizeof(buffer) - sizeof(wchar_t), &bytesRead, NULL);
-	if (result && bytesRead != 0)
-	{
-		buffer[bytesRead / sizeof(wchar_t)] = L'\0';
-		wstring bufferwstr(buffer);
-		string bufferstr = WStringToString(bufferwstr);
-		vddlog("p", bufferstr.c_str());
-
-		DispatchVddCommandBuffer(hPipe, buffer);
-	}
-	DisconnectNamedPipe(hPipe);
-	CloseHandle(hPipe);
-	g_pipeHandle = INVALID_HANDLE_VALUE;
-}
-
 // IddCx redirects every IRP_MJ_DEVICE_CONTROL into its own internal queue
 // before any default WDF queue ever sees it. The only way to receive a
 // custom IOCTL in an IddCx driver is through this callback registered via
@@ -2251,8 +2177,7 @@ VOID VirtualDisplayDriverIoDeviceControl(
 			return;
 		}
 
-		// Mirror the legacy named-pipe HandleClient buffer (2048 wchar_t).
-		// Anything larger is almost certainly malformed input.
+		// Commands are bounded to the parser's 2048-wchar_t local buffer.
 		if (InputBufferLength > 2048 * sizeof(wchar_t))
 		{
 			WdfRequestComplete(Request, STATUS_BUFFER_OVERFLOW);
@@ -2286,9 +2211,6 @@ VOID VirtualDisplayDriverIoDeviceControl(
 			string bufferstr = WStringToString(bufferwstr);
 			vddlog("p", ("[IOCTL] " + bufferstr).c_str());
 
-			// Pass INVALID_HANDLE_VALUE so response-emitting handlers
-			// (GETSETTINGS / PING) silently skip their WriteFile path.
-			// Sunshine never observes those responses anyway.
 			DispatchVddCommandBuffer(INVALID_HANDLE_VALUE, buffer);
 		}
 		catch (const std::exception &e)
@@ -2309,110 +2231,6 @@ VOID VirtualDisplayDriverIoDeviceControl(
 	default:
 		WdfRequestComplete(Request, STATUS_NOT_SUPPORTED);
 		return;
-	}
-}
-
-
-// [LEGACY-PIPE] entire function -- accept-loop thread for the named pipe
-DWORD WINAPI NamedPipeServer(LPVOID lpParam)
-{
-	UNREFERENCED_PARAMETER(lpParam);
-
-	SECURITY_ATTRIBUTES sa;
-	sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-	sa.bInheritHandle = FALSE;
-	const wchar_t *sddl = L"D:(A;;GA;;;WD)";
-	vddlog("d", "Starting pipe with parameters: D:(A;;GA;;;WD)");
-	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-			sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
-	{
-		DWORD ErrorCode = GetLastError();
-		string errorMsg = to_string(ErrorCode);
-		vddlog("e", errorMsg.c_str());
-		return 1;
-	}
-	HANDLE hPipe;
-	while (g_Running)
-	{
-		hPipe = CreateNamedPipeW(
-			PIPE_NAME,
-			PIPE_ACCESS_DUPLEX,
-			PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-			PIPE_UNLIMITED_INSTANCES,
-			512, 512,
-			0,
-			&sa);
-
-		if (hPipe == INVALID_HANDLE_VALUE)
-		{
-			DWORD ErrorCode = GetLastError();
-			string errorMsg = to_string(ErrorCode);
-			vddlog("e", errorMsg.c_str());
-			LocalFree(sa.lpSecurityDescriptor);
-			return 1;
-		}
-
-		BOOL connected = ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-		if (connected)
-		{
-			vddlog("p", "Client Connected");
-			HandleClient(hPipe);
-		}
-		else
-		{
-			CloseHandle(hPipe);
-		}
-	}
-	LocalFree(sa.lpSecurityDescriptor);
-	return 0;
-}
-
-// [LEGACY-PIPE] entire function
-void StartNamedPipeServer()
-{
-	vddlog("p", "Starting Pipe");
-	hPipeThread = CreateThread(NULL, 0, NamedPipeServer, NULL, 0, NULL);
-	if (hPipeThread == NULL)
-	{
-		DWORD ErrorCode = GetLastError();
-		string errorMsg = to_string(ErrorCode);
-		vddlog("e", errorMsg.c_str());
-	}
-	else
-	{
-		vddlog("p", "Pipe created");
-	}
-}
-
-// [LEGACY-PIPE] entire function
-void StopNamedPipeServer()
-{
-	vddlog("p", "Stopping Pipe");
-	{
-		lock_guard<mutex> lock(g_Mutex);
-		g_Running = false;
-	}
-	if (hPipeThread)
-	{
-		HANDLE hPipe = CreateFileW(
-			PIPE_NAME,
-			GENERIC_READ | GENERIC_WRITE,
-			0,
-			NULL,
-			OPEN_EXISTING,
-			0,
-			NULL);
-
-		if (hPipe != INVALID_HANDLE_VALUE)
-		{
-			DisconnectNamedPipe(hPipe);
-			CloseHandle(hPipe);
-		}
-
-		WaitForSingleObject(hPipeThread, INFINITE);
-		CloseHandle(hPipeThread);
-		hPipeThread = NULL;
-		vddlog("p", "Stopped Pipe");
 	}
 }
 
@@ -2513,9 +2331,6 @@ VOID EvtDriverUnload(
 		Sleep(100);
 	}
 
-	// [LEGACY-PIPE] Stop the named pipe server
-	StopNamedPipeServer();
-
 	vddlog("i", "Driver unload completed");
 }
 
@@ -2539,8 +2354,6 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	customEdid = EnabledQuery(L"CustomEdidEnabled");
 	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
 	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
-	// [LEGACY-PIPE]
-	sendLogsThroughPipe = EnabledQuery(L"SendLogsThroughPipe");
 
 	// colour
 	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
@@ -2590,9 +2403,6 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	{
 		return Status;
 	}
-
-	// [LEGACY-PIPE]
-	StartNamedPipeServer();
 
 	return Status;
 }
@@ -3064,25 +2874,18 @@ _Use_decl_annotations_
 		return Status;
 	}
 
-	// Expose a custom device interface so external callers (Sunshine) can
-	// reach us via DeviceIoControl over CreateFile(\\?\GUID...). This is the
-	// transport that survives WUDFHost recycling: opening the interface
-	// PnP-wakes the driver back into D0 transparently. The legacy named pipe
-	// transport remains active in parallel for backwards compatibility but
-	// is now only the fallback path.
+	// Expose the required IOCTL control interface. Without it Sunshine cannot
+	// operate the virtual display, so fail DeviceAdd instead of leaving a
+	// running but unusable adapter.
 	Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
 	if (!NT_SUCCESS(Status))
 	{
 		logStream.str("");
-		logStream << "WdfDeviceCreateDeviceInterface failed with status: " << Status
-		          << " - IOCTL transport will be unavailable, pipe transport still works";
+		logStream << "WdfDeviceCreateDeviceInterface failed with status: " << Status;
 		vddlog("e", logStream.str().c_str());
-		// Non-fatal: pipe transport remains usable, so don't abort device add.
+		return Status;
 	}
-	else
-	{
-		vddlog("d", "Registered Zako VDD control device interface");
-	}
+	vddlog("d", "Registered Zako VDD control device interface");
 
 	// Create a new device context object and attach it to the WDF device object
 	/*
@@ -4713,7 +4516,7 @@ void IndirectDeviceContext::InitAdapter()
 	logStream.str("");
 
 	IDDCX_ADAPTER_CAPS AdapterCaps = {};
-	AdapterCaps.Size = sizeof(AdapterCaps);
+	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps, IDDCX_ADAPTER_CAPS);
 
 	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2))
 	{
@@ -4749,7 +4552,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare basic feature support for the adapter (required)
 	AdapterCaps.MaxMonitorsSupported = numVirtualDisplays;
-	AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
+	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps.EndPointDiagnostics, IDDCX_ENDPOINT_DIAGNOSTIC_INFO);
 	AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
 	AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
@@ -4760,7 +4563,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare your hardware and firmware versions (required)
 	IDDCX_ENDPOINT_VERSION Version = {};
-	Version.Size = sizeof(Version);
+	ZAKO_IDDCX_STRUCT_INIT(Version, IDDCX_ENDPOINT_VERSION);
 	Version.MajorVer = 1;
 	AdapterCaps.EndPointDiagnostics.pFirmwareVersion = &Version;
 	AdapterCaps.EndPointDiagnostics.pHardwareVersion = &Version;
@@ -4843,7 +4646,6 @@ void IndirectDeviceContext::InitAdapter()
 void IndirectDeviceContext::FinishInit()
 {
 	Options.Adapter.apply(m_Adapter);
-	SendToPipe("FinishInit");
 	vddlog("i", "Applied Adapter configs.");
 }
 
@@ -4994,7 +4796,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	}
 
 	IDDCX_MONITOR_INFO MonitorInfo = {};
-	MonitorInfo.Size = sizeof(MonitorInfo);
+	ZAKO_IDDCX_STRUCT_INIT(MonitorInfo, IDDCX_MONITOR_INFO);
 	MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
 	MonitorInfo.ConnectorIndex = index;
 	MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
@@ -5333,7 +5135,7 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 			m_MouseEvents[Monitor] = hMouseEvent;
 
 			IDDCX_CURSOR_CAPS cursorInfo = {};
-			cursorInfo.Size = sizeof(cursorInfo);
+			ZAKO_IDDCX_STRUCT_INIT(cursorInfo, IDDCX_CURSOR_CAPS);
 			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
 
@@ -5711,7 +5513,7 @@ _Use_decl_annotations_
 		// Copy the known modes to the output buffer
 		for (DWORD ModeIndex = 0; ModeIndex < localModes.size(); ModeIndex++)
 		{
-			pInArgs->pMonitorModes[ModeIndex].Size = sizeof(IDDCX_MONITOR_MODE);
+			ZAKO_IDDCX_STRUCT_INIT(pInArgs->pMonitorModes[ModeIndex], IDDCX_MONITOR_MODE);
 			pInArgs->pMonitorModes[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
 			pInArgs->pMonitorModes[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
 		}
@@ -5779,7 +5581,7 @@ void CreateTargetMode(DISPLAYCONFIG_VIDEO_SIGNAL_INFO &Mode, UINT Width, UINT He
 
 void CreateTargetMode(IDDCX_TARGET_MODE &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
-	Mode.Size = sizeof(Mode);
+	ZAKO_IDDCX_STRUCT_INIT(Mode, IDDCX_TARGET_MODE);
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
 
@@ -5792,7 +5594,7 @@ void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT V
 			  << ", VSyncDen: " << VSyncDen;
 	vddlog("d", logStream.str().c_str());
 
-	Mode.Size = sizeof(Mode);
+	ZAKO_IDDCX_STRUCT_INIT(Mode, IDDCX_TARGET_MODE2);
 
 	if (ColourFormat == L"RGB")
 	{
@@ -6069,7 +5871,7 @@ _Use_decl_annotations_
 		logStream << "Writing monitor modes to output buffer:";
 		for (DWORD ModeIndex = 0; ModeIndex < localModes.size(); ModeIndex++)
 		{
-			pInArgs->pMonitorModes[ModeIndex].Size = sizeof(IDDCX_MONITOR_MODE2);
+			ZAKO_IDDCX_STRUCT_INIT(pInArgs->pMonitorModes[ModeIndex], IDDCX_MONITOR_MODE2);
 			pInArgs->pMonitorModes[ModeIndex].Origin = IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR;
 			pInArgs->pMonitorModes[ModeIndex].MonitorVideoSignalInfo = s_KnownMonitorModes2[ModeIndex];
 

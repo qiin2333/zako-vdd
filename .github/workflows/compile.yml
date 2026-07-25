@@ -65,6 +65,14 @@ jobs:
             }
           }
 
+          $wdkTask = Get-ChildItem $wdkTaskPattern -ErrorAction SilentlyContinue |
+                     Sort-Object { $_.Directory.Parent.Name } -Descending |
+                     Select-Object -First 1
+          if ($wdkTask) {
+            Write-Host "Verified WDK MSBuild task after setup: $($wdkTask.FullName)"
+            exit 0
+          }
+
           # Install WDK VSIX for MSBuild integration into the selected VS2022 instance.
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path $vswhere)) {

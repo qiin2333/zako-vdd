@@ -1,4 +1,7 @@
 name: Virtual Display Driver Building
+env:
+  VS_VERSION_RANGE: '[17.0,18.0)'
+  REQUIRED_VS_VERSION: '17.0'
 on:
   workflow_dispatch:
   push:
@@ -6,6 +9,7 @@ on:
       - main
       - master
       - sunshine
+      - win10
     tags:
       - 'v*'
   pull_request_target:
@@ -13,6 +17,7 @@ on:
       - main
       - master
       - sunshine
+      - win10
 jobs:
   build:
     runs-on: windows-2022
@@ -29,13 +34,13 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
         with:
-          vs-version: '[17.0,18.0)'
+          vs-version: ${{ env.VS_VERSION_RANGE }}
 
       - name: Install WDK
         shell: pwsh
         run: |
           # Check if WDK and its VS2022 MSBuild tasks are installed.
-          $requiredVsVersion = "17.0"
+          $requiredVsVersion = $env:REQUIRED_VS_VERSION
           $wdkTaskPattern = "C:\Program Files*\Windows Kits\10\build\*\bin\Microsoft.DriverKit.Build.Tasks.$requiredVsVersion.dll"
           $wdfHeader = Get-ChildItem "C:\Program Files*\Windows Kits\10\Include\*\wdf" -Directory -ErrorAction SilentlyContinue |
                        Sort-Object { $_.Parent.Name } -Descending |
@@ -67,7 +72,7 @@ jobs:
             exit 1
           }
 
-          $vsInstall = & $vswhere -products * -requires Microsoft.Component.MSBuild -version "[17.0,18.0)" -property installationPath -latest
+          $vsInstall = & $vswhere -products * -requires Microsoft.Component.MSBuild -version $env:VS_VERSION_RANGE -property installationPath -latest
           if (-not $vsInstall) {
             Write-Error "Visual Studio 2022 with MSBuild was not found"
             exit 1
@@ -90,6 +95,10 @@ jobs:
             Write-Host "Installing VSIX: $($vsix.FullName)"
             $p = Start-Process -FilePath $vsixInstaller -ArgumentList "/q", $vsix.FullName -Wait -NoNewWindow -PassThru
             Write-Host "VSIX installer exit code: $($p.ExitCode)"
+            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 1001) {
+              Write-Error "VSIX install failed for $($vsix.FullName) (exit code $($p.ExitCode))"
+              exit 1
+            }
           }
 
           $wdkTask = Get-ChildItem $wdkTaskPattern -ErrorAction SilentlyContinue |

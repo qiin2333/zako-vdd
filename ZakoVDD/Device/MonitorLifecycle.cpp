@@ -224,7 +224,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	}
 }
 
-void IndirectDeviceContext::DestroyMonitor(unsigned int index)
+bool IndirectDeviceContext::DestroyMonitor(unsigned int index)
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
 
@@ -233,7 +233,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 	{
 		VDD_LOG_WARNING_STREAM("Monitor handle for index " << index << " is already null or not found");
 		m_MonitorCreationParams.erase(index);
-		return;
+		return true;
 	}
 
 	IDDCX_MONITOR hMonitor = monIt->second;
@@ -242,30 +242,9 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 
 	try
 	{
-		{
-			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
-			auto it = s_MonitorHdrSettingsMap.find(hMonitor);
-			if (it != s_MonitorHdrSettingsMap.end())
-			{
-				s_MonitorHdrSettingsMap.erase(it);
-				VDD_LOG_DEBUG("Cleaned up HDR settings for monitor");
-			}
-		}
-
-		m_CommittedTargetModes.erase(hMonitor);
-		m_CommittedTargetHdrStates.erase(hMonitor);
-
-		{
-			auto guidIt = m_MonitorGuids.find(index);
-			if (guidIt != m_MonitorGuids.end())
-			{
-				lock_guard<mutex> edidLock(s_EdidMapMutex);
-				s_ClientGuidEdidMap.erase(guidIt->second);
-				m_MonitorGuids.erase(guidIt);
-				VDD_LOG_DEBUG("Cleaned up EDID cache for monitor client GUID");
-			}
-		}
-
+		// Quiesce resources that can reference the monitor before asking IddCx
+		// to destroy it. Persistent bookkeeping is retained until departure
+		// succeeds so a failed attempt remains retryable.
 		{
 			auto scIt = m_ProcessingThreads.find(hMonitor);
 			if (scIt != m_ProcessingThreads.end())
@@ -321,30 +300,52 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 
 		if (!NT_SUCCESS(Status))
 		{
-			VDD_LOG_ERROR("All monitor departure attempts failed, continuing with cleanup");
+			// Keep the monitor registered so a later request can retry departure.
+			// An arrived IDDCX_MONITOR must not be deleted directly.
+			VDD_LOG_ERROR("All monitor departure attempts failed; retaining monitor for a later retry");
+			return false;
 		}
-
-		Sleep(500);
-
-		VDD_LOG_DEBUG("Deleting monitor WDF object");
-		WdfObjectDelete(hMonitor);
-		m_Monitors.erase(monIt);
-		VDD_LOG_DEBUG("Monitor WDF object deleted successfully");
-
-		VDD_LOG_INFO_STREAM("Monitor object destroyed successfully (Index: " << index << ")");
 	}
 	catch (const exception &e)
 	{
-		VDD_LOG_ERROR_STREAM("Exception during monitor destruction (Index: " << index << "): " << e.what());
-		m_Monitors.erase(index);
+		VDD_LOG_ERROR_STREAM("Exception during monitor destruction (Index: " << index
+		                     << "); retaining monitor for a later retry: " << e.what());
+		return false;
 	}
 	catch (...)
 	{
-		VDD_LOG_ERROR("Unknown exception during monitor destruction");
-		m_Monitors.erase(index);
+		VDD_LOG_ERROR("Unknown exception during monitor destruction; retaining monitor for a later retry");
+		return false;
 	}
 
+	// IddCxMonitorDeparture has destroyed the IDDCX_MONITOR. It is now safe to
+	// discard all bookkeeping keyed by the former handle.
+	{
+		lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
+		if (s_MonitorHdrSettingsMap.erase(hMonitor) > 0)
+		{
+			VDD_LOG_DEBUG("Cleaned up HDR settings for monitor");
+		}
+	}
+
+	m_CommittedTargetModes.erase(hMonitor);
+	m_CommittedTargetHdrStates.erase(hMonitor);
+
+	{
+		auto guidIt = m_MonitorGuids.find(index);
+		if (guidIt != m_MonitorGuids.end())
+		{
+			lock_guard<mutex> edidLock(s_EdidMapMutex);
+			s_ClientGuidEdidMap.erase(guidIt->second);
+			m_MonitorGuids.erase(guidIt);
+			VDD_LOG_DEBUG("Cleaned up EDID cache for monitor client GUID");
+		}
+	}
+
+	m_Monitors.erase(monIt);
 	m_MonitorCreationParams.erase(index);
+	VDD_LOG_INFO_STREAM("Monitor departed successfully (Index: " << index << ")");
+	return true;
 }
 
 void IndirectDeviceContext::DestroyAllMonitors()
@@ -382,7 +383,11 @@ bool IndirectDeviceContext::RecreateMonitor(unsigned int index)
 	VDD_LOG_INFO_STREAM("RecreateMonitor: re-enumerating monitor index=" << index
 	                    << " so Windows reparses its monitor description");
 
-	DestroyMonitor(index);
+	if (!DestroyMonitor(index))
+	{
+		VDD_LOG_ERROR_STREAM("RecreateMonitor: departure failed for monitor index=" << index);
+		return false;
+	}
 	Sleep(100);
 
 	const GUID *pClientGuid = params.hasClientGuid ? &params.clientGuid : nullptr;

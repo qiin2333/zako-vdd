@@ -4904,7 +4904,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	}
 }
 
-void IndirectDeviceContext::DestroyMonitor(unsigned int index)
+bool IndirectDeviceContext::DestroyMonitor(unsigned int index)
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
 
@@ -4914,7 +4914,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 		stringstream ws;
 		ws << "Monitor handle for index " << index << " is already null or not found";
 		vddlog("w", ws.str().c_str());
-		return;
+		return true;
 	}
 
 	IDDCX_MONITOR hMonitor = monIt->second;
@@ -4925,32 +4925,9 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 
 	try
 	{
-		// Clean up HDR settings for this monitor
-		{
-			lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
-			auto it = s_MonitorHdrSettingsMap.find(hMonitor);
-			if (it != s_MonitorHdrSettingsMap.end())
-			{
-				s_MonitorHdrSettingsMap.erase(it);
-				vddlog("d", "Cleaned up HDR settings for monitor");
-			}
-		}
-
-		m_CommittedTargetModes.erase(hMonitor);
-
-		// Clean up EDID cache for this monitor's client GUID
-		{
-			auto guidIt = m_MonitorGuids.find(index);
-			if (guidIt != m_MonitorGuids.end())
-			{
-				lock_guard<mutex> edidLock(s_EdidMapMutex);
-				s_ClientGuidEdidMap.erase(guidIt->second);
-				m_MonitorGuids.erase(guidIt);
-				vddlog("d", "Cleaned up EDID cache for monitor client GUID");
-			}
-		}
-
-		// Step 1: Stop SwapChain processing for this monitor
+		// Quiesce resources that can reference the monitor before asking IddCx
+		// to destroy it. Persistent bookkeeping is retained until departure
+		// succeeds so a failed attempt remains retryable.
 		{
 			auto scIt = m_ProcessingThreads.find(hMonitor);
 			if (scIt != m_ProcessingThreads.end())
@@ -4962,7 +4939,7 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 			}
 		}
 
-		// Step 1.5: Clean up hardware cursor event handle for this monitor
+		// Close the hardware cursor event before departure.
 		{
 			auto meIt = m_MouseEvents.find(hMonitor);
 			if (meIt != m_MouseEvents.end())
@@ -4977,10 +4954,10 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 			}
 		}
 
-		// Step 2: Wait for all resources to stabilize
+		// Wait for the quiesced resources to stabilize.
 		Sleep(300);
 
-		// Step 3: Report monitor departure to the system with retry mechanism
+		// Report monitor departure to the system with bounded retries.
 		NTSTATUS Status = STATUS_UNSUCCESSFUL;
 		{
 			vddlog("d", "Reporting monitor departure to system");
@@ -5013,36 +4990,55 @@ void IndirectDeviceContext::DestroyMonitor(unsigned int index)
 
 		if (!NT_SUCCESS(Status))
 		{
-			vddlog("e", "All monitor departure attempts failed, continuing with cleanup");
+			// Keep the monitor registered so a later request can retry departure.
+			// An arrived IDDCX_MONITOR must not be deleted directly.
+			vddlog("e", "All monitor departure attempts failed; retaining monitor for a later retry");
+			return false;
 		}
-
-		// Step 4: Wait for system to process the departure
-		Sleep(500);
-
-		// Step 5: Safely delete the monitor object
-		vddlog("d", "Deleting monitor WDF object");
-		WdfObjectDelete(hMonitor);
-		m_Monitors.erase(monIt);
-		vddlog("d", "Monitor WDF object deleted successfully");
-
-		logStream.str("");
-		logStream << "Monitor object destroyed successfully (Index: " << index << ")";
-		vddlog("i", logStream.str().c_str());
 	}
 	catch (const std::exception &e)
 	{
 		stringstream errorStream;
-		errorStream << "Exception during monitor destruction (Index: " << index << "): " << e.what();
+		errorStream << "Exception during monitor destruction (Index: " << index
+					<< "); retaining monitor for a later retry: " << e.what();
 		vddlog("e", errorStream.str().c_str());
-
-		// Force cleanup even after exception
-		m_Monitors.erase(index);
+		return false;
 	}
 	catch (...)
 	{
-		vddlog("e", "Unknown exception during monitor destruction");
-		m_Monitors.erase(index);
+		vddlog("e", "Unknown exception during monitor destruction; retaining monitor for a later retry");
+		return false;
 	}
+
+	// IddCxMonitorDeparture has destroyed the IDDCX_MONITOR. It is now safe to
+	// discard all bookkeeping keyed by the former handle.
+	{
+		lock_guard<mutex> hdrLock(s_HdrSettingsMutex);
+		if (s_MonitorHdrSettingsMap.erase(hMonitor) > 0)
+		{
+			vddlog("d", "Cleaned up HDR settings for monitor");
+		}
+	}
+
+	m_CommittedTargetModes.erase(hMonitor);
+
+	{
+		auto guidIt = m_MonitorGuids.find(index);
+		if (guidIt != m_MonitorGuids.end())
+		{
+			lock_guard<mutex> edidLock(s_EdidMapMutex);
+			s_ClientGuidEdidMap.erase(guidIt->second);
+			m_MonitorGuids.erase(guidIt);
+			vddlog("d", "Cleaned up EDID cache for monitor client GUID");
+		}
+	}
+
+	m_Monitors.erase(monIt);
+
+	logStream.str("");
+	logStream << "Monitor departed successfully (Index: " << index << ")";
+	vddlog("i", logStream.str().c_str());
+	return true;
 }
 
 void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent)

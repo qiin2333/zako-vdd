@@ -56,26 +56,21 @@ IndirectDeviceContext::~IndirectDeviceContext()
 	m_MouseEvents.clear();
 	VDD_LOG_DEBUG("Hardware cursor event handles cleaned up in destructor");
 
-	for (auto &pair : m_Monitors)
 	{
-		try
+		std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+		if (!m_Monitors.empty())
 		{
-			if (pair.second != nullptr)
-			{
-				VDD_LOG_DEBUG_STREAM("Cleaning up monitor " << pair.first << " in destructor");
-				WdfObjectDelete(pair.second);
-			}
+			// An arrived IDDCX_MONITOR is owned by IddCx and must only be
+			// explicitly removed with IddCxMonitorDeparture. Device cleanup
+			// already attempts that through DestroyAllMonitors. If departure
+			// failed, leave the WDF objects to the framework's parent teardown
+			// instead of deleting them directly from this context destructor.
+			VDD_LOG_WARNING_STREAM(m_Monitors.size()
+			                       << " monitor(s) remain during context destruction; "
+			                          "releasing local references without deleting IddCx objects");
 		}
-		catch (const exception &e)
-		{
-			VDD_LOG_ERROR_STREAM("Exception while cleaning monitor in destructor: " << e.what());
-		}
-		catch (...)
-		{
-			VDD_LOG_ERROR("Unknown exception while cleaning monitor in destructor");
-		}
+		m_Monitors.clear();
 	}
-	m_Monitors.clear();
 
 	VDD_LOG_DEBUG("IndirectDeviceContext cleanup completed.");
 }

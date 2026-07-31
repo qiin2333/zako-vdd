@@ -122,28 +122,35 @@ void LoadDriverSettings()
 	legacyNamedFrameChannel = EnabledQuery(L"LegacyNamedFrameChannel");
 
 	// Cursor
-	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
-	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport");
-	CursorMaxX = GetIntegerSetting(L"CursorMaxX");
-	CursorMaxY = GetIntegerSetting(L"CursorMaxY");
+	const bool hardwareCursorValue = EnabledQuery(L"HardwareCursorEnabled");
+	const bool alphaCursorSupportValue = EnabledQuery(L"AlphaCursorSupport", true);
+	const int cursorMaxXValue = GetIntegerSetting(L"CursorMaxX", 128);
+	const int cursorMaxYValue = GetIntegerSetting(L"CursorMaxY", 128);
 
 	int xorCursorSupportLevelInt = GetIntegerSetting(L"XorCursorSupportLevel");
-	string xorCursorSupportLevelName;
+	IDDCX_XOR_CURSOR_SUPPORT xorCursorSupportLevelValue;
 
 	if (xorCursorSupportLevelInt < 0 || xorCursorSupportLevelInt > 3)
 	{
 		VDD_LOG_WARNING("Selected Xor Level unsupported, defaulting to IDDCX_XOR_CURSOR_SUPPORT_FULL");
-		XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
+		xorCursorSupportLevelValue = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 	}
 	else
 	{
-		XorCursorSupportLevel = static_cast<IDDCX_XOR_CURSOR_SUPPORT>(xorCursorSupportLevelInt);
+		xorCursorSupportLevelValue = static_cast<IDDCX_XOR_CURSOR_SUPPORT>(xorCursorSupportLevelInt);
 	}
 
-	xorCursorSupportLevelName = XorCursorSupportLevelToString(XorCursorSupportLevel);
+	{
+		lock_guard<mutex> cursorSettingsLock(g_CursorSettingsMutex);
+		hardwareCursor = hardwareCursorValue;
+		alphaCursorSupport = alphaCursorSupportValue;
+		CursorMaxX = cursorMaxXValue;
+		CursorMaxY = cursorMaxYValue;
+		XorCursorSupportLevel = xorCursorSupportLevelValue;
+	}
 
-	VDD_LOG_INFO(("Selected Xor Cursor Support Level: " + xorCursorSupportLevelName).c_str());
-	VDD_LOG_INFO((string("Hardware cursor runtime setting: ") + (hardwareCursor ? "enabled" : "disabled")).c_str());
+	VDD_LOG_INFO((string("Selected Xor Cursor Support Level: ") + XorCursorSupportLevelToString(xorCursorSupportLevelValue)).c_str());
+	VDD_LOG_INFO((string("Hardware cursor runtime setting: ") + (hardwareCursorValue ? "enabled" : "disabled")).c_str());
 	VDD_LOG_INFO((string("Legacy named frame-channel export: ") + (legacyNamedFrameChannel ? "enabled" : "disabled")).c_str());
 }
 

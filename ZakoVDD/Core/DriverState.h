@@ -11,6 +11,7 @@
 
 extern std::mutex g_Mutex;
 extern std::mutex g_DataMutex;
+extern std::mutex g_CursorSettingsMutex;
 extern WDFDEVICE g_GlobalDevice;
 
 extern DriverOptions Options;

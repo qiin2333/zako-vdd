@@ -176,12 +176,12 @@ bool TryReadXmlText(const wstring &xmlName, wstring &value)
 }
 }
 
-bool EnabledQuery(const wstring &settingKey)
+bool EnabledQuery(const wstring &settingKey, bool defaultValue)
 {
 	const auto *settingNames = FindSettingNames(settingKey);
 	if (settingNames == nullptr)
 	{
-		return false;
+		return defaultValue;
 	}
 
 	const wstring &regName = settingNames->first;
@@ -198,6 +198,7 @@ bool EnabledQuery(const wstring &settingKey)
 		if (dwValue == 0)
 		{
 			LogQueries(VddLogLevel::Verbose, xmlName + L" - is disabled (value = 0).");
+			return false;
 		}
 	}
 	else
@@ -215,6 +216,7 @@ bool EnabledQuery(const wstring &settingKey)
 			if (registryValue == L"false" || registryValue == L"0")
 			{
 				LogQueries(VddLogLevel::Verbose, xmlName + L" - is disabled (string value).");
+				return false;
 			}
 		}
 		else
@@ -226,20 +228,25 @@ bool EnabledQuery(const wstring &settingKey)
 	wstring xmlValue;
 	if (!TryReadXmlText(xmlName, xmlValue))
 	{
-		return false;
+		return defaultValue;
 	}
 
-	bool xmlLoggingValue = (xmlValue == L"true");
+	if (xmlValue != L"true" && xmlValue != L"1" && xmlValue != L"false" && xmlValue != L"0")
+	{
+		return defaultValue;
+	}
+
+	bool xmlLoggingValue = (xmlValue == L"true" || xmlValue == L"1");
 	LogQueries(VddLogLevel::Info, xmlName + (xmlLoggingValue ? L" is enabled." : L" is disabled."));
 	return xmlLoggingValue;
 }
 
-int GetIntegerSetting(const wstring &settingKey)
+int GetIntegerSetting(const wstring &settingKey, int defaultValue)
 {
 	const auto *settingNames = FindSettingNames(settingKey);
 	if (settingNames == nullptr)
 	{
-		return -1;
+		return defaultValue;
 	}
 
 	const wstring &regName = settingNames->first;
@@ -271,7 +278,7 @@ int GetIntegerSetting(const wstring &settingKey)
 	wstring xmlValue;
 	if (!TryReadXmlText(xmlName, xmlValue))
 	{
-		return -1;
+		return defaultValue;
 	}
 
 	try
@@ -283,7 +290,7 @@ int GetIntegerSetting(const wstring &settingKey)
 	catch (const exception &)
 	{
 		LogQueries(VddLogLevel::Verbose, xmlName + L" - Failed to convert XML string value to integer.");
-		return -1;
+		return defaultValue;
 	}
 }
 

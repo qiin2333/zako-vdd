@@ -3,6 +3,7 @@
 #include "..\Driver.h"
 #include "..\Rendering\SwapChainProcessor.h"
 
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -15,6 +16,12 @@ namespace Microsoft
 		class IndirectDeviceContext
 		{
 		public:
+			struct MonitorRecreationResult
+			{
+				std::size_t expected = 0;
+				std::size_t recreated = 0;
+			};
+
 			IndirectDeviceContext(_In_ WDFDEVICE WdfDevice);
 			virtual ~IndirectDeviceContext();
 
@@ -38,6 +45,7 @@ namespace Microsoft
 			bool HasMonitor(unsigned int index) const { std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex); return m_Monitors.count(index) > 0; }
 			void UnassignAllSwapChains();
 			void DestroyAllMonitors();
+			MonitorRecreationResult RecreateAllMonitors();
 
 			int RefreshMonitorModes(bool refreshMonitorDescription);
 

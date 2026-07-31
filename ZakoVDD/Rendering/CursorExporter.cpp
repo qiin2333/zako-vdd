@@ -18,6 +18,22 @@ namespace
 
 static constexpr UINT32 DEFAULT_SDR_WHITE_LEVEL_NITS = 80u;
 
+constexpr UINT32 ToSharedCursorShapeType(IDDCX_CURSOR_SHAPE_TYPE type)
+{
+	switch (type)
+	{
+	case IDDCX_CURSOR_SHAPE_TYPE_ALPHA:
+		return VDD_CURSOR_SHAPE_COLOR;
+	case IDDCX_CURSOR_SHAPE_TYPE_MASKED_COLOR:
+		return VDD_CURSOR_SHAPE_MASKED_COLOR;
+	default:
+		return VDD_CURSOR_SHAPE_MONOCHROME;
+	}
+}
+
+static_assert(ToSharedCursorShapeType(IDDCX_CURSOR_SHAPE_TYPE_ALPHA) == VDD_CURSOR_SHAPE_COLOR);
+static_assert(ToSharedCursorShapeType(IDDCX_CURSOR_SHAPE_TYPE_MASKED_COLOR) == VDD_CURSOR_SHAPE_MASKED_COLOR);
+
 enum class CursorQueryApi
 {
 	Query1,
@@ -280,7 +296,7 @@ void CursorExporter::Run()
 		{
 			lastShapeId = queryResult.CursorShapeInfo.ShapeId;
 			m_CachedShape.ShapeId = queryResult.CursorShapeInfo.ShapeId;
-			m_CachedShape.Type = static_cast<UINT32>(queryResult.CursorShapeInfo.CursorType);
+			m_CachedShape.Type = ToSharedCursorShapeType(queryResult.CursorShapeInfo.CursorType);
 			m_CachedShape.Width = queryResult.CursorShapeInfo.Width;
 			m_CachedShape.Height = queryResult.CursorShapeInfo.Height;
 			m_CachedShape.Pitch = queryResult.CursorShapeInfo.Pitch;

@@ -2,8 +2,8 @@
 
 #include <string>
 
-bool EnabledQuery(const std::wstring& settingKey);
-int GetIntegerSetting(const std::wstring& settingKey);
+bool EnabledQuery(const std::wstring& settingKey, bool defaultValue = false);
+int GetIntegerSetting(const std::wstring& settingKey, int defaultValue = -1);
 std::wstring GetStringSetting(const std::wstring& settingKey);
 
 bool UpdateXmlToggleSetting(bool toggle, const wchar_t* variable);

@@ -71,10 +71,14 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 
 			IDDCX_CURSOR_CAPS cursorInfo = {};
 			cursorInfo.Size = sizeof(cursorInfo);
-			cursorInfo.ColorXorCursorSupport = IDDCX_XOR_CURSOR_SUPPORT_FULL;
+			cursorInfo.ColorXorCursorSupport = XorCursorSupportLevel;
 			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
 			cursorInfo.MaxX = CursorMaxX;
 			cursorInfo.MaxY = CursorMaxY;
+			VDD_LOG_INFO_STREAM("Setting up hardware cursor: MaxX=" << cursorInfo.MaxX
+			                    << ", MaxY=" << cursorInfo.MaxY
+			                    << ", alpha=" << cursorInfo.AlphaCursorSupport
+			                    << ", xor=" << cursorInfo.ColorXorCursorSupport);
 
 			IDARG_IN_SETUP_HWCURSOR hwCursor = {};
 			hwCursor.CursorInfo = cursorInfo;

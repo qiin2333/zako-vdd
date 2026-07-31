@@ -9,6 +9,11 @@
 #define VDD_CURSOR_MAX_HEIGHT 256u
 #define VDD_CURSOR_MAX_BYTES (VDD_CURSOR_MAX_WIDTH * VDD_CURSOR_MAX_HEIGHT * 4u)
 
+/* DXGI-compatible shape types consumed by the capture host. */
+#define VDD_CURSOR_SHAPE_MONOCHROME 0u
+#define VDD_CURSOR_SHAPE_COLOR 1u
+#define VDD_CURSOR_SHAPE_MASKED_COLOR 2u
+
 /*
  * Shared-memory cursor metadata followed immediately by ShapeBufferSize bytes
  * of cursor pixels. PublicationSequence is odd while the producer is writing

@@ -123,9 +123,9 @@ void LoadDriverSettings()
 
 	// Cursor
 	hardwareCursor = EnabledQuery(L"HardwareCursorEnabled");
-	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport");
-	CursorMaxX = GetIntegerSetting(L"CursorMaxX");
-	CursorMaxY = GetIntegerSetting(L"CursorMaxY");
+	alphaCursorSupport = EnabledQuery(L"AlphaCursorSupport", true);
+	CursorMaxX = GetIntegerSetting(L"CursorMaxX", 128);
+	CursorMaxY = GetIntegerSetting(L"CursorMaxY", 128);
 
 	int xorCursorSupportLevelInt = GetIntegerSetting(L"XorCursorSupportLevel");
 	string xorCursorSupportLevelName;

@@ -58,7 +58,21 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 		VDD_LOG_DEBUG("Cleaned up existing mouse event handle");
 	}
 
-	if (hardwareCursor)
+	bool hardwareCursorEnabled;
+	bool alphaCursorSupportEnabled;
+	int cursorMaxX;
+	int cursorMaxY;
+	IDDCX_XOR_CURSOR_SUPPORT xorCursorSupportLevel;
+	{
+		lock_guard<mutex> cursorSettingsLock(g_CursorSettingsMutex);
+		hardwareCursorEnabled = hardwareCursor;
+		alphaCursorSupportEnabled = alphaCursorSupport;
+		cursorMaxX = CursorMaxX;
+		cursorMaxY = CursorMaxY;
+		xorCursorSupportLevel = XorCursorSupportLevel;
+	}
+
+	if (hardwareCursorEnabled)
 	{
 		HANDLE hMouseEvent = CreateEventA(nullptr, false, false, nullptr);
 		if (!hMouseEvent)
@@ -71,10 +85,10 @@ void IndirectDeviceContext::AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHA
 
 			IDDCX_CURSOR_CAPS cursorInfo = {};
 			cursorInfo.Size = sizeof(cursorInfo);
-			cursorInfo.ColorXorCursorSupport = XorCursorSupportLevel;
-			cursorInfo.AlphaCursorSupport = alphaCursorSupport;
-			cursorInfo.MaxX = CursorMaxX;
-			cursorInfo.MaxY = CursorMaxY;
+			cursorInfo.ColorXorCursorSupport = xorCursorSupportLevel;
+			cursorInfo.AlphaCursorSupport = alphaCursorSupportEnabled;
+			cursorInfo.MaxX = cursorMaxX;
+			cursorInfo.MaxY = cursorMaxY;
 			VDD_LOG_INFO_STREAM("Setting up hardware cursor: MaxX=" << cursorInfo.MaxX
 			                    << ", MaxY=" << cursorInfo.MaxY
 			                    << ", alpha=" << cursorInfo.AlphaCursorSupport

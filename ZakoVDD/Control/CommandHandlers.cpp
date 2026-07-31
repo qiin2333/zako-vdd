@@ -182,11 +182,11 @@ void HandleVrrCommand(wchar_t *param)
 void HandleHardwareCursorCommand(wchar_t *param)
 {
 	bool enabled = false;
-	if (wcsncmp(param, L"true", 4) == 0)
+	if (wcscmp(param, L"true") == 0)
 	{
 		enabled = true;
 	}
-	else if (wcsncmp(param, L"false", 5) != 0)
+	else if (wcscmp(param, L"false") != 0)
 	{
 		VDD_LOG_WARNING("HARDWARECURSOR requires true or false");
 		return;
@@ -214,15 +214,16 @@ void HandleHardwareCursorCommand(wchar_t *param)
 	// the next AssignSwapChain call applies the new capability. Re-registering
 	// the adapter here fails with STATUS_ALREADY_REGISTERED.
 	LoadDriverSettings();
-	const bool hadActiveMonitor = pContext->pContext->HasActiveMonitor();
-	const int recreated = pContext->pContext->RecreateAllMonitors();
-	if (hadActiveMonitor && recreated == 0)
+	const auto recreation = pContext->pContext->RecreateAllMonitors();
+	if (recreation.recreated != recreation.expected)
 	{
-		VDD_LOG_ERROR("Hardware cursor setting updated, but active monitors could not be re-enumerated");
+		VDD_LOG_ERROR_STREAM("Hardware cursor setting updated, but only " << recreation.recreated
+		                     << "/" << recreation.expected << " active monitor(s) were re-enumerated");
 		return;
 	}
 
-	VDD_LOG_INFO_STREAM("Hardware cursor runtime refresh completed; re-enumerated " << recreated << " monitor(s)");
+	VDD_LOG_INFO_STREAM("Hardware cursor runtime refresh completed; re-enumerated "
+	                    << recreation.recreated << " monitor(s)");
 }
 
 void HandleD3DDeviceGpuCommand(wchar_t *)

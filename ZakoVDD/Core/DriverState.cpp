@@ -2,6 +2,7 @@
 
 std::mutex g_Mutex;
 std::mutex g_DataMutex; // Protects monitorModes, display colour settings, numVirtualDisplays, gpuname
+std::mutex g_CursorSettingsMutex; // Publishes cursor capability fields as one snapshot
 WDFDEVICE g_GlobalDevice = nullptr;
 
 DriverOptions Options;

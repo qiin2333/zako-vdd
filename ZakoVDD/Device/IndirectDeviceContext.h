@@ -38,6 +38,7 @@ namespace Microsoft
 			bool HasMonitor(unsigned int index) const { std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex); return m_Monitors.count(index) > 0; }
 			void UnassignAllSwapChains();
 			void DestroyAllMonitors();
+			int RecreateAllMonitors();
 
 			int RefreshMonitorModes(bool refreshMonitorDescription);
 

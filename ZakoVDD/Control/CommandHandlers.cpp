@@ -181,7 +181,48 @@ void HandleVrrCommand(wchar_t *param)
 
 void HandleHardwareCursorCommand(wchar_t *param)
 {
-	ToggleSetting(param, L"HardwareCursor", "Hardware Cursor Enabled", "Hardware Cursor Disabled");
+	bool enabled = false;
+	if (wcsncmp(param, L"true", 4) == 0)
+	{
+		enabled = true;
+	}
+	else if (wcsncmp(param, L"false", 5) != 0)
+	{
+		VDD_LOG_WARNING("HARDWARECURSOR requires true or false");
+		return;
+	}
+
+	UpdateXmlToggleSetting(enabled, L"HardwareCursor");
+	VDD_LOG_INFO(enabled ? "Hardware Cursor Enabled" : "Hardware Cursor Disabled");
+
+	if (g_GlobalDevice == nullptr)
+	{
+		VDD_LOG_ERROR("Global device not available for hardware cursor refresh");
+		return;
+	}
+
+	lock_guard<mutex> lock(g_Mutex);
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+	if (!pContext || !pContext->pContext)
+	{
+		VDD_LOG_ERROR("Invalid device context for hardware cursor refresh");
+		return;
+	}
+
+	// Hardware-cursor capabilities are bound to a monitor's swapchain. Refresh
+	// the runtime setting, then re-enumerate monitors on the existing adapter so
+	// the next AssignSwapChain call applies the new capability. Re-registering
+	// the adapter here fails with STATUS_ALREADY_REGISTERED.
+	LoadDriverSettings();
+	const bool hadActiveMonitor = pContext->pContext->HasActiveMonitor();
+	const int recreated = pContext->pContext->RecreateAllMonitors();
+	if (hadActiveMonitor && recreated == 0)
+	{
+		VDD_LOG_ERROR("Hardware cursor setting updated, but active monitors could not be re-enumerated");
+		return;
+	}
+
+	VDD_LOG_INFO_STREAM("Hardware cursor runtime refresh completed; re-enumerated " << recreated << " monitor(s)");
 }
 
 void HandleD3DDeviceGpuCommand(wchar_t *)

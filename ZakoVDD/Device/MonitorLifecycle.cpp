@@ -367,6 +367,31 @@ void IndirectDeviceContext::DestroyAllMonitors()
 	}
 }
 
+int IndirectDeviceContext::RecreateAllMonitors()
+{
+	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);
+
+	vector<unsigned int> monitorIndices;
+	monitorIndices.reserve(m_MonitorCreationParams.size());
+	for (const auto &pair : m_MonitorCreationParams)
+	{
+		monitorIndices.push_back(pair.first);
+	}
+
+	int recreated = 0;
+	for (unsigned int index : monitorIndices)
+	{
+		if (RecreateMonitor(index))
+		{
+			++recreated;
+		}
+	}
+
+	VDD_LOG_INFO_STREAM("RecreateAllMonitors: re-enumerated " << recreated << "/"
+	                    << monitorIndices.size() << " monitor(s)");
+	return recreated;
+}
+
 bool IndirectDeviceContext::RecreateMonitor(unsigned int index)
 {
 	std::lock_guard<std::recursive_mutex> lock(m_monitorsMutex);

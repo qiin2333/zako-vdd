@@ -120,17 +120,18 @@ jobs:
           $script  = "$PWD\tools\vdd-repro\Invoke-VddRepro.ps1"
           $resJson = "$PWD\results\result.json"
           $logFile = "$PWD\results\harness.log"
-          $line = "$q$pwshExe$q -NoProfile -ExecutionPolicy Bypass -File $q$script$q" +
-                  " -DriverDirectory $q$env:DRIVER_DIR$q -NefconPath $q$env:NEFCON_EXE$q" +
-                  " -OutputJson $q$resJson$q" +
-                  " -Modes $q${{ inputs.modes || '2560x1440x60,1920x1080x60,1280x720x60,2560x1440x120,1920x1080x120,1280x720x120' }}$q" +
-                  " -RequestedMode $q${{ inputs.requested_mode || '2560x1440x60' }}$q" +
-                  " -EdidProfile $q${{ inputs.edid_profile }}$q -Label $q${{ matrix.version }}$q" +
-                  " > $q$logFile$q 2>&1"
+          $line = "${q}$pwshExe${q} -NoProfile -ExecutionPolicy Bypass -File ${q}$script${q}" +
+                  " -DriverDirectory ${q}$env:DRIVER_DIR${q} -NefconPath ${q}$env:NEFCON_EXE${q}" +
+                  " -OutputJson ${q}$resJson${q}" +
+                  " -Modes ${q}${{ inputs.modes || '2560x1440x60,1920x1080x60,1280x720x60,2560x1440x120,1920x1080x120,1280x720x120' }}${q}" +
+                  " -RequestedMode ${q}${{ inputs.requested_mode || '2560x1440x60' }}${q}" +
+                  " -EdidProfile ${q}${{ inputs.edid_profile }}${q} -Label ${q}${{ matrix.version }}${q}" +
+                  " > ${q}$logFile${q} 2>&1"
           $wrapper = "$PWD\run-repro.cmd"
           Set-Content -LiteralPath $wrapper -Value $line -Encoding ascii
+          Write-Host "wrapper: $line"
 
-          schtasks /create /tn VddRepro /ru SYSTEM /sc once /st 00:00 /rl HIGHEST /f /tr "$q$wrapper$q" | Out-Null
+          schtasks /create /tn VddRepro /ru SYSTEM /sc once /st 00:00 /rl HIGHEST /f /tr "${q}$wrapper${q}" | Out-Null
           schtasks /run /tn VddRepro | Out-Null
 
           # The harness writes result.json from a finally block, so its presence
@@ -144,6 +145,18 @@ jobs:
 
           if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile }
           if (-not (Test-Path -LiteralPath $resJson)) { throw 'Harness produced no result.json.' }
+
+      - name: Check enumeration (interactive session)
+        shell: pwsh
+        run: |
+          # QueryDisplayConfig returns nothing to a session-0 process, so the
+          # SYSTEM pass cannot answer "did Windows enumerate it". Re-run the
+          # same code as the runner user, which does have a display config.
+          & .\tools\vdd-repro\Invoke-VddRepro.ps1 -CheckOnly `
+            -DriverDirectory $env:DRIVER_DIR `
+            -NefconPath $env:NEFCON_EXE `
+            -OutputJson "$PWD\results\result.json" `
+            -Label '${{ matrix.version }}'
 
       - name: Collect diagnostics
         if: always()

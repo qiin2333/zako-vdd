@@ -56,6 +56,7 @@ $registryKey      = 'HKLM:\SOFTWARE\ZakoTech\ZakoDisplayAdapter'
 
 $result = [ordered]@{
     label                 = $Label
+    identity              = ''
     modes                 = $Modes
     requestedMode         = $RequestedMode
     edidProfile           = $EdidProfile
@@ -149,14 +150,18 @@ public static class VddRepro
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr h);
 
-    // Returns 0 on success, otherwise the Win32 error. The driver never writes an
-    // output buffer, so a zero-length output is the correct call shape.
+    // Returns 0 on success. A CreateFileW failure is returned negated so the
+    // caller can tell "could not open the device" from "the driver rejected
+    // the IOCTL" -- they otherwise collapse onto the same Win32 codes.
     public static int Send(string path, uint code, string payload)
     {
-        IntPtr h = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        // Access mask and SQOS flags match Sunshine's vdd_ioctl::device_handle
+        // exactly, so a failure here is a failure there.
+        IntPtr h = CreateFileW(path, 0xC0000000, 3, IntPtr.Zero, 3, 0x00120000, IntPtr.Zero);
         if (h == new IntPtr(-1))
         {
-            return Marshal.GetLastWin32Error();
+            int err = Marshal.GetLastWin32Error();
+            return (err == 0) ? -1 : -err;
         }
         try
         {
@@ -289,6 +294,11 @@ function Invoke-Nefcon([string[]]$Arguments) {
 }
 
 try {
+    # Sunshine drives these IOCTLs from a LocalSystem service. The device
+    # interface SDDL can be stricter than "any administrator", so record who we
+    # actually are -- an ACCESS_DENIED open means little without it.
+    $result.identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+
     $inf = Join-Path $DriverDirectory 'ZakoVDD.inf'
     $cer = Join-Path $DriverDirectory 'ZakoVDD.cer'
     $xml = Join-Path $DriverDirectory 'vdd_settings.xml'
@@ -404,7 +414,8 @@ try {
     } catch { $result.pnpMonitors = @("query failed: $($_.Exception.Message)") }
 
     $result.stage = 'done'
-    $result.verdict = if ($result.createMonitorWin32 -ne 0) { 'createmonitor-ioctl-failed' }
+    $result.verdict = if ($result.createMonitorWin32 -lt 0) { 'device-open-denied' }
+        elseif ($result.createMonitorWin32 -ne 0) { 'createmonitor-ioctl-failed' }
         elseif ($result.monitorEnumerated) { 'ok' }
         else { 'created-but-not-enumerated' }
 }

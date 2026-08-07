@@ -1,0 +1,180 @@
+# Reproduces "ZakoVDD creates a monitor but Windows never enumerates it" on a
+# hosted runner, across a matrix of released driver versions.
+#
+# Downloads the published zakovdd.zip for each tag rather than rebuilding, so
+# the bits under test are exactly the bits users installed -- and no WDK install
+# is needed, which keeps each matrix leg to a couple of minutes.
+name: Repro VDD monitor enumeration
+
+on:
+  # The harness branch is not the default branch, so workflow_dispatch alone
+  # would not be selectable yet. Pushing to the branch runs it with the
+  # defaults below; dispatch is for re-runs with different inputs.
+  push:
+    branches: [ci/vdd-repro-harness]
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Comma-separated release tags to test'
+        required: true
+        default: 'v0.14.2,v0.14.4,v0.15.0,v0.15.1,v0.15.4'
+      modes:
+        description: 'SETMODES payload (WxHxHz, comma separated)'
+        required: false
+        default: '2560x1440x60,1920x1080x60,1280x720x60,2560x1440x120,1920x1080x120,1280x720x120'
+      requested_mode:
+        description: 'Mode recorded as the one under test'
+        required: false
+        default: '2560x1440x60'
+      edid_profile:
+        description: 'EDID profile override: Auto | Legacy | Modern (blank = build default)'
+        required: false
+        default: ''
+      runner:
+        description: 'Runner image'
+        required: false
+        default: 'windows-2022'
+        type: choice
+        options: ['windows-2022', 'windows-2025']
+
+permissions:
+  contents: read
+
+env:
+  NEFCON_VERSION: v1.17.40
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build version matrix
+        id: build
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          raw = os.environ["VERSIONS"]
+          tags = [t.strip() for t in raw.split(",") if t.strip()]
+          if not tags:
+              raise SystemExit("no versions given")
+          print("matrix=" + json.dumps({"version": tags}))
+          PY
+        env:
+          VERSIONS: ${{ inputs.versions || 'v0.14.2,v0.14.4,v0.15.0,v0.15.1,v0.15.4' }}
+
+  repro:
+    needs: prepare
+    runs-on: ${{ inputs.runner || 'windows-2022' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+
+      - name: Download driver release ${{ matrix.version }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path driver -Force | Out-Null
+          gh release download '${{ matrix.version }}' --pattern zakovdd.zip --dir . --repo '${{ github.repository }}'
+          Expand-Archive -Path zakovdd.zip -DestinationPath driver -Force
+          # Some releases nest the payload one directory deep; flatten it.
+          $inf = Get-ChildItem -Path driver -Filter ZakoVDD.inf -Recurse | Select-Object -First 1
+          if (-not $inf) { throw 'ZakoVDD.inf not found in zakovdd.zip' }
+          "DRIVER_DIR=$($inf.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-ChildItem -Path $inf.DirectoryName | Format-Table Name, Length
+
+      - name: Download nefcon
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:NEFCON_VERSION --pattern "nefcon_*.zip" --dir . --repo nefarius/nefcon
+          Expand-Archive -Path (Get-ChildItem -Filter 'nefcon_*.zip' | Select-Object -First 1).FullName -DestinationPath nefcon -Force
+          $exe = Get-ChildItem -Path nefcon -Filter nefconw.exe -Recurse |
+              Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if (-not $exe) { $exe = Get-ChildItem -Path nefcon -Filter nefconw.exe -Recurse | Select-Object -First 1 }
+          if (-not $exe) { throw 'nefconw.exe not found' }
+          "NEFCON_EXE=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Record runner OS build
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host "$($os.Caption) build $($os.BuildNumber) ($($os.Version))"
+          "$($os.Caption)|$($os.Version)" | Set-Content -Path osinfo.txt -Encoding utf8
+
+      - name: Run repro
+        shell: pwsh
+        run: |
+          & .\tools\vdd-repro\Invoke-VddRepro.ps1 `
+            -DriverDirectory $env:DRIVER_DIR `
+            -NefconPath $env:NEFCON_EXE `
+            -OutputJson "$PWD\results\result.json" `
+            -Modes '${{ inputs.modes || '2560x1440x60,1920x1080x60,1280x720x60,2560x1440x120,1920x1080x120,1280x720x120' }}' `
+            -RequestedMode '${{ inputs.requested_mode || '2560x1440x60' }}' `
+            -EdidProfile '${{ inputs.edid_profile }}' `
+            -Label '${{ matrix.version }}'
+
+      - name: Collect diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path results\diag -Force | Out-Null
+          if (Test-Path 'C:\VirtualDisplayDriver\Logs') {
+            Copy-Item 'C:\VirtualDisplayDriver\Logs\*' results\diag -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          & "$env:SystemRoot\System32\pnputil.exe" /enum-devices /class Display /connected |
+            Out-File results\diag\pnputil-display.txt -Encoding utf8
+          Copy-Item osinfo.txt results\diag -Force -ErrorAction SilentlyContinue
+          Get-WinEvent -LogName 'Microsoft-Windows-Kernel-PnP/Configuration' -MaxEvents 200 -ErrorAction SilentlyContinue |
+            Select-Object TimeCreated, Id, Message |
+            Out-File results\diag\pnp-events.txt -Encoding utf8
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-${{ matrix.version }}
+          path: results/
+          if-no-files-found: warn
+
+  summary:
+    needs: repro
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all
+          pattern: repro-*
+
+      - name: Summarize
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          rows = []
+          for p in sorted(pathlib.Path("all").rglob("result.json")):
+              try:
+                  rows.append(json.loads(p.read_text(encoding="utf-8-sig")))
+              except Exception as exc:
+                  rows.append({"label": p.parent.name, "verdict": f"unreadable: {exc}"})
+          print("## VDD monitor enumeration repro\n")
+          print("| version | driver ver | iface | ping | setmodes | createmonitor | enumerated | verdict |")
+          print("|---|---|---|---|---|---|---|---|")
+          for r in rows:
+              print("| {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                  r.get("label", "?"),
+                  (r.get("driverVersion") or "").replace("|", "/"),
+                  "yes" if r.get("controlInterface") else "no",
+                  r.get("pingWin32"), r.get("setModesWin32"), r.get("createMonitorWin32"),
+                  r.get("monitorEnumerated"), r.get("verdict", "?")))
+          errs = [r for r in rows if r.get("harnessError")]
+          if errs:
+              print("\n### Harness errors\n")
+              for r in errs:
+                  print("- **{}**: {}".format(r.get("label", "?"), r["harnessError"]))
+          PY

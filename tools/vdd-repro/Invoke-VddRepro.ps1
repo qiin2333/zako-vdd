@@ -81,13 +81,18 @@ $result = [ordered]@{
     secondsToEnumeration  = $null
     targets               = @()
     pnpMonitors           = @()
+    # Monitor devnodes that appeared across CREATEMONITOR. QueryDisplayConfig is
+    # blind in session 0, but PnP enumeration is not, so this is the enumeration
+    # signal that survives a SYSTEM-only run (Azure Run Command, scheduled task).
+    pnpMonitorsAdded      = @()
     devnodeStatus         = ''
     verdict               = 'unknown'
 }
 
 function Save-Result {
-    $result.targets     = @($result.targets)
-    $result.pnpMonitors = @($result.pnpMonitors)
+    $result.targets          = @($result.targets)
+    $result.pnpMonitors      = @($result.pnpMonitors)
+    $result.pnpMonitorsAdded = @($result.pnpMonitorsAdded)
     $dir = Split-Path -Parent $OutputJson
     if ($dir -and -not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -282,6 +287,12 @@ public static class VddRepro
 }
 '@
 
+function Get-MonitorInstanceIds {
+    try {
+        return @(Get-PnpDevice -Class Monitor -ErrorAction Stop | ForEach-Object { $_.InstanceId })
+    } catch { return @() }
+}
+
 function Wait-For([scriptblock]$Condition, [int]$Seconds, [int]$PollMs = 250) {    $deadline = (Get-Date).AddSeconds($Seconds)
     do {
         if (& $Condition) { return $true }
@@ -399,8 +410,16 @@ try {
     $result.setModesWin32 = [VddRepro]::Send($iface, [VddRepro]::IoctlCommand, "SETMODES $Modes")
     Write-Host "SETMODES -> $($result.setModesWin32)"
 
+    $monitorsBefore = Get-MonitorInstanceIds
+
     $result.createMonitorWin32 = [VddRepro]::Send($iface, [VddRepro]::IoctlCommand, 'CREATEMONITOR')
     Write-Host "CREATEMONITOR -> $($result.createMonitorWin32)"
+
+    # Give PnP a moment to enumerate before diffing.
+    Wait-For { (Get-MonitorInstanceIds | Where-Object { $monitorsBefore -notcontains $_ }).Count -gt 0 } `
+        $MonitorTimeoutSeconds | Out-Null
+    $result.pnpMonitorsAdded = @(Get-MonitorInstanceIds | Where-Object { $monitorsBefore -notcontains $_ })
+    Write-Host "New monitor devnodes: $($result.pnpMonitorsAdded -join ', ')"
   }
 
     # --- The actual question: does Windows enumerate the monitor? ------------
@@ -438,6 +457,7 @@ try {
         elseif ($result.createMonitorWin32 -lt 0) { 'device-open-denied' }
         elseif ($result.createMonitorWin32 -ne 0) { 'createmonitor-ioctl-failed' }
         elseif ($result.monitorEnumerated) { 'ok' }
+        elseif (@($result.pnpMonitorsAdded).Count -gt 0) { 'pnp-enumerated-no-display-target' }
         else { 'created-but-not-enumerated' }
 }
 catch {

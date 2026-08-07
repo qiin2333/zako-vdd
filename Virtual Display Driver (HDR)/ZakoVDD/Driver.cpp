@@ -2035,9 +2035,9 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 	// Replaces the live monitorModes list (in-memory only; not persisted to XML)
 	// and immediately republishes it to all live monitors via
 	// RefreshMonitorModes(). Allows clients (Sunshine etc.) to negotiate an
-	// exact session resolution. When the list actually changes the monitors are
-	// re-enumerated so Windows reparses the monitor description; an unchanged
-	// list takes the cheap no-departure path.
+	// exact session resolution. Only a list that actually changed triggers a
+	// re-enumeration so Windows reparses the monitor description; an unchanged
+	// list is a no-op.
 	auto handleSetModes = [](HANDLE, wchar_t *param)
 	{
 		if (param == nullptr || *param == L'\0')
@@ -2088,29 +2088,29 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 		   << (modeListChanged ? "true" : "false");
 		vddlog("i", ss.str().c_str());
 
-		// Push to live monitors. A changed mode list has to go out as a full
-		// re-enumeration: Windows will not accept a target mode that is absent
-		// from the monitor description it has cached, so a mode-only update
-		// would silently leave the new resolution unusable (and is unavailable
-		// altogether on Win10, where IddCxMonitorUpdateModes2 does not exist).
+		// Push to live monitors only when the list actually changed. A changed
+		// mode list has to go out as a full re-enumeration: Windows will not
+		// accept a target mode that is absent from the monitor description it
+		// has cached, so a mode-only update would silently leave the new
+		// resolution unusable (and is unavailable altogether on Win10, where
+		// IddCxMonitorUpdateModes2 does not exist). An unchanged list needs no
+		// push at all.
+		if (!modeListChanged)
+		{
+			vddlog("d", "SETMODES: mode list unchanged, nothing to publish");
+			return;
+		}
+
 		if (g_GlobalDevice != nullptr)
 		{
 			lock_guard<mutex> lock(g_Mutex);
 			auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 			if (pContext && pContext->pContext)
 			{
-				int n = pContext->pContext->RefreshMonitorModes(modeListChanged);
+				int n = pContext->pContext->RefreshMonitorModes(true);
 				stringstream s2;
-				if (n < 0)
-				{
-					s2 << "SETMODES: mode push unavailable on this OS (IddCxMonitorUpdateModes2 missing)";
-					vddlog("w", s2.str().c_str());
-				}
-				else
-				{
-					s2 << "SETMODES: pushed to " << n << " live monitor(s)";
-					vddlog("i", s2.str().c_str());
-				}
+				s2 << "SETMODES: re-enumerated " << n << " monitor(s)";
+				vddlog("i", s2.str().c_str());
 			}
 		}
 	};
@@ -4814,6 +4814,11 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		m_MonitorGuids.erase(index);
 	}
 
+	// From here on this index is being rebuilt, so any arrival recorded for a
+	// previous incarnation no longer applies. Re-set only once the OS has
+	// actually accepted the new arrival below.
+	m_ArrivedMonitors.erase(index);
+
 	IDDCX_MONITOR_INFO MonitorInfo = {};
 	ZAKO_IDDCX_STRUCT_INIT(MonitorInfo, IDDCX_MONITOR_INFO);
 	MonitorInfo.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI;
@@ -4918,6 +4923,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		Status = IddCxMonitorArrival(newMonitor, &ArrivalOut);
 		if (NT_SUCCESS(Status))
 		{
+			m_ArrivedMonitors.insert(index);
 			vddlog("d", "Monitor arrival successfully reported.");
 		}
 		else
@@ -5066,6 +5072,7 @@ bool IndirectDeviceContext::DestroyMonitor(unsigned int index)
 
 	m_Monitors.erase(monIt);
 	m_MonitorCreationParams.erase(index);
+	m_ArrivedMonitors.erase(index);
 
 	logStream.str("");
 	logStream << "Monitor departed successfully (Index: " << index << ")";
@@ -5401,7 +5408,10 @@ bool IndirectDeviceContext::RecreateMonitor(unsigned int index)
 		params.widthCm,
 		params.heightCm);
 
-	const bool recreated = m_Monitors.count(index) > 0;
+	// A handle in m_Monitors only means IddCxMonitorCreate succeeded; the
+	// arrival that follows can still fail, and that is precisely the case this
+	// whole path exists to repair. Judge success on the arrival instead.
+	const bool recreated = m_ArrivedMonitors.count(index) > 0;
 	if (!recreated)
 	{
 		// Preserve the parameters so a later forced refresh can retry this

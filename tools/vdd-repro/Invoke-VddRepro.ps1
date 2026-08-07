@@ -40,6 +40,12 @@ param(
 
     [string]$Label = 'unknown',
 
+    # The IOCTLs need LocalSystem, but a session-0 process sees an empty display
+    # config, so the enumeration check has to run in an interactive session.
+    # Run the script twice: once as SYSTEM, then again with -CheckOnly as the
+    # ordinary runner user, which reloads the JSON and fills in the verdict.
+    [switch]$CheckOnly,
+
     [int]$InterfaceTimeoutSeconds = 120,
     [int]$MonitorTimeoutSeconds = 20
 )
@@ -276,8 +282,7 @@ public static class VddRepro
 }
 '@
 
-function Wait-For([scriptblock]$Condition, [int]$Seconds, [int]$PollMs = 250) {
-    $deadline = (Get-Date).AddSeconds($Seconds)
+function Wait-For([scriptblock]$Condition, [int]$Seconds, [int]$PollMs = 250) {    $deadline = (Get-Date).AddSeconds($Seconds)
     do {
         if (& $Condition) { return $true }
         Start-Sleep -Milliseconds $PollMs
@@ -293,12 +298,24 @@ function Invoke-Nefcon([string[]]$Arguments) {
     return [int]$proc.ExitCode
 }
 
+$prior = $null
+if ($CheckOnly -and (Test-Path -LiteralPath $OutputJson)) {
+    # Carry forward everything the SYSTEM pass established; this pass only
+    # contributes the enumeration verdict.
+    $prior = Get-Content -LiteralPath $OutputJson -Raw | ConvertFrom-Json
+    foreach ($p in $prior.PSObject.Properties) {
+        if ($result.Contains($p.Name)) { $result[$p.Name] = $p.Value }
+    }
+}
+
 try {
     # Sunshine drives these IOCTLs from a LocalSystem service. The device
     # interface SDDL can be stricter than "any administrator", so record who we
     # actually are -- an ACCESS_DENIED open means little without it.
     $result.identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ($CheckOnly -and $prior) { $result.identity = "$($prior.identity) + $($result.identity)" }
 
+  if (-not $CheckOnly) {
     $inf = Join-Path $DriverDirectory 'ZakoVDD.inf'
     $cer = Join-Path $DriverDirectory 'ZakoVDD.cer'
     $xml = Join-Path $DriverDirectory 'vdd_settings.xml'
@@ -384,6 +401,7 @@ try {
 
     $result.createMonitorWin32 = [VddRepro]::Send($iface, [VddRepro]::IoctlCommand, 'CREATEMONITOR')
     Write-Host "CREATEMONITOR -> $($result.createMonitorWin32)"
+  }
 
     # --- The actual question: does Windows enumerate the monitor? ------------
     $result.stage = 'wait-monitor'

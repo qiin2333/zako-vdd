@@ -415,8 +415,9 @@ try {
     $result.createMonitorWin32 = [VddRepro]::Send($iface, [VddRepro]::IoctlCommand, 'CREATEMONITOR')
     Write-Host "CREATEMONITOR -> $($result.createMonitorWin32)"
 
-    # Give PnP a moment to enumerate before diffing.
-    Wait-For { (Get-MonitorInstanceIds | Where-Object { $monitorsBefore -notcontains $_ }).Count -gt 0 } `
+    # Give PnP a moment to enumerate before diffing. @() matters: StrictMode
+    # refuses .Count on the bare scalar a single-match Where-Object returns.
+    Wait-For { @(Get-MonitorInstanceIds | Where-Object { $monitorsBefore -notcontains $_ }).Count -gt 0 } `
         $MonitorTimeoutSeconds | Out-Null
     $result.pnpMonitorsAdded = @(Get-MonitorInstanceIds | Where-Object { $monitorsBefore -notcontains $_ })
     Write-Host "New monitor devnodes: $($result.pnpMonitorsAdded -join ', ')"

@@ -432,7 +432,10 @@ try {
     } catch { $result.pnpMonitors = @("query failed: $($_.Exception.Message)") }
 
     $result.stage = 'done'
-    $result.verdict = if ($result.createMonitorWin32 -lt 0) { 'device-open-denied' }
+    # A failure in the SYSTEM pass already named itself; recomputing here would
+    # relabel "driver never started" as a mere device-open denial.
+    $result.verdict = if ($CheckOnly -and $prior -and $prior.harnessError) { $prior.verdict }
+        elseif ($result.createMonitorWin32 -lt 0) { 'device-open-denied' }
         elseif ($result.createMonitorWin32 -ne 0) { 'createmonitor-ioctl-failed' }
         elseif ($result.monitorEnumerated) { 'ok' }
         else { 'created-but-not-enumerated' }

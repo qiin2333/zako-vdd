@@ -107,17 +107,43 @@ jobs:
           Write-Host "$($os.Caption) build $($os.BuildNumber) ($($os.Version))"
           "$($os.Caption)|$($os.Version)" | Set-Content -Path osinfo.txt -Encoding utf8
 
-      - name: Run repro
+      - name: Run repro (as LocalSystem)
         shell: pwsh
         run: |
-          & .\tools\vdd-repro\Invoke-VddRepro.ps1 `
-            -DriverDirectory $env:DRIVER_DIR `
-            -NefconPath $env:NEFCON_EXE `
-            -OutputJson "$PWD\results\result.json" `
-            -Modes '${{ inputs.modes || '2560x1440x60,1920x1080x60,1280x720x60,2560x1440x120,1920x1080x120,1280x720x120' }}' `
-            -RequestedMode '${{ inputs.requested_mode || '2560x1440x60' }}' `
-            -EdidProfile '${{ inputs.edid_profile }}' `
-            -Label '${{ matrix.version }}'
+          # Sunshine drives these IOCTLs from a LocalSystem service, and the
+          # device interface SDDL is stricter than "any administrator" -- an
+          # elevated runneradmin gets ACCESS_DENIED on CreateFileW. A scheduled
+          # task is the only way to get SYSTEM on a hosted runner (no PsExec).
+          New-Item -ItemType Directory -Path results -Force | Out-Null
+          $q = [char]34
+          $pwshExe = (Get-Command pwsh).Source
+          $script  = "$PWD\tools\vdd-repro\Invoke-VddRepro.ps1"
+          $resJson = "$PWD\results\result.json"
+          $logFile = "$PWD\results\harness.log"
+          $line = "$q$pwshExe$q -NoProfile -ExecutionPolicy Bypass -File $q$script$q" +
+                  " -DriverDirectory $q$env:DRIVER_DIR$q -NefconPath $q$env:NEFCON_EXE$q" +
+                  " -OutputJson $q$resJson$q" +
+                  " -Modes $q${{ inputs.modes || '2560x1440x60,1920x1080x60,1280x720x60,2560x1440x120,1920x1080x120,1280x720x120' }}$q" +
+                  " -RequestedMode $q${{ inputs.requested_mode || '2560x1440x60' }}$q" +
+                  " -EdidProfile $q${{ inputs.edid_profile }}$q -Label $q${{ matrix.version }}$q" +
+                  " > $q$logFile$q 2>&1"
+          $wrapper = "$PWD\run-repro.cmd"
+          Set-Content -LiteralPath $wrapper -Value $line -Encoding ascii
+
+          schtasks /create /tn VddRepro /ru SYSTEM /sc once /st 00:00 /rl HIGHEST /f /tr "$q$wrapper$q" | Out-Null
+          schtasks /run /tn VddRepro | Out-Null
+
+          # The harness writes result.json from a finally block, so its presence
+          # is the completion signal; the deadline only covers a hard crash.
+          $deadline = (Get-Date).AddMinutes(8)
+          while (-not (Test-Path -LiteralPath $resJson) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 5
+          }
+          Start-Sleep -Seconds 2
+          schtasks /delete /tn VddRepro /f | Out-Null
+
+          if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile }
+          if (-not (Test-Path -LiteralPath $resJson)) { throw 'Harness produced no result.json.' }
 
       - name: Collect diagnostics
         if: always()
@@ -163,12 +189,14 @@ jobs:
               except Exception as exc:
                   rows.append({"label": p.parent.name, "verdict": f"unreadable: {exc}"})
           print("## VDD monitor enumeration repro\n")
-          print("| version | driver ver | iface | ping | setmodes | createmonitor | enumerated | verdict |")
-          print("|---|---|---|---|---|---|---|---|")
+          print("Negative IOCTL codes mean CreateFileW was refused; positive ones mean the driver rejected the request.\n")
+          print("| version | driver ver | as | iface | ping | setmodes | createmonitor | enumerated | verdict |")
+          print("|---|---|---|---|---|---|---|---|---|")
           for r in rows:
-              print("| {} | {} | {} | {} | {} | {} | {} | {} |".format(
+              print("| {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                   r.get("label", "?"),
                   (r.get("driverVersion") or "").replace("|", "/"),
+                  (r.get("identity") or "?").replace("|", "/"),
                   "yes" if r.get("controlInterface") else "no",
                   r.get("pingWin32"), r.get("setModesWin32"), r.get("createMonitorWin32"),
                   r.get("monitorEnumerated"), r.get("verdict", "?")))

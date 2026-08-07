@@ -17,6 +17,7 @@
 #include <tuple>
 #include <string>
 #include <map>
+#include <set>
 #include <mutex>
 
 #include "Trace.h"
@@ -158,10 +159,17 @@ namespace Microsoft
 
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
-            mutable std::recursive_mutex m_monitorsMutex; // Protects m_Monitors, m_ProcessingThreads, m_MouseEvents
+            // Protects m_Monitors, m_MonitorCreationParams, m_ArrivedMonitors,
+            // m_ProcessingThreads and m_MouseEvents
+            mutable std::recursive_mutex m_monitorsMutex;
             std::map<unsigned int, IDDCX_MONITOR> m_Monitors;
             std::map<unsigned int, GUID> m_MonitorGuids; // Maps index to client GUID for EDID cleanup
             std::map<unsigned int, MonitorCreationParams> m_MonitorCreationParams;
+            // Indices whose IddCxMonitorArrival succeeded. A monitor handle
+            // exists in m_Monitors from IddCxMonitorCreate onwards, including
+            // when the subsequent arrival fails, so handle presence alone does
+            // not mean the OS ever saw the monitor.
+            std::set<unsigned int> m_ArrivedMonitors;
 
             std::map<IDDCX_MONITOR, DISPLAYCONFIG_VIDEO_SIGNAL_INFO> m_CommittedTargetModes;
             std::map<IDDCX_MONITOR, std::unique_ptr<SwapChainProcessor>> m_ProcessingThreads;

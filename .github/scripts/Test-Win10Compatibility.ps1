@@ -65,7 +65,9 @@ if ($source -match 'edid\[8\]\s*=\s*0x36[\s\S]*?edid\[9\]\s*=\s*0x94[\s\S]*?edid
 }
 
 if ($env:GITHUB_REF -match '^refs/tags/v0\.15\.') {
-    & git -C $repoRoot fetch origin win10 --no-tags
+    # An explicit branch fetch may update FETCH_HEAD only. Update the remote
+    # tracking ref deterministically before checking release ancestry.
+    & git -C $repoRoot fetch origin '+refs/heads/win10:refs/remotes/origin/win10' --no-tags
     if ($LASTEXITCODE -ne 0) {
         throw 'Failed to fetch origin/win10 for release-lineage validation.'
     }

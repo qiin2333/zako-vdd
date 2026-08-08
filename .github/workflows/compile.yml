@@ -122,9 +122,19 @@ jobs:
           }
           Write-Host "Verified WDK MSBuild task: $($wdkTask.FullName)"
 
+      - name: Restore pinned IddCx 1.10 build inputs
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.WDK.x64.10.0.26100.4204.zip"
+          $root = Join-Path $env:RUNNER_TEMP "wdk-10.0.26100.4204"
+          Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.windows.wdk.x64/10.0.26100.4204/microsoft.windows.wdk.x64.10.0.26100.4204.nupkg" -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $root -Force
+          "PINNED_IDDCX_ROOT=$root\c" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Pinned IddCx header and stub root: $root\c"
+
       - name: Build the driver
         run: |
-          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /restore /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:WindowsTargetPlatformVersion=${{ env.TARGET_KIT_VERSION }}
+          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:WindowsTargetPlatformVersion=${{ env.TARGET_KIT_VERSION }}
 
       - name: Stamp driver version
         shell: pwsh

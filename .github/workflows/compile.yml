@@ -175,23 +175,10 @@ jobs:
 
           $infPath = "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD\ZakoVDD.inf"
 
-          # Extract version from tag (e.g. v0.13 -> 100.13.0.0) or use date-based version
-          $ref = "${{ github.ref }}"
-          if ($ref -match '^refs/tags/v(.+)$') {
-            $ver = $Matches[1]
-            # Prefix with 100 to ensure CI builds always outrank local builds
-            # v0.13 -> 100.0.13.0, v1.2.3 -> 100.1.2.3
-            $parts = $ver.Split('.')
-            $parts = @('100') + $parts
-            while ($parts.Count -lt 4) { $parts += '0' }
-            $version = ($parts[0..3] -join '.')
-          } else {
-            # Non-tag build: use 99.MM.DD.HHMM to ensure high version
-            $now = Get-Date -Format "MM.dd.HHmm"
-            $version = "99.$now"
-          }
-
-          $date = Get-Date -Format "MM/dd/yyyy"
+          # Diagnostic A/B: retain the exact package version metadata from the
+          # public v0.14.3 while replacing only its rebuilt DLL.
+          $version = "14.24.29.188"
+          $date = "04/29/2026"
           Write-Host "Setting DriverVer = $date, $version"
 
           & $stampinf.FullName -f $infPath -d $date -v $version

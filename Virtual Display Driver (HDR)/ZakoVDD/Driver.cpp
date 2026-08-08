@@ -42,6 +42,7 @@ Environment:
 #include <map>
 #include <set>
 #include <atomic>
+#include <deque>
 
 extern "C" const GUID GUID_DEVINTERFACE_ZAKO_VDD_CONTROL = ZAKO_VDD_CONTROL_GUID_INIT;
 
@@ -59,6 +60,16 @@ extern "C" const GUID GUID_DEVINTERFACE_ZAKO_VDD_CONTROL = ZAKO_VDD_CONTROL_GUID
 mutex g_Mutex;
 mutex g_DataMutex; // Protects monitorModes, s_KnownMonitorModes2, numVirtualDisplays, gpuname
 WDFDEVICE g_GlobalDevice = nullptr;
+WDFWORKITEM g_CommandWorkItem = nullptr;
+
+struct QueuedVddCommand
+{
+	std::wstring buffer;
+};
+
+std::mutex g_CommandQueueMutex;
+std::deque<QueuedVddCommand> g_CommandQueue;
+bool g_CommandWorkScheduled = false;
 
 using namespace std;
 using namespace Microsoft::IndirectDisp;
@@ -2159,49 +2170,103 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 	}
 }
 
-// IddCx invokes EvtIddCxDeviceIoControl on its own callback stack. Calling
-// monitor-management DDIs synchronously from that stack is re-entrant: on
-// Win10 IddCxMonitorCreate rejects it with STATUS_OPERATION_IN_PROGRESS
-// (0xC0000476). Keep the WDF request pending, dispatch the command from a
-// passive work item, and complete the request only after the command finishes.
-typedef struct _VDD_COMMAND_WORKITEM_CONTEXT
-{
-	WDFREQUEST Request;
-	wchar_t Buffer[2048];
-} VDD_COMMAND_WORKITEM_CONTEXT, *PVDD_COMMAND_WORKITEM_CONTEXT;
-
-WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VDD_COMMAND_WORKITEM_CONTEXT, VddGetCommandWorkItemContext);
-
 EVT_WDF_WORKITEM VddCommandWorkItem;
+
+static bool CommandRequiresReadyAdapter(const std::wstring &buffer)
+{
+	static constexpr const wchar_t *commands[] = {
+		L"CREATEMONITOR",
+		L"DESTROYMONITOR",
+		L"REFRESHMODES",
+		L"SETMODES"};
+
+	for (const auto *command : commands)
+	{
+		const size_t length = wcslen(command);
+		if (buffer.size() >= length && wcsncmp(buffer.c_str(), command, length) == 0)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool WaitForReadyAdapter(const std::wstring &buffer)
+{
+	if (!CommandRequiresReadyAdapter(buffer))
+	{
+		return true;
+	}
+
+	// EvtIddCxAdapterInitFinished can be delayed on Win10, especially after
+	// device enable/reload. Preserve FIFO ordering while waiting so a following
+	// SETMODES cannot overtake CREATEMONITOR.
+	constexpr unsigned int MaxAttempts = 600;
+	for (unsigned int attempt = 0; attempt < MaxAttempts; ++attempt)
+	{
+		WDFDEVICE device = g_GlobalDevice;
+		if (device != nullptr)
+		{
+			auto *wrapper = WdfObjectGet_IndirectDeviceContextWrapper(device);
+			if (wrapper && wrapper->pContext && wrapper->pContext->IsAdapterReady())
+			{
+				return true;
+			}
+		}
+		Sleep(50);
+	}
+
+	vddlog("e", ("Timed out waiting for adapter initialization before command: " + WStringToString(buffer)).c_str());
+	return false;
+}
 
 _Use_decl_annotations_
 VOID VddCommandWorkItem(WDFWORKITEM WorkItem)
 {
-	auto *context = VddGetCommandWorkItemContext(WorkItem);
-	NTSTATUS completionStatus = STATUS_SUCCESS;
+	UNREFERENCED_PARAMETER(WorkItem);
 
-	try
-	{
-		wstring bufferwstr(context->Buffer);
-		string bufferstr = WStringToString(bufferwstr);
-		vddlog("p", ("[IOCTL worker] " + bufferstr).c_str());
-		DispatchVddCommandBuffer(INVALID_HANDLE_VALUE, context->Buffer);
-	}
-	catch (const std::exception &e)
-	{
-		stringstream errorStream;
-		errorStream << "Exception during asynchronous IOCTL command dispatch: " << e.what();
-		vddlog("e", errorStream.str().c_str());
-		completionStatus = STATUS_UNSUCCESSFUL;
-	}
-	catch (...)
-	{
-		vddlog("e", "Unknown exception during asynchronous IOCTL command dispatch");
-		completionStatus = STATUS_UNSUCCESSFUL;
-	}
+	// WdfWorkItemEnqueue is intentionally called only after the IOCTL request
+	// has been completed. A small deferral also guarantees that the originating
+	// EvtIddCxDeviceIoControl frame has unwound before any monitor DDI is used.
+	Sleep(10);
 
-	WdfRequestCompleteWithInformation(context->Request, completionStatus, 0);
-	WdfObjectDelete(WorkItem);
+	for (;;)
+	{
+		QueuedVddCommand command;
+		{
+			lock_guard<mutex> queueLock(g_CommandQueueMutex);
+			if (g_CommandQueue.empty())
+			{
+				g_CommandWorkScheduled = false;
+				return;
+			}
+			command = std::move(g_CommandQueue.front());
+			g_CommandQueue.pop_front();
+		}
+
+		if (!WaitForReadyAdapter(command.buffer))
+		{
+			continue;
+		}
+
+		try
+		{
+			vddlog("p", ("[IOCTL worker] " + WStringToString(command.buffer)).c_str());
+			std::vector<wchar_t> writable(command.buffer.begin(), command.buffer.end());
+			writable.push_back(L'\0');
+			DispatchVddCommandBuffer(INVALID_HANDLE_VALUE, writable.data());
+		}
+		catch (const std::exception &e)
+		{
+			stringstream errorStream;
+			errorStream << "Exception during asynchronous IOCTL command dispatch: " << e.what();
+			vddlog("e", errorStream.str().c_str());
+		}
+		catch (...)
+		{
+			vddlog("e", "Unknown exception during asynchronous IOCTL command dispatch");
+		}
+	}
 }
 
 // IddCx redirects every IRP_MJ_DEVICE_CONTROL into its own internal queue
@@ -2257,37 +2322,45 @@ VOID VirtualDisplayDriverIoDeviceControl(
 			return;
 		}
 
-		WDF_WORKITEM_CONFIG workItemConfig;
-		WDF_WORKITEM_CONFIG_INIT(&workItemConfig, VddCommandWorkItem);
-		workItemConfig.AutomaticSerialization = FALSE;
-
-		WDF_OBJECT_ATTRIBUTES workItemAttributes;
-		WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&workItemAttributes, VDD_COMMAND_WORKITEM_CONTEXT);
-		workItemAttributes.ParentObject = Device;
-
-		WDFWORKITEM workItem = nullptr;
-		status = WdfWorkItemCreate(&workItemConfig, &workItemAttributes, &workItem);
-		if (!NT_SUCCESS(status))
+		if (g_CommandWorkItem == nullptr)
 		{
-			WdfRequestComplete(Request, status);
+			WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
 			return;
 		}
 
-		auto *workContext = VddGetCommandWorkItemContext(workItem);
-		workContext->Request = Request;
-		RtlZeroMemory(workContext->Buffer, sizeof(workContext->Buffer));
-
-		// Copy into writable, NUL-terminated work-item storage. The request's
-		// METHOD_BUFFERED memory is not accessed after this callback returns.
+		// Copy the METHOD_BUFFERED payload before completing the request. The
+		// persistent FIFO owns the command independently of request lifetime.
 		size_t copyLen = inBufferLen;
-		if (copyLen > sizeof(workContext->Buffer) - sizeof(wchar_t))
+		if (copyLen > (2048 * sizeof(wchar_t)) - sizeof(wchar_t))
 		{
-			copyLen = sizeof(workContext->Buffer) - sizeof(wchar_t);
+			copyLen = (2048 * sizeof(wchar_t)) - sizeof(wchar_t);
 		}
-		RtlCopyMemory(workContext->Buffer, pInBuffer, copyLen);
-		workContext->Buffer[copyLen / sizeof(wchar_t)] = L'\0';
+		const auto *input = static_cast<const wchar_t *>(pInBuffer);
+		std::wstring command(input, copyLen / sizeof(wchar_t));
+		if (!command.empty() && command.back() == L'\0')
+		{
+			command.pop_back();
+		}
 
-		WdfWorkItemEnqueue(workItem);
+		bool enqueueWorker = false;
+		{
+			lock_guard<mutex> queueLock(g_CommandQueueMutex);
+			g_CommandQueue.push_back({std::move(command)});
+			if (!g_CommandWorkScheduled)
+			{
+				g_CommandWorkScheduled = true;
+				enqueueWorker = true;
+			}
+		}
+
+		// Completing first is essential on Win10: while this IddCx-owned IOCTL
+		// remains pending, IddCxMonitorCreate returns
+		// STATUS_OPERATION_IN_PROGRESS (0xC0000476), even from another thread.
+		WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+		if (enqueueWorker)
+		{
+			WdfWorkItemEnqueue(g_CommandWorkItem);
+		}
 		return;
 	}
 
@@ -2976,6 +3049,36 @@ _Use_decl_annotations_
 	// Save global reference after successful device creation
 	g_GlobalDevice = Device;
 
+	// A single passive work item drains IOCTL commands in FIFO order. It is a
+	// child of the device, so WDF waits for an active callback and destroys it
+	// automatically during device teardown.
+	WDF_WORKITEM_CONFIG commandWorkItemConfig;
+	WDF_WORKITEM_CONFIG_INIT(&commandWorkItemConfig, VddCommandWorkItem);
+	commandWorkItemConfig.AutomaticSerialization = FALSE;
+
+	WDF_OBJECT_ATTRIBUTES commandWorkItemAttributes;
+	WDF_OBJECT_ATTRIBUTES_INIT(&commandWorkItemAttributes);
+	commandWorkItemAttributes.ParentObject = Device;
+	// Work-item callbacks already run at PASSIVE_LEVEL. UMDF rejects an
+	// explicit ExecutionLevel on a WDFWORKITEM with
+	// STATUS_WDF_EXECUTION_LEVEL_INVALID (0xC0200211) on Windows 10.
+
+	{
+		lock_guard<mutex> queueLock(g_CommandQueueMutex);
+		g_CommandQueue.clear();
+		g_CommandWorkScheduled = false;
+	}
+	g_CommandWorkItem = nullptr;
+	Status = WdfWorkItemCreate(&commandWorkItemConfig, &commandWorkItemAttributes, &g_CommandWorkItem);
+	if (!NT_SUCCESS(Status))
+	{
+		logStream.str("");
+		logStream << "Failed to create command work item. Status: 0x" << std::hex << Status;
+		vddlog("e", logStream.str().c_str());
+		g_GlobalDevice = nullptr;
+		return Status;
+	}
+
 	return Status;
 }
 
@@ -3051,6 +3154,7 @@ _Use_decl_annotations_
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	if (pContext && pContext->pContext)
 	{
+		pContext->pContext->MarkAdapterNotReady();
 		logStream.str("");
 		logStream << "Preparing device for low-power state...";
 		vddlog("d", logStream.str().c_str());
@@ -4531,6 +4635,7 @@ IndirectDeviceContext::~IndirectDeviceContext()
 void IndirectDeviceContext::InitAdapter()
 {
 	stringstream logStream;
+	m_AdapterReady.store(false, std::memory_order_release);
 
 	// Load settings and GPU configuration first
 	loadSettings();
@@ -4713,7 +4818,9 @@ void IndirectDeviceContext::InitAdapter()
 void IndirectDeviceContext::FinishInit()
 {
 	Options.Adapter.apply(m_Adapter);
+	m_AdapterReady.store(true, std::memory_order_release);
 	vddlog("i", "Applied Adapter configs.");
+	vddlog("i", "Adapter is ready for monitor commands.");
 }
 
 void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm)

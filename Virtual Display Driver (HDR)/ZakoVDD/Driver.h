@@ -19,6 +19,7 @@
 #include <map>
 #include <set>
 #include <mutex>
+#include <atomic>
 
 #include "Trace.h"
 
@@ -101,6 +102,8 @@ namespace Microsoft
 
             void InitAdapter();
             void FinishInit();
+            bool IsAdapterReady() const noexcept { return m_AdapterReady.load(std::memory_order_acquire); }
+            void MarkAdapterNotReady() noexcept { m_AdapterReady.store(false, std::memory_order_release); }
 
             void CreateMonitor(unsigned int index, const GUID* pClientGuid = nullptr, float maxNits = 1000.0f, float minNits = 0.0001f, float maxFALL = 0.0f, float widthCm = 0.0f, float heightCm = 0.0f);
             bool DestroyMonitor(unsigned int index);
@@ -159,6 +162,10 @@ namespace Microsoft
 
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
+            // IddCx adapters are initialized in two stages. The adapter handle
+            // returned by IddCxAdapterInitAsync must not host monitors until
+            // EvtIddCxAdapterInitFinished reports success.
+            std::atomic_bool m_AdapterReady{false};
             // Protects m_Monitors, m_MonitorCreationParams, m_ArrivedMonitors,
             // m_ProcessingThreads and m_MouseEvents
             mutable std::recursive_mutex m_monitorsMutex;

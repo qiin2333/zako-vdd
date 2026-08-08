@@ -27,8 +27,8 @@ $ioctlCallback = Get-SourceSection `
     -StartMarker 'VOID VirtualDisplayDriverIoDeviceControl(' `
     -EndMarker 'bool initpath()'
 
-if ($ioctlCallback -notmatch 'WdfWorkItemEnqueue\s*\(\s*workItem\s*\)') {
-    throw 'IOCTL_VDD_COMMAND must leave the IddCx callback stack through a WDF work item.'
+if ($ioctlCallback -notmatch 'WdfWorkItemEnqueue\s*\(\s*g_CommandWorkItem\s*\)') {
+    throw 'IOCTL_VDD_COMMAND must leave the IddCx callback stack through the persistent WDF work item.'
 }
 
 if ($ioctlCallback -match 'DispatchVddCommandBuffer\s*\(') {
@@ -39,8 +39,28 @@ $workItem = Get-SourceSection `
     -StartMarker 'VOID VddCommandWorkItem(WDFWORKITEM WorkItem)' `
     -EndMarker '// IddCx redirects every IRP_MJ_DEVICE_CONTROL'
 
-if ($workItem -notmatch 'DispatchVddCommandBuffer\s*\(\s*INVALID_HANDLE_VALUE\s*,\s*context->Buffer\s*\)') {
-    throw 'The WDF work item must dispatch the pending VDD command outside the IddCx callback stack.'
+if ($workItem -notmatch 'DispatchVddCommandBuffer\s*\(\s*INVALID_HANDLE_VALUE\s*,\s*writable\.data\(\)\s*\)') {
+    throw 'The WDF work item must dispatch the copied VDD command outside the IddCx callback stack.'
+}
+
+$completeIndex = $ioctlCallback.IndexOf('WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0)', [StringComparison]::Ordinal)
+$enqueueIndex = $ioctlCallback.IndexOf('WdfWorkItemEnqueue(g_CommandWorkItem)', [StringComparison]::Ordinal)
+if ($completeIndex -lt 0 -or $enqueueIndex -lt 0 -or $completeIndex -gt $enqueueIndex) {
+    throw 'Win10 requires the IddCx-owned IOCTL request to be completed before the monitor-command worker is enqueued.'
+}
+
+if ($workItem -match 'WdfRequestComplete') {
+    throw 'The command worker must not retain or complete the IddCx-owned IOCTL request.'
+}
+
+if ($source -notmatch 'IsAdapterReady\(\)' -or
+    $source -notmatch 'Adapter is ready for monitor commands' -or
+    $workItem -notmatch 'WaitForReadyAdapter') {
+    throw 'Monitor commands must wait for successful EvtIddCxAdapterInitFinished completion.'
+}
+
+if ($source -match 'commandWorkItemAttributes\.ExecutionLevel') {
+    throw 'Do not set ExecutionLevel on the UMDF work item; Win10 rejects it with STATUS_WDF_EXECUTION_LEVEL_INVALID.'
 }
 
 $edidIdentity = Get-SourceSection `
@@ -78,4 +98,4 @@ if ($env:GITHUB_REF -match '^refs/tags/v0\.15\.') {
     }
 }
 
-Write-Host 'Win10 compatibility invariants passed: async IOCTL dispatch and DISPLAY\ZAK2333.'
+Write-Host 'Win10 compatibility invariants passed: completed IOCTL before FIFO dispatch, adapter-ready gate, and DISPLAY\ZAK2333.'

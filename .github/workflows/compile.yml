@@ -132,12 +132,12 @@ jobs:
           "PINNED_IDDCX_ROOT=$root\c" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Pinned IddCx header and stub root: $root\c"
 
-      - name: Restore Visual Studio 17.14.29 toolchain
+      - name: Restore Visual Studio 17.14.27 toolchain
         shell: pwsh
         run: |
-          $installer = Join-Path $env:RUNNER_TEMP "vs_buildtools_17.14.29.exe"
-          $installRoot = Join-Path $env:RUNNER_TEMP "vs-buildtools-17.14.29"
-          Invoke-WebRequest -Uri "https://download.visualstudio.microsoft.com/download/pr/83ec5fa2-d38d-43d5-9f58-31ea8e1c66e4/62d8e57ac5ccd56eabd627c9de2cafe4dc463f9db520a72673ed08b1e83c48b7/vs_BuildTools.exe" -OutFile $installer
+          $installer = Join-Path $env:RUNNER_TEMP "vs_buildtools_17.14.27.exe"
+          $installRoot = Join-Path $env:RUNNER_TEMP "vs-buildtools-17.14.27"
+          Invoke-WebRequest -Uri "https://download.visualstudio.microsoft.com/download/pr/b4db4ac4-8183-4dfb-b6db-c7a289006e39/39573d66dbbc46361f85fb40165544f5fd0e6c9f76076036191109c38e2ffcc8/vs_BuildTools.exe" -OutFile $installer
           $arguments = @(
             '--quiet', '--wait', '--norestart', '--nocache',
             '--installPath', $installRoot,
@@ -145,7 +145,7 @@ jobs:
           )
           $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
           if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
-            throw "Visual Studio 17.14.29 Build Tools installation failed: $($process.ExitCode)"
+            throw "Visual Studio 17.14.27 Build Tools installation failed: $($process.ExitCode)"
           }
           $toolsRoot = "$installRoot\VC\Tools\MSVC\14.44.35207"
           $link = Get-Item "$toolsRoot\bin\HostX86\x64\link.exe" -ErrorAction Stop

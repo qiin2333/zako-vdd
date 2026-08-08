@@ -2667,11 +2667,6 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	{
 		return Status;
 	}
-	if (g_IsWin10OrOlder.load())
-	{
-		StartWin10NamedPipeServer();
-	}
-
 	return Status;
 }
 
@@ -3016,12 +3011,10 @@ _Use_decl_annotations_
 			  << "\n  EvtIddCxMonitorUnassignSwapChain: " << (IddConfig.EvtIddCxMonitorUnassignSwapChain ? "Set" : "Not Set");
 	vddlog("d", logStream.str().c_str());
 
-	// The down-level IddCx 1.5.1 host on Win10 stalls adapter initialization
-	// when this optional callback is present. Win10 uses the compatibility pipe.
-	if (!g_IsWin10OrOlder.load())
-	{
-		IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
-	}
+	// Sunshine uses this IOCTL transport on every supported Windows version.
+	// Earlier Win10 diagnostics incorrectly blamed this callback for an
+	// enumeration failure that was subsequently isolated to DriverVer.
+	IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
 
 	IddConfig.EvtIddCxAdapterInitFinished = VirtualDisplayDriverAdapterInitFinished;
 
@@ -3145,18 +3138,15 @@ _Use_decl_annotations_
 		return Status;
 	}
 
-	if (!g_IsWin10OrOlder.load())
+	Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
+	if (!NT_SUCCESS(Status))
 	{
-		Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
-		if (!NT_SUCCESS(Status))
-		{
-			logStream.str("");
-			logStream << "WdfDeviceCreateDeviceInterface failed with status: " << Status;
-			vddlog("e", logStream.str().c_str());
-			return Status;
-		}
-		vddlog("d", "Registered Zako VDD control device interface");
+		logStream.str("");
+		logStream << "WdfDeviceCreateDeviceInterface failed with status: " << Status;
+		vddlog("e", logStream.str().c_str());
+		return Status;
 	}
+	vddlog("d", "Registered Zako VDD control device interface");
 
 	// Create a new device context object and attach it to the WDF device object
 	/*
@@ -3183,11 +3173,6 @@ _Use_decl_annotations_
 
 	// Save global reference after successful device creation
 	g_GlobalDevice = Device;
-	if (g_IsWin10OrOlder.load())
-	{
-		vddlog("i", "Win10 compatibility path: skipping IOCTL command work item.");
-		return STATUS_SUCCESS;
-	}
 
 	// A single passive work item drains IOCTL commands in FIFO order. It is a
 	// child of the device, so WDF waits for an active callback and destroys it

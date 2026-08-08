@@ -76,11 +76,13 @@ EVT_IDD_CX_MONITOR_QUERY_TARGET_MODES VirtualDisplayDriverMonitorQueryModes;
 EVT_IDD_CX_MONITOR_ASSIGN_SWAPCHAIN VirtualDisplayDriverMonitorAssignSwapChain;
 EVT_IDD_CX_MONITOR_UNASSIGN_SWAPCHAIN VirtualDisplayDriverMonitorUnassignSwapChain;
 
+#if IDDCX_VERSION_MINOR >= 10
 EVT_IDD_CX_ADAPTER_QUERY_TARGET_INFO VirtualDisplayDriverEvtIddCxAdapterQueryTargetInfo;
 EVT_IDD_CX_MONITOR_SET_DEFAULT_HDR_METADATA VirtualDisplayDriverEvtIddCxMonitorSetDefaultHdrMetadata;
 EVT_IDD_CX_PARSE_MONITOR_DESCRIPTION2 VirtualDisplayDriverEvtIddCxParseMonitorDescription2;
 EVT_IDD_CX_MONITOR_QUERY_TARGET_MODES2 VirtualDisplayDriverEvtIddCxMonitorQueryTargetModes2;
 EVT_IDD_CX_ADAPTER_COMMIT_MODES2 VirtualDisplayDriverEvtIddCxAdapterCommitModes2;
+#endif
 
 EVT_IDD_CX_MONITOR_SET_GAMMA_RAMP VirtualDisplayDriverEvtIddCxMonitorSetGammaRamp;
 
@@ -146,8 +148,10 @@ int CursorMaxY = 128;
 IDDCX_XOR_CURSOR_SUPPORT XorCursorSupportLevel = IDDCX_XOR_CURSOR_SUPPORT_FULL;
 
 // Rest
+#if IDDCX_VERSION_MINOR >= 10
 IDDCX_BITS_PER_COMPONENT SDRCOLOUR = IDDCX_BITS_PER_COMPONENT_8;
 IDDCX_BITS_PER_COMPONENT HDRCOLOUR = IDDCX_BITS_PER_COMPONENT_10;
+#endif
 
 wstring ColourFormat = L"RGB";
 
@@ -2075,8 +2079,10 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	// colour
 	HDRPlus = EnabledQuery(L"HDRPlusEnabled");
 	SDR10 = EnabledQuery(L"SDR10Enabled");
+#if IDDCX_VERSION_MINOR >= 10
 	HDRCOLOUR = HDRPlus ? IDDCX_BITS_PER_COMPONENT_12 : IDDCX_BITS_PER_COMPONENT_10;
 	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
+#endif
 	ColourFormat = GetStringSetting(L"ColourFormat");
 
 	// Cursor
@@ -2470,6 +2476,7 @@ _Use_decl_annotations_
 	IddConfig.EvtIddCxMonitorAssignSwapChain = VirtualDisplayDriverMonitorAssignSwapChain;
 	IddConfig.EvtIddCxMonitorUnassignSwapChain = VirtualDisplayDriverMonitorUnassignSwapChain;
 
+#if IDDCX_VERSION_MINOR >= 10
 	if (IDD_IS_FIELD_AVAILABLE(IDD_CX_CLIENT_CONFIG, EvtIddCxAdapterQueryTargetInfo))
 	{
 		IddConfig.EvtIddCxAdapterQueryTargetInfo = VirtualDisplayDriverEvtIddCxAdapterQueryTargetInfo;
@@ -2480,6 +2487,7 @@ _Use_decl_annotations_
 		IddConfig.EvtIddCxMonitorSetGammaRamp = VirtualDisplayDriverEvtIddCxMonitorSetGammaRamp;
 	}
 	else
+#endif
 	{
 		IddConfig.EvtIddCxParseMonitorDescription = VirtualDisplayDriverParseMonitorDescription;
 		IddConfig.EvtIddCxMonitorQueryTargetModes = VirtualDisplayDriverMonitorQueryModes;
@@ -3500,6 +3508,7 @@ void SwapChainProcessor::RunCore()
 		return;
 	}
 
+#if IDDCX_VERSION_MINOR >= 10
 	// Raise GPU priority to realtime for this device to avoid starvation under heavy GPU load (IddCx 1.9+)
 	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSetRealtimeGPUPriority))
 	{
@@ -3520,16 +3529,18 @@ void SwapChainProcessor::RunCore()
 
 	// Cache function availability check outside the loop for better performance
 	const bool useBuffer2 = IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2);
+#endif
 
 	// Acquire and release buffers in a loop
 	for (;;)
 	{
 		ComPtr<IDXGIResource> AcquiredBuffer;
+		IDXGIResource *pSurface;
 
 		// Ask for the next buffer from the producer
+#if IDDCX_VERSION_MINOR >= 10
 		IDARG_IN_RELEASEANDACQUIREBUFFER2 BufferInArgs = {};
 		BufferInArgs.Size = sizeof(BufferInArgs);
-		IDXGIResource *pSurface;
 
 		if (useBuffer2)
 		{
@@ -3539,10 +3550,13 @@ void SwapChainProcessor::RunCore()
 		}
 		else
 		{
+#endif
 			IDARG_OUT_RELEASEANDACQUIREBUFFER Buffer = {};
 			hr = IddCxSwapChainReleaseAndAcquireBuffer(m_hSwapChain, &Buffer);
 			pSurface = Buffer.MetaData.pSurface;
+#if IDDCX_VERSION_MINOR >= 10
 		}
+#endif
 		// AcquireBuffer immediately returns STATUS_PENDING if no buffer is yet available
 		if (hr == E_PENDING)
 		{
@@ -4154,11 +4168,13 @@ void IndirectDeviceContext::InitAdapter()
 	IDDCX_ADAPTER_CAPS AdapterCaps = {};
 	AdapterCaps.Size = sizeof(AdapterCaps);
 
+#if IDDCX_VERSION_MINOR >= 10
 	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2))
 	{
 		AdapterCaps.Flags = IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16;
 		logStream << "FP16 processing capability detected.";
 	}
+#endif
 
 	// Validate and set monitor count with bounds checking
 	if (numVirtualDisplays == 0 || numVirtualDisplays > 16)
@@ -4788,6 +4804,7 @@ void IndirectDeviceContext::CommitModes(const IDARG_IN_COMMITMODES* pInArgs)
 	}
 }
 
+#if IDDCX_VERSION_MINOR >= 10
 void IndirectDeviceContext::CommitModes2(const IDARG_IN_COMMITMODES2* pInArgs)
 {
 	if (!pInArgs || !pInArgs->pPaths)
@@ -4820,6 +4837,7 @@ void IndirectDeviceContext::CommitModes2(const IDARG_IN_COMMITMODES2* pInArgs)
 		}
 	}
 }
+#endif
 
 void IndirectDeviceContext::UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool isHdr, float maxNits, float minNits, float maxFALL)
 {
@@ -5086,6 +5104,7 @@ void CreateTargetMode(IDDCX_TARGET_MODE &Mode, UINT Width, UINT Height, UINT VSy
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
 
+#if IDDCX_VERSION_MINOR >= 10
 void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT VSyncNum, UINT VSyncDen)
 {
 	stringstream logStream;
@@ -5125,6 +5144,7 @@ void CreateTargetMode2(IDDCX_TARGET_MODE2 &Mode, UINT Width, UINT Height, UINT V
 
 	CreateTargetMode(Mode.TargetVideoSignalInfo.targetVideoSignalInfo, Width, Height, VSyncNum, VSyncDen);
 }
+#endif
 
 _Use_decl_annotations_
 	NTSTATUS
@@ -5213,6 +5233,7 @@ _Use_decl_annotations_
 	return STATUS_SUCCESS;
 }
 
+#if IDDCX_VERSION_MINOR >= 10
 _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverEvtIddCxAdapterQueryTargetInfo(
@@ -5256,7 +5277,9 @@ _Use_decl_annotations_
 
 	return STATUS_SUCCESS;
 }
+#endif
 
+#if IDDCX_VERSION_MINOR >= 10
 _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverEvtIddCxMonitorSetDefaultHdrMetadata(
@@ -5496,6 +5519,7 @@ _Use_decl_annotations_
 	return STATUS_SUCCESS;
 }
 
+#endif
 _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverEvtIddCxMonitorSetGammaRamp(

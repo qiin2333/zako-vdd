@@ -3010,19 +3010,6 @@ _Use_decl_annotations_
 		return Status;
 	}
 
-	// Expose the required IOCTL control interface. Without it Sunshine cannot
-	// operate the virtual display, so fail DeviceAdd instead of leaving a
-	// running but unusable adapter.
-	Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
-	if (!NT_SUCCESS(Status))
-	{
-		logStream.str("");
-		logStream << "WdfDeviceCreateDeviceInterface failed with status: " << Status;
-		vddlog("e", logStream.str().c_str());
-		return Status;
-	}
-	vddlog("d", "Registered Zako VDD control device interface");
-
 	// Create a new device context object and attach it to the WDF device object
 	/*
 	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
@@ -4693,7 +4680,7 @@ void IndirectDeviceContext::InitAdapter()
 	logStream.str("");
 
 	IDDCX_ADAPTER_CAPS AdapterCaps = {};
-	AdapterCaps.Size = sizeof(AdapterCaps);
+	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps, IDDCX_ADAPTER_CAPS);
 
 	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2))
 	{
@@ -4729,7 +4716,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare basic feature support for the adapter (required)
 	AdapterCaps.MaxMonitorsSupported = numVirtualDisplays;
-	AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
+	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps.EndPointDiagnostics, IDDCX_ENDPOINT_DIAGNOSTIC_INFO);
 	AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
 	AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
@@ -4740,7 +4727,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare your hardware and firmware versions (required)
 	IDDCX_ENDPOINT_VERSION Version = {};
-	Version.Size = sizeof(Version);
+	ZAKO_IDDCX_STRUCT_INIT(Version, IDDCX_ENDPOINT_VERSION);
 	Version.MajorVer = 1;
 	AdapterCaps.EndPointDiagnostics.pFirmwareVersion = &Version;
 	AdapterCaps.EndPointDiagnostics.pHardwareVersion = &Version;
@@ -4826,6 +4813,31 @@ void IndirectDeviceContext::FinishInit()
 	m_AdapterReady.store(true, std::memory_order_release);
 	vddlog("i", "Applied Adapter configs.");
 	vddlog("i", "Adapter is ready for monitor commands.");
+
+	// Windows 10's down-level IddCx host can stall adapter initialization when
+	// a second device interface exists while IddCxAdapterInitAsync is pending.
+	// Register the control interface only after IddCx has completed the adapter.
+	// WDF permits interfaces to be created after device start, but such an
+	// interface is disabled by default and must be enabled explicitly.
+	NTSTATUS status = WdfDeviceCreateDeviceInterface(
+		m_WdfDevice,
+		&GUID_DEVINTERFACE_ZAKO_VDD_CONTROL,
+		NULL);
+	if (!NT_SUCCESS(status))
+	{
+		stringstream ss;
+		ss << "WdfDeviceCreateDeviceInterface failed after adapter initialization. Status: 0x"
+		   << std::hex << status;
+		vddlog("e", ss.str().c_str());
+		return;
+	}
+
+	WdfDeviceSetDeviceInterfaceState(
+		m_WdfDevice,
+		&GUID_DEVINTERFACE_ZAKO_VDD_CONTROL,
+		NULL,
+		TRUE);
+	vddlog("i", "Registered and enabled Zako VDD control interface after adapter initialization.");
 }
 
 void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm)

@@ -2201,7 +2201,7 @@ static bool WaitForReadyAdapter(const std::wstring &buffer)
 	// EvtIddCxAdapterInitFinished can be delayed on Win10, especially after
 	// device enable/reload. Preserve FIFO ordering while waiting so a following
 	// SETMODES cannot overtake CREATEMONITOR.
-	constexpr unsigned int MaxAttempts = 600;
+	constexpr unsigned int MaxAttempts = 100;
 	for (unsigned int attempt = 0; attempt < MaxAttempts; ++attempt)
 	{
 		WDFDEVICE device = g_GlobalDevice;

@@ -26,7 +26,7 @@ An installed release package can outrank a locally built package even after `pnp
 
 ### Stacked PRs can bypass the intended workflow trigger
 
-The build workflow listens to pull requests whose base is `win10` (among other maintained branches). A PR stacked on another feature branch does not match that trigger. Before merge or release, retarget the final PR to `win10` and require its checks to complete.
+The build workflow listens to pull requests whose base is `win10` (among other maintained branches). A PR stacked on another feature branch does not match that trigger. Retargeting or marking a PR ready also uses event types outside GitHub's default pull-request trigger set. The workflow therefore listens to `edited` and `ready_for_review` explicitly. Before merge or release, retarget the final PR to `win10` and require its checks to complete.
 
 ## CI guard
 

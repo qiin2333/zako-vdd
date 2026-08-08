@@ -12,7 +12,8 @@ on:
       - win10
     tags:
       - 'v*'
-  pull_request_target:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     branches:
       - main
       - master
@@ -29,7 +30,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Guard Win10 compatibility invariants
+        if: github.base_ref == 'win10' || github.ref_name == 'win10' || startsWith(github.ref, 'refs/tags/v0.15.')
+        shell: pwsh
+        run: ./.github/scripts/Test-Win10Compatibility.ps1
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -164,8 +171,9 @@ jobs:
         run: dir "Virtual Display Driver (HDR)\${{ matrix.platform }}\${{ matrix.configuration }}\ZakoVDD"
 
       - name: Sign driver with certificate
-        # Skip signing for PRs from forks to prevent secret exfiltration
-        if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
+        # PR code must never receive the production signing secret. Branch and
+        # tag builds still sign the release artifact after protected-branch CI.
+        if: github.event_name != 'pull_request'
         shell: pwsh
         env:
           SIGNING_CERT_PFX: ${{ secrets.SIGNING_CERT_PFX }}

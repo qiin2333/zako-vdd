@@ -2159,6 +2159,51 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 	}
 }
 
+// IddCx invokes EvtIddCxDeviceIoControl on its own callback stack. Calling
+// monitor-management DDIs synchronously from that stack is re-entrant: on
+// Win10 IddCxMonitorCreate rejects it with STATUS_OPERATION_IN_PROGRESS
+// (0xC0000476). Keep the WDF request pending, dispatch the command from a
+// passive work item, and complete the request only after the command finishes.
+typedef struct _VDD_COMMAND_WORKITEM_CONTEXT
+{
+	WDFREQUEST Request;
+	wchar_t Buffer[2048];
+} VDD_COMMAND_WORKITEM_CONTEXT, *PVDD_COMMAND_WORKITEM_CONTEXT;
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VDD_COMMAND_WORKITEM_CONTEXT, VddGetCommandWorkItemContext);
+
+EVT_WDF_WORKITEM VddCommandWorkItem;
+
+_Use_decl_annotations_
+VOID VddCommandWorkItem(WDFWORKITEM WorkItem)
+{
+	auto *context = VddGetCommandWorkItemContext(WorkItem);
+	NTSTATUS completionStatus = STATUS_SUCCESS;
+
+	try
+	{
+		wstring bufferwstr(context->Buffer);
+		string bufferstr = WStringToString(bufferwstr);
+		vddlog("p", ("[IOCTL worker] " + bufferstr).c_str());
+		DispatchVddCommandBuffer(INVALID_HANDLE_VALUE, context->Buffer);
+	}
+	catch (const std::exception &e)
+	{
+		stringstream errorStream;
+		errorStream << "Exception during asynchronous IOCTL command dispatch: " << e.what();
+		vddlog("e", errorStream.str().c_str());
+		completionStatus = STATUS_UNSUCCESSFUL;
+	}
+	catch (...)
+	{
+		vddlog("e", "Unknown exception during asynchronous IOCTL command dispatch");
+		completionStatus = STATUS_UNSUCCESSFUL;
+	}
+
+	WdfRequestCompleteWithInformation(context->Request, completionStatus, 0);
+	WdfObjectDelete(WorkItem);
+}
+
 // IddCx redirects every IRP_MJ_DEVICE_CONTROL into its own internal queue
 // before any default WDF queue ever sees it. The only way to receive a
 // custom IOCTL in an IddCx driver is through this callback registered via
@@ -2212,38 +2257,37 @@ VOID VirtualDisplayDriverIoDeviceControl(
 			return;
 		}
 
-		// Copy into a writable, NUL-terminated local buffer. METHOD_BUFFERED
-		// already gives us a kernel-owned copy but the dispatch helpers
-		// expect a wchar_t array they can scribble on (e.g. swscanf_s).
-		wchar_t buffer[2048] = { 0 };
+		WDF_WORKITEM_CONFIG workItemConfig;
+		WDF_WORKITEM_CONFIG_INIT(&workItemConfig, VddCommandWorkItem);
+		workItemConfig.AutomaticSerialization = FALSE;
+
+		WDF_OBJECT_ATTRIBUTES workItemAttributes;
+		WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&workItemAttributes, VDD_COMMAND_WORKITEM_CONTEXT);
+		workItemAttributes.ParentObject = Device;
+
+		WDFWORKITEM workItem = nullptr;
+		status = WdfWorkItemCreate(&workItemConfig, &workItemAttributes, &workItem);
+		if (!NT_SUCCESS(status))
+		{
+			WdfRequestComplete(Request, status);
+			return;
+		}
+
+		auto *workContext = VddGetCommandWorkItemContext(workItem);
+		workContext->Request = Request;
+		RtlZeroMemory(workContext->Buffer, sizeof(workContext->Buffer));
+
+		// Copy into writable, NUL-terminated work-item storage. The request's
+		// METHOD_BUFFERED memory is not accessed after this callback returns.
 		size_t copyLen = inBufferLen;
-		if (copyLen > sizeof(buffer) - sizeof(wchar_t))
+		if (copyLen > sizeof(workContext->Buffer) - sizeof(wchar_t))
 		{
-			copyLen = sizeof(buffer) - sizeof(wchar_t);
+			copyLen = sizeof(workContext->Buffer) - sizeof(wchar_t);
 		}
-		RtlCopyMemory(buffer, pInBuffer, copyLen);
-		buffer[copyLen / sizeof(wchar_t)] = L'\0';
+		RtlCopyMemory(workContext->Buffer, pInBuffer, copyLen);
+		workContext->Buffer[copyLen / sizeof(wchar_t)] = L'\0';
 
-		try
-		{
-			wstring bufferwstr(buffer);
-			string bufferstr = WStringToString(bufferwstr);
-			vddlog("p", ("[IOCTL] " + bufferstr).c_str());
-
-			DispatchVddCommandBuffer(INVALID_HANDLE_VALUE, buffer);
-		}
-		catch (const std::exception &e)
-		{
-			stringstream errorStream;
-			errorStream << "Exception during IOCTL command dispatch: " << e.what();
-			vddlog("e", errorStream.str().c_str());
-		}
-		catch (...)
-		{
-			vddlog("e", "Unknown exception during IOCTL command dispatch");
-		}
-
-		WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
+		WdfWorkItemEnqueue(workItem);
 		return;
 	}
 
@@ -3978,10 +4022,14 @@ void modifyEdid(vector<BYTE> &edid)
 		return;
 	}
 
-	edid[8] = 0x36;
-	edid[9] = 0x94;
-	edid[10] = 0x37;
-	edid[11] = 0x13;
+	// Keep the Win10 compatibility package aligned with v0.17.2: Windows
+	// exposes these EDID manufacturer/product bytes as DISPLAY\ZAK2333.
+	// Manufacturer "ZAK" is encoded as 0x682b; product 0x2333 is
+	// little-endian in the EDID base block.
+	edid[8] = 0x68;
+	edid[9] = 0x2b;
+	edid[10] = 0x33;
+	edid[11] = 0x23;
 }
 
 // Modify EDID serial number based on client GUID to ensure consistency

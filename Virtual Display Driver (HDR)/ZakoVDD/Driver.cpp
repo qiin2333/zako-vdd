@@ -2186,6 +2186,8 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 // custom EvtIddCxDeviceIoControl callback is registered. Keep the modern IOCTL
 // transport on Windows 11 and use the last known-good command transport on
 // down-level hosts. The parser and command implementation remain shared.
+static bool WaitForReadyAdapter(const std::wstring &buffer);
+
 static void HandlePipeClient(HANDLE pipe)
 {
 	wchar_t buffer[2048] = {};
@@ -2194,8 +2196,12 @@ static void HandlePipeClient(HANDLE pipe)
 	if (read && bytesRead != 0)
 	{
 		buffer[bytesRead / sizeof(wchar_t)] = L'\0';
-		vddlog("p", ("[Win10 pipe] " + WStringToString(buffer)).c_str());
-		DispatchVddCommandBuffer(pipe, buffer);
+		std::wstring command(buffer);
+		vddlog("p", ("[Win10 pipe] " + WStringToString(command)).c_str());
+		if (WaitForReadyAdapter(command))
+		{
+			DispatchVddCommandBuffer(pipe, buffer);
+		}
 	}
 	DisconnectNamedPipe(pipe);
 	CloseHandle(pipe);

@@ -88,7 +88,7 @@ $pipeServer = Get-SourceSection `
     -EndMarker 'EVT_WDF_WORKITEM VddCommandWorkItem'
 
 if ($pipeServer -notmatch 'CreateNamedPipeW\s*\(' -or
-    $pipeServer -notmatch 'DispatchVddCommandBuffer\s*\(\s*pipe\s*,\s*buffer\s*\)') {
+    $pipeServer -notmatch 'WaitForReadyAdapter\s*\(\s*command\s*\)[\s\S]*?DispatchVddCommandBuffer\s*\(\s*pipe\s*,\s*buffer\s*\)') {
     throw 'Win10 compatibility commands must use the shared parser through ZakoVDDPipe.'
 }
 

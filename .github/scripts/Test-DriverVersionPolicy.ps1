@@ -15,7 +15,7 @@ function Assert-Version {
 }
 
 Assert-Version `
-    -Arguments @{ Ref = 'refs/tags/v0.15.7'; RefName = 'v0.15.7'; RunNumber = 321 } `
+    -Arguments @{ Ref = 'refs/tags/v0.15.7'; BaseRef = ''; RefName = 'v0.15.7'; RunNumber = 321 } `
     -ExpectedVersion '15.0.15.7' `
     -ExpectedWin10 $true
 Assert-Version `
@@ -27,12 +27,12 @@ Assert-Version `
     -ExpectedVersion '15.0.0.65435' `
     -ExpectedWin10 $true
 Assert-Version `
-    -Arguments @{ Ref = 'refs/tags/v0.17.2'; RefName = 'v0.17.2'; RunNumber = 321 } `
+    -Arguments @{ Ref = 'refs/tags/v0.17.2'; BaseRef = ''; RefName = 'v0.17.2'; RunNumber = 321 } `
     -ExpectedVersion '100.0.17.2' `
     -ExpectedWin10 $false
 
 try {
-    & $resolver -Ref 'refs/tags/v0.15.7-preview' -RefName 'v0.15.7-preview' -RunNumber 321 | Out-Null
+    & $resolver -Ref 'refs/tags/v0.15.7-preview' -BaseRef '' -RefName 'v0.15.7-preview' -RunNumber 321 | Out-Null
     throw 'A non-numeric Win10 maintenance tag unexpectedly passed DriverVer validation.'
 }
 catch {

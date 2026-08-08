@@ -18,7 +18,7 @@ The driver compiled with a current WDK, but Windows 10 22H2 loaded IddCx 1.5.1. 
 
 The first attempted fix moved dispatch to a WDF work item but kept the IddCx-owned IOCTL request pending until the worker finished. That changed the thread, not the IddCx operation lifetime, and the exact `v0.15.5` CI package still returned `0xC0000476`. The corrected path copies the command into a persistent FIFO, completes the IOCTL request first, and only then enqueues the passive worker. Monitor-management commands additionally wait until `EvtIddCxAdapterInitFinished` has reported success.
 
-The exact `v0.15.6` release exposed a second Win10-only cold-boot failure: `IddCxAdapterInitAsync` returned success and a non-null adapter object, Device Manager reported Code 0, but Win10 22H2 never delivered `EvtIddCxAdapterInitFinished`. A strict callback-only gate therefore discarded every monitor command after its timeout. The worker now keeps the callback as the normal readiness signal, but after a five-second grace period it may recover only when `InitAdapter` stored a valid adapter object. Dispatch still happens after the IddCx-owned IOCTL request is complete and outside its callback stack.
+The exact `v0.15.6` release exposed a second Win10-only cold-boot failure. The device entered idle D3 before a monitor command arrived; opening the control interface woke it to D0, where the driver called `IddCxAdapterInitAsync` a second time. Win10 returned `STATUS_ALREADY_REGISTERED` (`0xC0000718`), and the following monitor creation remained blocked with `STATUS_OPERATION_IN_PROGRESS`. An IddCx adapter registration survives the D3 transition, so initialization is now idempotent for the device lifetime and D0 exit no longer clears the adapter-initialized state.
 
 Do not explicitly set `ExecutionLevel` on the UMDF work-item object. Its callback is already passive; Win10 rejects that object attribute with `STATUS_WDF_EXECUTION_LEVEL_INVALID` (`0xC0200211`) and leaves the adapter at Device Manager Code 31.
 
@@ -45,7 +45,8 @@ PR builds use the standard `pull_request` event and never receive the production
 - enqueuing monitor work before completing the IddCx-owned IOCTL request;
 - retaining/completing the IOCTL request from the worker;
 - removal of the adapter-ready gate;
-- removal of the bounded valid-adapter recovery path for a missing Win10 init-finished callback;
+- duplicate `IddCxAdapterInitAsync` registration during D0 wake;
+- clearing the adapter-initialized state during an idle D3 transition;
 - an explicit execution level on the UMDF work item;
 - restoration of the `DISPLAY\MTT1337` EDID bytes;
 - a `v0.15.*` tag whose commit is not contained in `origin/win10`.

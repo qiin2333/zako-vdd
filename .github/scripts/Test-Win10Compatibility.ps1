@@ -59,9 +59,16 @@ if ($source -notmatch 'IsAdapterReady\(\)' -or
     throw 'Monitor commands must wait for successful EvtIddCxAdapterInitFinished completion.'
 }
 
-if ($source -notmatch 'RecoverAdapterReadinessAfterTimeout\(\)' -or
-    $source -notmatch 'Adapter-init callback timed out; continuing with the valid adapter object') {
-    throw 'Win10 cold boot requires a bounded adapter-init callback fallback after IddCxAdapterInitAsync returned a valid adapter object.'
+if ($source -notmatch 'Adapter already registered; skipping duplicate IddCxAdapterInitAsync') {
+    throw 'Win10 D0 wake must not register an existing IddCx adapter a second time.'
+}
+
+$d0Exit = Get-SourceSection `
+    -StartMarker 'VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device' `
+    -EndMarker 'vector<BYTE> loadEdid(const string &filePath)'
+
+if ($d0Exit -match 'MarkAdapterNotReady') {
+    throw 'D3 transitions preserve the registered IddCx adapter and must not erase its initialization-complete state.'
 }
 
 if ($source -match 'commandWorkItemAttributes\.ExecutionLevel') {
@@ -103,4 +110,4 @@ if ($env:GITHUB_REF -match '^refs/tags/v0\.15\.') {
     }
 }
 
-Write-Host 'Win10 compatibility invariants passed: completed IOCTL before FIFO dispatch, bounded adapter-ready recovery, and DISPLAY\ZAK2333.'
+Write-Host 'Win10 compatibility invariants passed: completed IOCTL before FIFO dispatch, single adapter registration across D3, and DISPLAY\ZAK2333.'

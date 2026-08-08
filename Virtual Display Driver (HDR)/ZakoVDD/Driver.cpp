@@ -2201,7 +2201,7 @@ static bool WaitForReadyAdapter(const std::wstring &buffer)
 	// EvtIddCxAdapterInitFinished can be delayed on Win10, especially after
 	// device enable/reload. Preserve FIFO ordering while waiting so a following
 	// SETMODES cannot overtake CREATEMONITOR.
-	constexpr unsigned int MaxAttempts = 100;
+	constexpr unsigned int MaxAttempts = 600;
 	for (unsigned int attempt = 0; attempt < MaxAttempts; ++attempt)
 	{
 		WDFDEVICE device = g_GlobalDevice;
@@ -2216,27 +2216,7 @@ static bool WaitForReadyAdapter(const std::wstring &buffer)
 		Sleep(50);
 	}
 
-	// Win10 22H2 can return success and a valid AdapterObject from
-	// IddCxAdapterInitAsync yet never deliver EvtIddCxAdapterInitFinished after
-	// a cold boot. The adapter remains usable (and Device Manager reports Code
-	// 0), so permanently dropping every monitor command here leaves the driver
-	// alive but unable to enumerate a display. After a generous grace period,
-	// recover only when InitAdapter stored a valid adapter object. Calls remain
-	// on this passive worker after the IddCx-owned request has been completed;
-	// any genuinely incomplete adapter operation will therefore fail normally
-	// instead of re-entering the IddCx IOCTL callback stack.
-	WDFDEVICE device = g_GlobalDevice;
-	if (device != nullptr)
-	{
-		auto *wrapper = WdfObjectGet_IndirectDeviceContextWrapper(device);
-		if (wrapper && wrapper->pContext && wrapper->pContext->RecoverAdapterReadinessAfterTimeout())
-		{
-			vddlog("w", ("Adapter-init callback timed out; continuing with the valid adapter object before command: " + WStringToString(buffer)).c_str());
-			return true;
-		}
-	}
-
-	vddlog("e", ("Timed out waiting for adapter initialization and no valid adapter object exists before command: " + WStringToString(buffer)).c_str());
+	vddlog("e", ("Timed out waiting for adapter initialization before command: " + WStringToString(buffer)).c_str());
 	return false;
 }
 
@@ -3135,7 +3115,8 @@ _Use_decl_annotations_
 			vddlog("d", logStream.str().c_str());
 		}
 
-		// Initialize adapter (safe to call multiple times)
+		// InitAdapter is idempotent. IddCx keeps the adapter registration across
+		// D3 transitions on Win10, so a wake must not register it again.
 		pContext->pContext->InitAdapter();
 		
 		logStream.str("");
@@ -3174,7 +3155,6 @@ _Use_decl_annotations_
 	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	if (pContext && pContext->pContext)
 	{
-		pContext->pContext->MarkAdapterNotReady();
 		logStream.str("");
 		logStream << "Preparing device for low-power state...";
 		vddlog("d", logStream.str().c_str());
@@ -4655,6 +4635,11 @@ IndirectDeviceContext::~IndirectDeviceContext()
 void IndirectDeviceContext::InitAdapter()
 {
 	stringstream logStream;
+	if (m_Adapter != nullptr)
+	{
+		vddlog("i", "Adapter already registered; skipping duplicate IddCxAdapterInitAsync.");
+		return;
+	}
 	m_AdapterReady.store(false, std::memory_order_release);
 
 	// Load settings and GPU configuration first

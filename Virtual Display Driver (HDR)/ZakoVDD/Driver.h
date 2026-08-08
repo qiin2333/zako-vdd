@@ -107,9 +107,7 @@ namespace Microsoft
             void AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
             void UnassignSwapChain(IDDCX_MONITOR Monitor);
             void CommitModes(const IDARG_IN_COMMITMODES* pInArgs);
-#if IDDCX_VERSION_MINOR >= 10
             void CommitModes2(const IDARG_IN_COMMITMODES2* pInArgs);
-#endif
             void UpdateMonitorHdrMetadata(IDDCX_MONITOR Monitor, bool isHdr, float maxNits, float minNits, float maxFALL);
 
             // Helper methods for driver reload

@@ -129,7 +129,7 @@
     <UMDF_VERSION_MAJOR>2</UMDF_VERSION_MAJOR>
     <IndirectDisplayDriver>true</IndirectDisplayDriver>
     <IDDCX_VERSION_MAJOR>1</IDDCX_VERSION_MAJOR>
-    <IDDCX_VERSION_MINOR>4</IDDCX_VERSION_MINOR>
+    <IDDCX_VERSION_MINOR>10</IDDCX_VERSION_MINOR>
     <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
     <UMDF_VERSION_MINOR>25</UMDF_VERSION_MINOR>
     <UMDF_MINIMUM_VERSION_REQUIRED>25</UMDF_MINIMUM_VERSION_REQUIRED>
@@ -269,7 +269,7 @@
       <WppScanConfigurationData Condition="'%(ClCompile.ScanConfigurationData)' == ''">trace.h</WppScanConfigurationData>
       <ExceptionHandling>Async</ExceptionHandling>
       <EnablePREfast>true</EnablePREfast>
-      <AdditionalOptions>/D_ATL_NO_WIN_SUPPORT /DUMDF_DRIVER /DIDDCX_VERSION_MAJOR=1 /DIDDCX_VERSION_MINOR=4 /DIDDCX_MINIMUM_VERSION_REQUIRED=4 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/D_ATL_NO_WIN_SUPPORT /DUMDF_DRIVER /DIDDCX_VERSION_MAJOR=1 /DIDDCX_VERSION_MINOR=10 /DIDDCX_MINIMUM_VERSION_REQUIRED=3 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)..\..\Common\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>

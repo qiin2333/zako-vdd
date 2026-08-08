@@ -35,6 +35,10 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.WDK.x64" Version="10.0.26100.4204" />
+    <PackageReference Include="Microsoft.Windows.SDK.CPP.x64" Version="10.0.26100.4202" />
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="Driver.cpp" />
   </ItemGroup>
   <ItemGroup>

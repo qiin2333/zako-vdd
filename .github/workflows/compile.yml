@@ -124,7 +124,7 @@ jobs:
 
       - name: Build the driver
         run: |
-          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:WindowsTargetPlatformVersion=${{ env.TARGET_KIT_VERSION }}
+          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /restore /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:WindowsTargetPlatformVersion=${{ env.TARGET_KIT_VERSION }}
 
       - name: Stamp driver version
         shell: pwsh

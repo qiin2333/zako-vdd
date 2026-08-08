@@ -142,7 +142,8 @@ jobs:
             '--quiet', '--wait', '--norestart', '--nocache',
             '--installPath', $installRoot,
             '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-            '--add', 'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64.Spectre'
+            '--add', 'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64.Spectre',
+            '--add', 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL'
           )
           $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
           if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {

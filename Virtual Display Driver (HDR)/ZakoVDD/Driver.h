@@ -17,9 +17,7 @@
 #include <tuple>
 #include <string>
 #include <map>
-#include <set>
 #include <mutex>
-#include <atomic>
 
 #include "Trace.h"
 
@@ -102,10 +100,9 @@ namespace Microsoft
 
             void InitAdapter();
             void FinishInit();
-            bool IsAdapterReady() const noexcept { return m_AdapterReady.load(std::memory_order_acquire); }
 
             void CreateMonitor(unsigned int index, const GUID* pClientGuid = nullptr, float maxNits = 1000.0f, float minNits = 0.0001f, float maxFALL = 0.0f, float widthCm = 0.0f, float heightCm = 0.0f);
-            bool DestroyMonitor(unsigned int index);
+            void DestroyMonitor(unsigned int index);
 
             void AssignSwapChain(IDDCX_MONITOR Monitor, IDDCX_SWAPCHAIN SwapChain, LUID RenderAdapter, HANDLE NewFrameEvent);
             void UnassignSwapChain(IDDCX_MONITOR Monitor);
@@ -120,62 +117,16 @@ namespace Microsoft
             void UnassignAllSwapChains();
             void DestroyAllMonitors();
 
-            // Publish the current monitorModes list to all live monitors.
-            //
-            // refreshMonitorDescription == true re-enumerates every monitor
-            // (departure + arrival) so Windows reparses the monitor description.
-            // This is the only way to introduce a mode that is absent from the
-            // description Windows has cached, and it works on every IddCx
-            // version -- required on Win10, where IddCxMonitorUpdateModes2 does
-            // not exist.
-            //
-            // refreshMonitorDescription == false takes the lightweight
-            // IddCxMonitorUpdateModes2 path, which avoids the DWM window
-            // rearrangement that follows departure/arrival but can only
-            // reorder / drop modes already present in the description.
-            //
-            // Returns the number of monitors successfully refreshed, or -1 when
-            // the lightweight path was requested and the API is unavailable.
-            int RefreshMonitorModes(bool refreshMonitorDescription);
-
         private:
             bool WaitForSystemStabilization(int timeoutMs, const char *operation);
             bool ValidateMonitorState(const char *operation);
 
         protected:
-            // Everything CreateMonitor needs to rebuild a monitor identically.
-            // Retained per index so RecreateMonitor can replay the original
-            // arrival after a departure.
-            struct MonitorCreationParams
-            {
-                bool hasClientGuid = false;
-                GUID clientGuid{};
-                float maxNits = 1000.0f;
-                float minNits = 0.0001f;
-                float maxFALL = 0.0f;
-                float widthCm = 0.0f;
-                float heightCm = 0.0f;
-            };
-
-            bool RecreateMonitor(unsigned int index);
-
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
-            // IddCx adapters are initialized in two stages. The adapter handle
-            // returned by IddCxAdapterInitAsync must not host monitors until
-            // EvtIddCxAdapterInitFinished reports success.
-            std::atomic_bool m_AdapterReady{false};
-            // Protects m_Monitors, m_MonitorCreationParams, m_ArrivedMonitors,
-            // m_ProcessingThreads and m_MouseEvents
-            mutable std::recursive_mutex m_monitorsMutex;
+            mutable std::recursive_mutex m_monitorsMutex; // Protects m_Monitors, m_ProcessingThreads, m_MouseEvents
             std::map<unsigned int, IDDCX_MONITOR> m_Monitors;
             std::map<unsigned int, GUID> m_MonitorGuids; // Maps index to client GUID for EDID cleanup
-            std::map<unsigned int, MonitorCreationParams> m_MonitorCreationParams;
-            // Indices whose IddCxMonitorArrival succeeded. A monitor handle
-            // exists in m_Monitors from IddCxMonitorCreate onwards, including
-            // when the subsequent arrival fails, so handle presence alone does
-            // not mean the OS ever saw the monitor.
-            std::set<unsigned int> m_ArrivedMonitors;
 
             std::map<IDDCX_MONITOR, DISPLAYCONFIG_VIDEO_SIGNAL_INFO> m_CommittedTargetModes;
             std::map<IDDCX_MONITOR, std::unique_ptr<SwapChainProcessor>> m_ProcessingThreads;

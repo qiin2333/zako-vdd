@@ -132,12 +132,12 @@ jobs:
           "PINNED_IDDCX_ROOT=$root\c" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Pinned IddCx header and stub root: $root\c"
 
-      - name: Restore Visual Studio 17.14.31 linker
+      - name: Restore Visual Studio 17.14.30 toolchain
         shell: pwsh
         run: |
-          $installer = Join-Path $env:RUNNER_TEMP "vs_buildtools_17.14.31.exe"
-          $installRoot = Join-Path $env:RUNNER_TEMP "vs-buildtools-17.14.31"
-          Invoke-WebRequest -Uri "https://download.visualstudio.microsoft.com/download/pr/d9ce9498-b5ec-4730-a7b2-b0589eab2d27/b25d20faf12653a27421e4209daadfeb81aa44e9339d160541bb806e13e8769a/vs_BuildTools.exe" -OutFile $installer
+          $installer = Join-Path $env:RUNNER_TEMP "vs_buildtools_17.14.30.exe"
+          $installRoot = Join-Path $env:RUNNER_TEMP "vs-buildtools-17.14.30"
+          Invoke-WebRequest -Uri "https://download.visualstudio.microsoft.com/download/pr/e8db5368-d542-4208-ab91-ea2ac11f00b8/d3dfaa899979cc46252f25f5ccfa893dec7590b3380694c92b891792c42808a0/vs_BuildTools.exe" -OutFile $installer
           $arguments = @(
             '--quiet', '--wait', '--norestart', '--nocache',
             '--installPath', $installRoot,
@@ -145,20 +145,20 @@ jobs:
           )
           $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
           if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
-            throw "Visual Studio 17.14.31 Build Tools installation failed: $($process.ExitCode)"
+            throw "Visual Studio 17.14.30 Build Tools installation failed: $($process.ExitCode)"
           }
-          $link = Get-Item "$installRoot\VC\Tools\MSVC\14.44.35207\bin\HostX86\x64\link.exe" -ErrorAction Stop
+          $toolsRoot = "$installRoot\VC\Tools\MSVC\14.44.35207"
+          $link = Get-Item "$toolsRoot\bin\HostX86\x64\link.exe" -ErrorAction Stop
           Write-Host "Pinned linker: $($link.FullName) version=$($link.VersionInfo.FileVersion)"
-          # link.exe reports file version 35226 while its Rich Header product
-          # build is 35222, which is the value present in the working v0.14.3.
-          if ($link.VersionInfo.FileVersion -notlike '14.44.35226*') {
+          if ($link.VersionInfo.FileVersion -notlike '14.44.35222*') {
             throw "Unexpected pinned linker version: $($link.VersionInfo.FileVersion)"
           }
           "PINNED_LINK_TOOL_PATH=$($link.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PINNED_VCTOOLS_ROOT=$toolsRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build the driver
         run: |
-          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:WindowsTargetPlatformVersion=${{ env.TARGET_KIT_VERSION }} /p:LinkToolPath="$env:PINNED_LINK_TOOL_PATH"
+          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:WindowsTargetPlatformVersion=${{ env.TARGET_KIT_VERSION }} /p:VCToolsInstallDir="$env:PINNED_VCTOOLS_ROOT\" /p:LinkToolPath="$env:PINNED_LINK_TOOL_PATH"
 
       - name: Stamp driver version
         shell: pwsh

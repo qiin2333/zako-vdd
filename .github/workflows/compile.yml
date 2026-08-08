@@ -2,7 +2,7 @@ name: Virtual Display Driver Building
 env:
   VS_VERSION_RANGE: '[17.0,18.0)'
   REQUIRED_VS_VERSION: '17.0'
-  TARGET_KIT_VERSION: '10.0.22621.0'
+  TARGET_KIT_VERSION: '10.0.26100.0'
 on:
   workflow_dispatch:
   push:
@@ -60,7 +60,7 @@ jobs:
             Write-Host "WDK MSBuild task found at: $($wdkTask.FullName)"
           } else {
             Write-Host "Installing WDK..."
-            $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2330411"
+            $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2324617"
             $wdkInstaller = "$env:TEMP\wdksetup.exe"
             Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
             $proc = Start-Process -FilePath $wdkInstaller -ArgumentList "/quiet", "/norestart", "/features", "+" -Wait -NoNewWindow -PassThru

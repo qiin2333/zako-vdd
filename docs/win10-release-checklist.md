@@ -18,6 +18,8 @@ The driver compiled with a current WDK, but Windows 10 22H2 loaded IddCx 1.5.1. 
 
 The first attempted fix moved dispatch to a WDF work item but kept the IddCx-owned IOCTL request pending until the worker finished. That changed the thread, not the IddCx operation lifetime, and the exact `v0.15.5` CI package still returned `0xC0000476`. The corrected path copies the command into a persistent FIFO, completes the IOCTL request first, and only then enqueues the passive worker. Monitor-management commands additionally wait until `EvtIddCxAdapterInitFinished` has reported success.
 
+The exact `v0.15.6` release exposed a second Win10-only cold-boot failure. The device entered idle D3 before a monitor command arrived; opening the control interface woke it to D0, where the driver called `IddCxAdapterInitAsync` a second time. Win10 returned `STATUS_ALREADY_REGISTERED` (`0xC0000718`), and the following monitor creation remained blocked with `STATUS_OPERATION_IN_PROGRESS`. An IddCx adapter registration survives the D3 transition, so initialization is now idempotent for the device lifetime and D0 exit no longer clears the adapter-initialized state.
+
 Do not explicitly set `ExecutionLevel` on the UMDF work-item object. Its callback is already passive; Win10 rejects that object attribute with `STATUS_WDF_EXECUTION_LEVEL_INVALID` (`0xC0200211`) and leaves the adapter at Device Manager Code 31.
 
 ### Display name and hardware ID are separate EDID fields
@@ -27,6 +29,12 @@ The EDID text descriptor already contained `Zako HDR`, while the manufacturer an
 ### Windows driver ranking hid local test builds
 
 An installed release package can outrank a locally built package even after `pnputil /add-driver`. Before a compatibility test, remove the old OEM package and verify the active INF, DLL hash, driver version, and certificate. Do not infer that the new binary loaded from a successful install command alone.
+
+### DriverVer was a Win10 runtime compatibility input
+
+The public `v0.14.3` package (`14.24.29.188`) repeatedly enumerated its monitor on the same Win10 22H2 VM. Rebuilding the same source and matched toolchain with `99.x` failed; changing only the numeric version back to `14.24.29.188` passed, including with the current package date. Public `v0.14.4` and `v0.15.x` packages began using `100.0.x.x` and reproduced the failure. The date, DLL logic, IddCx import surface, and hardware ID were not the differentiator in that A/B.
+
+Win10 maintenance artifacts therefore use `15.0.0.<run>` for CI and `15.0.15.<patch>` for `v0.15.<patch>` tags. Never restore the `99.x`/`100.x` namespace on this line. Because Windows ranks the already-published `100.0.15.x` packages above the corrected version, upgrades must explicitly replace the device package; plain `pnputil /add-driver` is insufficient.
 
 ### Stacked PRs can bypass the intended workflow trigger
 
@@ -43,8 +51,11 @@ PR builds use the standard `pull_request` event and never receive the production
 - enqueuing monitor work before completing the IddCx-owned IOCTL request;
 - retaining/completing the IOCTL request from the worker;
 - removal of the adapter-ready gate;
+- duplicate `IddCxAdapterInitAsync` registration during D0 wake;
+- clearing the adapter-initialized state during an idle D3 transition;
 - an explicit execution level on the UMDF work item;
 - restoration of the `DISPLAY\MTT1337` EDID bytes;
+- a Win10 artifact using the proven-bad `99.x` or `100.x` DriverVer namespace;
 - a `v0.15.*` tag whose commit is not contained in `origin/win10`.
 
 The guard is intentionally static. GitHub-hosted Windows runners do not reproduce the Win10 IddCx runtime, so this check cannot replace the VM smoke test.
@@ -69,5 +80,5 @@ The durable fully automated option is a self-hosted Win10 22H2 runner or lab mac
 2. Create the tag only after the PR checks pass: `v0.15.<patch>`.
 3. Wait for both the build and release jobs.
 4. Download `zakovdd.zip` and verify it contains the DLL, INF, catalog, settings, and certificate.
-5. Verify the stamped INF version is `100.0.15.<patch>` and the catalog signature is valid.
+5. Verify the stamped INF version is `15.0.15.<patch>` and the catalog signature is valid.
 6. Record the release asset SHA-256 and confirm the Sunshine `vdd-win10` notification ran.

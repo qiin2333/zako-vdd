@@ -274,7 +274,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>$(PINNED_IDDCX_ROOT)\Lib\10.0.26100.0\um\x64\iddcx\1.10;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>%(AdditionalDependencies);OneCoreUAP.lib;avrt.lib</AdditionalDependencies>
+      <AdditionalDependencies>$(PINNED_IDDCX_ROOT)\Lib\10.0.26100.0\um\x64\iddcx\1.10\IddCxStub.lib;%(AdditionalDependencies);OneCoreUAP.lib;avrt.lib</AdditionalDependencies>
     </Link>
     <DriverSign>
       <FileDigestAlgorithm>SHA256</FileDigestAlgorithm>

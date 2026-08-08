@@ -28,6 +28,8 @@ An installed release package can outrank a locally built package even after `pnp
 
 The build workflow listens to pull requests whose base is `win10` (among other maintained branches). A PR stacked on another feature branch does not match that trigger. Retargeting or marking a PR ready also uses event types outside GitHub's default pull-request trigger set. The workflow therefore listens to `edited` and `ready_for_review` explicitly. Before merge or release, retarget the final PR to `win10` and require its checks to complete.
 
+PR builds use the standard `pull_request` event and never receive the production signing secret. The former `pull_request_target` configuration checked out and built PR-controlled code in a privileged base-repository context, which was both unreliable for the Win10 branch and an unnecessary secret-exposure risk. Signing is limited to protected branch and tag builds.
+
 ## CI guard
 
 `.github/scripts/Test-Win10Compatibility.ps1` runs for `win10`, PRs targeting `win10`, and `v0.15.*` tags. It rejects these known regressions:

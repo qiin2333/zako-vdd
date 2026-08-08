@@ -149,7 +149,9 @@ jobs:
           }
           $link = Get-Item "$installRoot\VC\Tools\MSVC\14.44.35207\bin\HostX86\x64\link.exe" -ErrorAction Stop
           Write-Host "Pinned linker: $($link.FullName) version=$($link.VersionInfo.FileVersion)"
-          if ($link.VersionInfo.FileVersion -notlike '14.44.35222*') {
+          # link.exe reports file version 35226 while its Rich Header product
+          # build is 35222, which is the value present in the working v0.14.3.
+          if ($link.VersionInfo.FileVersion -notlike '14.44.35226*') {
             throw "Unexpected pinned linker version: $($link.VersionInfo.FileVersion)"
           }
           "PINNED_LINK_TOOL_PATH=$($link.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

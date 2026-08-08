@@ -28,7 +28,7 @@ $ioctlCallback = Get-SourceSection `
     -EndMarker 'bool initpath()'
 
 if ($ioctlCallback -notmatch 'WdfWorkItemEnqueue\s*\(\s*g_CommandWorkItem\s*\)') {
-    throw 'The Win11 IOCTL_VDD_COMMAND path must leave the IddCx callback stack through the persistent WDF work item.'
+    throw 'The IOCTL_VDD_COMMAND path must leave the IddCx callback stack through the persistent WDF work item.'
 }
 
 if ($ioctlCallback -match 'DispatchVddCommandBuffer\s*\(') {
@@ -59,28 +59,27 @@ if ($source -notmatch 'IsAdapterReady\(\)' -or
     throw 'Monitor commands must wait for successful EvtIddCxAdapterInitFinished completion.'
 }
 
-# Win10 22H2 ships the down-level IddCx 1.5.1 host. Registering the optional
-# custom device-control callback prevents that host from delivering
-# EvtIddCxAdapterInitFinished. Keep the last known-good named-pipe surface on
-# Win10 while retaining the IOCTL transport on Win11.
+# Sunshine uses the IOCTL control surface on both Win10 and Win11. Earlier
+# diagnostics incorrectly attributed Win10 monitor-enumeration failure to the
+# callback; the isolated cause was the legacy 99.x/100.x DriverVer range.
 if ($source -notmatch 'g_IsWin10OrOlder\.store\s*\(\s*DetectWin10OrOlderHost\(\)\s*\)') {
-    throw 'DriverEntry must resolve the Win10/Win11 transport before device creation.'
+    throw 'DriverEntry must resolve the host version before device creation.'
 }
 
-if ($source -notmatch 'if\s*\(\s*!g_IsWin10OrOlder\.load\(\)\s*\)\s*\{\s*IddConfig\.EvtIddCxDeviceIoControl\s*=\s*VirtualDisplayDriverIoDeviceControl') {
-    throw 'EvtIddCxDeviceIoControl must only be registered on Win11.'
+if ($source -notmatch 'IddConfig\.EvtIddCxDeviceIoControl\s*=\s*VirtualDisplayDriverIoDeviceControl') {
+    throw 'EvtIddCxDeviceIoControl must be registered on every supported Windows version.'
 }
 
 $deviceAdd = Get-SourceSection `
     -StartMarker 'VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver' `
     -EndMarker 'VirtualDisplayDriverDeviceD0Entry(WDFDEVICE Device'
 
-if ($deviceAdd -notmatch 'if\s*\(\s*!g_IsWin10OrOlder\.load\(\)\s*\)[\s\S]*?WdfDeviceCreateDeviceInterface') {
-    throw 'The custom control device interface must only be created on Win11.'
+if ($deviceAdd -notmatch 'WdfDeviceCreateDeviceInterface\s*\(\s*Device\s*,\s*&GUID_DEVINTERFACE_ZAKO_VDD_CONTROL') {
+    throw 'The custom IOCTL control device interface must be created on every supported Windows version.'
 }
 
-if ($deviceAdd -notmatch 'if\s*\(\s*g_IsWin10OrOlder\.load\(\)\s*\)\s*\{[\s\S]*?return STATUS_SUCCESS;[\s\S]*?WdfWorkItemCreate') {
-    throw 'Win10 must return before creating the IOCTL command work item.'
+if ($deviceAdd -notmatch 'WdfWorkItemCreate\s*\(') {
+    throw 'The persistent IOCTL command work item must be created on every supported Windows version.'
 }
 
 $pipeServer = Get-SourceSection `
@@ -92,8 +91,8 @@ if ($pipeServer -notmatch 'CreateNamedPipeW\s*\(' -or
     throw 'Win10 compatibility commands must use the shared parser through ZakoVDDPipe.'
 }
 
-if ($source -notmatch 'if\s*\(\s*g_IsWin10OrOlder\.load\(\)\s*\)\s*\{\s*StartWin10NamedPipeServer\(\)') {
-    throw 'DriverEntry must start the named pipe on Win10.'
+if ($source -match 'if\s*\(\s*g_IsWin10OrOlder\.load\(\)\s*\)\s*\{\s*StartWin10NamedPipeServer\(\)') {
+    throw 'Sunshine-supported Win10 builds must not select the named-pipe transport instead of IOCTL.'
 }
 
 if ($source -notmatch 'StopWin10NamedPipeServer\(\)') {
@@ -159,4 +158,4 @@ if ($env:GITHUB_REF -match '^refs/tags/v0\.15\.') {
     }
 }
 
-Write-Host 'Compatibility invariants passed: Win10 pipe/legacy IddCx surface, Win11 deferred IOCTL path, single adapter registration across D3, and DISPLAY\ZAK2333.'
+Write-Host 'Compatibility invariants passed: Win10/Win11 deferred IOCTL path, down-level IddCx adapter surface, single adapter registration across D3, and DISPLAY\ZAK2333.'

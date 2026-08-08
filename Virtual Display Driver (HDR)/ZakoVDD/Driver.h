@@ -104,6 +104,15 @@ namespace Microsoft
             void FinishInit();
             bool IsAdapterReady() const noexcept { return m_AdapterReady.load(std::memory_order_acquire); }
             void MarkAdapterNotReady() noexcept { m_AdapterReady.store(false, std::memory_order_release); }
+            bool RecoverAdapterReadinessAfterTimeout() noexcept
+            {
+                if (m_Adapter == nullptr)
+                {
+                    return false;
+                }
+                m_AdapterReady.store(true, std::memory_order_release);
+                return true;
+            }
 
             void CreateMonitor(unsigned int index, const GUID* pClientGuid = nullptr, float maxNits = 1000.0f, float minNits = 0.0001f, float maxFALL = 0.0f, float widthCm = 0.0f, float heightCm = 0.0f);
             bool DestroyMonitor(unsigned int index);

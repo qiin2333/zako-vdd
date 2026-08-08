@@ -2216,7 +2216,27 @@ static bool WaitForReadyAdapter(const std::wstring &buffer)
 		Sleep(50);
 	}
 
-	vddlog("e", ("Timed out waiting for adapter initialization before command: " + WStringToString(buffer)).c_str());
+	// Win10 22H2 can return success and a valid AdapterObject from
+	// IddCxAdapterInitAsync yet never deliver EvtIddCxAdapterInitFinished after
+	// a cold boot. The adapter remains usable (and Device Manager reports Code
+	// 0), so permanently dropping every monitor command here leaves the driver
+	// alive but unable to enumerate a display. After a generous grace period,
+	// recover only when InitAdapter stored a valid adapter object. Calls remain
+	// on this passive worker after the IddCx-owned request has been completed;
+	// any genuinely incomplete adapter operation will therefore fail normally
+	// instead of re-entering the IddCx IOCTL callback stack.
+	WDFDEVICE device = g_GlobalDevice;
+	if (device != nullptr)
+	{
+		auto *wrapper = WdfObjectGet_IndirectDeviceContextWrapper(device);
+		if (wrapper && wrapper->pContext && wrapper->pContext->RecoverAdapterReadinessAfterTimeout())
+		{
+			vddlog("w", ("Adapter-init callback timed out; continuing with the valid adapter object before command: " + WStringToString(buffer)).c_str());
+			return true;
+		}
+	}
+
+	vddlog("e", ("Timed out waiting for adapter initialization and no valid adapter object exists before command: " + WStringToString(buffer)).c_str());
 	return false;
 }
 

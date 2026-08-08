@@ -59,6 +59,11 @@ if ($source -notmatch 'IsAdapterReady\(\)' -or
     throw 'Monitor commands must wait for successful EvtIddCxAdapterInitFinished completion.'
 }
 
+if ($source -notmatch 'RecoverAdapterReadinessAfterTimeout\(\)' -or
+    $source -notmatch 'Adapter-init callback timed out; continuing with the valid adapter object') {
+    throw 'Win10 cold boot requires a bounded adapter-init callback fallback after IddCxAdapterInitAsync returned a valid adapter object.'
+}
+
 if ($source -match 'commandWorkItemAttributes\.ExecutionLevel') {
     throw 'Do not set ExecutionLevel on the UMDF work item; Win10 rejects it with STATUS_WDF_EXECUTION_LEVEL_INVALID.'
 }
@@ -98,4 +103,4 @@ if ($env:GITHUB_REF -match '^refs/tags/v0\.15\.') {
     }
 }
 
-Write-Host 'Win10 compatibility invariants passed: completed IOCTL before FIFO dispatch, adapter-ready gate, and DISPLAY\ZAK2333.'
+Write-Host 'Win10 compatibility invariants passed: completed IOCTL before FIFO dispatch, bounded adapter-ready recovery, and DISPLAY\ZAK2333.'

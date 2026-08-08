@@ -30,6 +30,12 @@ The EDID text descriptor already contained `Zako HDR`, while the manufacturer an
 
 An installed release package can outrank a locally built package even after `pnputil /add-driver`. Before a compatibility test, remove the old OEM package and verify the active INF, DLL hash, driver version, and certificate. Do not infer that the new binary loaded from a successful install command alone.
 
+### DriverVer was a Win10 runtime compatibility input
+
+The public `v0.14.3` package (`14.24.29.188`) repeatedly enumerated its monitor on the same Win10 22H2 VM. Rebuilding the same source and matched toolchain with `99.x` failed; changing only the numeric version back to `14.24.29.188` passed, including with the current package date. Public `v0.14.4` and `v0.15.x` packages began using `100.0.x.x` and reproduced the failure. The date, DLL logic, IddCx import surface, and hardware ID were not the differentiator in that A/B.
+
+Win10 maintenance artifacts therefore use `15.0.0.<run>` for CI and `15.0.15.<patch>` for `v0.15.<patch>` tags. Never restore the `99.x`/`100.x` namespace on this line. Because Windows ranks the already-published `100.0.15.x` packages above the corrected version, upgrades must explicitly replace the device package; plain `pnputil /add-driver` is insufficient.
+
 ### Stacked PRs can bypass the intended workflow trigger
 
 The build workflow listens to pull requests whose base is `win10` (among other maintained branches). A PR stacked on another feature branch does not match that trigger. Retargeting or marking a PR ready also uses event types outside GitHub's default pull-request trigger set. The workflow therefore listens to `edited` and `ready_for_review` explicitly. Before merge or release, retarget the final PR to `win10` and require its checks to complete.
@@ -49,6 +55,7 @@ PR builds use the standard `pull_request` event and never receive the production
 - clearing the adapter-initialized state during an idle D3 transition;
 - an explicit execution level on the UMDF work item;
 - restoration of the `DISPLAY\MTT1337` EDID bytes;
+- a Win10 artifact using the proven-bad `99.x` or `100.x` DriverVer namespace;
 - a `v0.15.*` tag whose commit is not contained in `origin/win10`.
 
 The guard is intentionally static. GitHub-hosted Windows runners do not reproduce the Win10 IddCx runtime, so this check cannot replace the VM smoke test.
@@ -73,5 +80,5 @@ The durable fully automated option is a self-hosted Win10 22H2 runner or lab mac
 2. Create the tag only after the PR checks pass: `v0.15.<patch>`.
 3. Wait for both the build and release jobs.
 4. Download `zakovdd.zip` and verify it contains the DLL, INF, catalog, settings, and certificate.
-5. Verify the stamped INF version is `100.0.15.<patch>` and the catalog signature is valid.
+5. Verify the stamped INF version is `15.0.15.<patch>` and the catalog signature is valid.
 6. Record the release asset SHA-256 and confirm the Sunshine `vdd-win10` notification ran.

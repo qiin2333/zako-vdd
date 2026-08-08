@@ -178,7 +178,7 @@ jobs:
           # Diagnostic A/B: retain the exact package version metadata from the
           # public v0.14.3 while replacing only its rebuilt DLL.
           $version = "14.24.29.188"
-          $date = "04/29/2026"
+          $date = "08/08/2026"
           Write-Host "Setting DriverVer = $date, $version"
 
           & $stampinf.FullName -f $infPath -d $date -v $version

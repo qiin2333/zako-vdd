@@ -46,6 +46,8 @@ Environment:
 
 extern "C" const GUID GUID_DEVINTERFACE_ZAKO_VDD_CONTROL = ZAKO_VDD_CONTROL_GUID_INIT;
 
+#define PIPE_NAME L"\\\\.\\pipe\\ZakoVDDPipe"
+
 #define ZAKO_IDDCX_STRUCT_INIT(obj, type) \
 	do \
 	{ \
@@ -61,6 +63,9 @@ mutex g_Mutex;
 mutex g_DataMutex; // Protects monitorModes, s_KnownMonitorModes2, numVirtualDisplays, gpuname
 WDFDEVICE g_GlobalDevice = nullptr;
 WDFWORKITEM g_CommandWorkItem = nullptr;
+HANDLE g_PipeThread = NULL;
+std::atomic_bool g_PipeRunning{false};
+std::atomic_bool g_IsWin10OrOlder{true};
 
 struct QueuedVddCommand
 {
@@ -229,36 +234,43 @@ const char *XorCursorSupportLevelToString(IDDCX_XOR_CURSOR_SUPPORT level)
 // Successful detection of Win11+ keeps the Modern profile for full HDR /
 // wide-gamut declarations, but any probe failure falls back to Legacy so
 // unknown hosts land on the compatibility-safe side.
-static VddEdid::Profile DetectAutoEdidProfile()
+static bool DetectWin10OrOlderHost()
 {
 	typedef LONG (NTAPI *RtlGetVersionFn)(PRTL_OSVERSIONINFOW);
 	HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
 	if (!ntdll)
 	{
-		vddlog("w", "DetectAutoEdidProfile: ntdll handle missing, defaulting to Legacy");
-		return VddEdid::Profile::Legacy;
+		vddlog("w", "DetectWin10OrOlderHost: ntdll handle missing, using compatibility path");
+		return true;
 	}
 	auto pRtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
 	if (!pRtlGetVersion)
 	{
-		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion missing, defaulting to Legacy");
-		return VddEdid::Profile::Legacy;
+		vddlog("w", "DetectWin10OrOlderHost: RtlGetVersion missing, using compatibility path");
+		return true;
 	}
 	RTL_OSVERSIONINFOW info{};
 	info.dwOSVersionInfoSize = sizeof(info);
 	if (pRtlGetVersion(&info) != 0)
 	{
-		vddlog("w", "DetectAutoEdidProfile: RtlGetVersion failed, defaulting to Legacy");
-		return VddEdid::Profile::Legacy;
+		vddlog("w", "DetectWin10OrOlderHost: RtlGetVersion failed, using compatibility path");
+		return true;
 	}
 	// Win11 starts at build 22000.
 	const bool isWin10OrOlder = (info.dwMajorVersion < 10) ||
 		(info.dwMajorVersion == 10 && info.dwBuildNumber < 22000);
 	stringstream ss;
-	ss << "DetectAutoEdidProfile: build=" << info.dwBuildNumber
-	   << " -> " << (isWin10OrOlder ? "Legacy" : "Modern");
+	ss << "Detected host build=" << info.dwBuildNumber
+	   << " -> " << (isWin10OrOlder ? "Win10 compatibility transport" : "Win11 IOCTL transport");
 	vddlog("i", ss.str().c_str());
-	return isWin10OrOlder ? VddEdid::Profile::Legacy : VddEdid::Profile::Modern;
+	return isWin10OrOlder;
+}
+
+static VddEdid::Profile DetectAutoEdidProfile()
+{
+	return g_IsWin10OrOlder.load()
+		? VddEdid::Profile::Legacy
+		: VddEdid::Profile::Modern;
 }
 
 // Apply an EdidProfile setting value (Auto/Legacy/Modern, case-insensitive)
@@ -2170,6 +2182,113 @@ void DispatchVddCommandBuffer(HANDLE hPipeForResponse, wchar_t *buffer)
 	}
 }
 
+// IddCx 1.5.1 on Windows 10 does not complete adapter initialization when a
+// custom EvtIddCxDeviceIoControl callback is registered. Keep the modern IOCTL
+// transport on Windows 11 and use the last known-good command transport on
+// down-level hosts. The parser and command implementation remain shared.
+static void HandlePipeClient(HANDLE pipe)
+{
+	wchar_t buffer[2048] = {};
+	DWORD bytesRead = 0;
+	const BOOL read = ReadFile(pipe, buffer, sizeof(buffer) - sizeof(wchar_t), &bytesRead, NULL);
+	if (read && bytesRead != 0)
+	{
+		buffer[bytesRead / sizeof(wchar_t)] = L'\0';
+		vddlog("p", ("[Win10 pipe] " + WStringToString(buffer)).c_str());
+		DispatchVddCommandBuffer(pipe, buffer);
+	}
+	DisconnectNamedPipe(pipe);
+	CloseHandle(pipe);
+}
+
+static DWORD WINAPI Win10NamedPipeServer(LPVOID)
+{
+	SECURITY_ATTRIBUTES security{};
+	security.nLength = sizeof(security);
+	security.bInheritHandle = FALSE;
+	if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+			L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &security.lpSecurityDescriptor, NULL))
+	{
+		vddlog("e", "Failed to create Win10 pipe security descriptor.");
+		return 1;
+	}
+
+	while (g_PipeRunning.load())
+	{
+		HANDLE pipe = CreateNamedPipeW(
+			PIPE_NAME,
+			PIPE_ACCESS_DUPLEX,
+			PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+			PIPE_UNLIMITED_INSTANCES,
+			512,
+			512,
+			0,
+			&security);
+		if (pipe == INVALID_HANDLE_VALUE)
+		{
+			vddlog("e", "Failed to create Win10 compatibility pipe.");
+			break;
+		}
+
+		const BOOL connected = ConnectNamedPipe(pipe, NULL)
+			? TRUE
+			: (GetLastError() == ERROR_PIPE_CONNECTED);
+		if (connected && g_PipeRunning.load())
+		{
+			HandlePipeClient(pipe);
+		}
+		else
+		{
+			CloseHandle(pipe);
+		}
+	}
+
+	LocalFree(security.lpSecurityDescriptor);
+	return 0;
+}
+
+static void StartWin10NamedPipeServer()
+{
+	if (g_PipeThread != NULL)
+	{
+		return;
+	}
+	g_PipeRunning.store(true);
+	g_PipeThread = CreateThread(NULL, 0, Win10NamedPipeServer, NULL, 0, NULL);
+	if (g_PipeThread == NULL)
+	{
+		g_PipeRunning.store(false);
+		vddlog("e", "Failed to start Win10 compatibility pipe thread.");
+		return;
+	}
+	vddlog("i", "Started Win10 compatibility command pipe.");
+}
+
+static void StopWin10NamedPipeServer()
+{
+	if (g_PipeThread == NULL)
+	{
+		return;
+	}
+	g_PipeRunning.store(false);
+	HANDLE wake = CreateFileW(
+		PIPE_NAME,
+		GENERIC_READ | GENERIC_WRITE,
+		0,
+		NULL,
+		OPEN_EXISTING,
+		0,
+		NULL);
+	if (wake != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(wake);
+	}
+	WaitForSingleObject(g_PipeThread, INFINITE);
+	CloseHandle(g_PipeThread);
+	g_PipeThread = NULL;
+	vddlog("i", "Stopped Win10 compatibility command pipe.");
+}
+
 EVT_WDF_WORKITEM VddCommandWorkItem;
 
 static bool CommandRequiresReadyAdapter(const std::wstring &buffer)
@@ -2415,6 +2534,7 @@ VOID EvtDriverUnload(
 	UNREFERENCED_PARAMETER(Driver);
 
 	vddlog("i", "Starting driver unload process");
+	StopWin10NamedPipeServer();
 
 	// Clean up global device resources before stopping services
 	if (g_GlobalDevice != nullptr)
@@ -2498,6 +2618,8 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	SDRCOLOUR = SDR10 ? IDDCX_BITS_PER_COMPONENT_10 : IDDCX_BITS_PER_COMPONENT_8;
 	ColourFormat = GetStringSetting(L"ColourFormat");
 
+	g_IsWin10OrOlder.store(DetectWin10OrOlderHost());
+
 	// EDID profile: Auto -> resolved via host OS build number (issue #612).
 	ApplyEdidProfileSetting(GetStringSetting(L"EdidProfile"));
 
@@ -2538,6 +2660,10 @@ _Use_decl_annotations_ extern "C" NTSTATUS DriverEntry(
 	if (!NT_SUCCESS(Status))
 	{
 		return Status;
+	}
+	if (g_IsWin10OrOlder.load())
+	{
+		StartWin10NamedPipeServer();
 	}
 
 	return Status;
@@ -2884,9 +3010,12 @@ _Use_decl_annotations_
 			  << "\n  EvtIddCxMonitorUnassignSwapChain: " << (IddConfig.EvtIddCxMonitorUnassignSwapChain ? "Set" : "Not Set");
 	vddlog("d", logStream.str().c_str());
 
-	// If the driver wishes to handle custom IoDeviceControl requests, it's necessary to use this callback since IddCx
-	// redirects IoDeviceControl requests to an internal queue.
-	IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
+	// The down-level IddCx 1.5.1 host on Win10 stalls adapter initialization
+	// when this optional callback is present. Win10 uses the compatibility pipe.
+	if (!g_IsWin10OrOlder.load())
+	{
+		IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
+	}
 
 	IddConfig.EvtIddCxAdapterInitFinished = VirtualDisplayDriverAdapterInitFinished;
 
@@ -3010,6 +3139,19 @@ _Use_decl_annotations_
 		return Status;
 	}
 
+	if (!g_IsWin10OrOlder.load())
+	{
+		Status = WdfDeviceCreateDeviceInterface(Device, &GUID_DEVINTERFACE_ZAKO_VDD_CONTROL, NULL);
+		if (!NT_SUCCESS(Status))
+		{
+			logStream.str("");
+			logStream << "WdfDeviceCreateDeviceInterface failed with status: " << Status;
+			vddlog("e", logStream.str().c_str());
+			return Status;
+		}
+		vddlog("d", "Registered Zako VDD control device interface");
+	}
+
 	// Create a new device context object and attach it to the WDF device object
 	/*
 	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
@@ -3035,6 +3177,11 @@ _Use_decl_annotations_
 
 	// Save global reference after successful device creation
 	g_GlobalDevice = Device;
+	if (g_IsWin10OrOlder.load())
+	{
+		vddlog("i", "Win10 compatibility path: skipping IOCTL command work item.");
+		return STATUS_SUCCESS;
+	}
 
 	// A single passive work item drains IOCTL commands in FIFO order. It is a
 	// child of the device, so WDF waits for an active callback and destroys it
@@ -4680,7 +4827,14 @@ void IndirectDeviceContext::InitAdapter()
 	logStream.str("");
 
 	IDDCX_ADAPTER_CAPS AdapterCaps = {};
-	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps, IDDCX_ADAPTER_CAPS);
+	if (g_IsWin10OrOlder.load())
+	{
+		AdapterCaps.Size = sizeof(AdapterCaps);
+	}
+	else
+	{
+		ZAKO_IDDCX_STRUCT_INIT(AdapterCaps, IDDCX_ADAPTER_CAPS);
+	}
 
 	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2))
 	{
@@ -4716,7 +4870,14 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare basic feature support for the adapter (required)
 	AdapterCaps.MaxMonitorsSupported = numVirtualDisplays;
-	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps.EndPointDiagnostics, IDDCX_ENDPOINT_DIAGNOSTIC_INFO);
+	if (g_IsWin10OrOlder.load())
+	{
+		AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
+	}
+	else
+	{
+		ZAKO_IDDCX_STRUCT_INIT(AdapterCaps.EndPointDiagnostics, IDDCX_ENDPOINT_DIAGNOSTIC_INFO);
+	}
 	AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
 	AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
@@ -4727,7 +4888,14 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare your hardware and firmware versions (required)
 	IDDCX_ENDPOINT_VERSION Version = {};
-	ZAKO_IDDCX_STRUCT_INIT(Version, IDDCX_ENDPOINT_VERSION);
+	if (g_IsWin10OrOlder.load())
+	{
+		Version.Size = sizeof(Version);
+	}
+	else
+	{
+		ZAKO_IDDCX_STRUCT_INIT(Version, IDDCX_ENDPOINT_VERSION);
+	}
 	Version.MajorVer = 1;
 	AdapterCaps.EndPointDiagnostics.pFirmwareVersion = &Version;
 	AdapterCaps.EndPointDiagnostics.pHardwareVersion = &Version;
@@ -4813,31 +4981,6 @@ void IndirectDeviceContext::FinishInit()
 	m_AdapterReady.store(true, std::memory_order_release);
 	vddlog("i", "Applied Adapter configs.");
 	vddlog("i", "Adapter is ready for monitor commands.");
-
-	// Windows 10's down-level IddCx host can stall adapter initialization when
-	// a second device interface exists while IddCxAdapterInitAsync is pending.
-	// Register the control interface only after IddCx has completed the adapter.
-	// WDF permits interfaces to be created after device start, but such an
-	// interface is disabled by default and must be enabled explicitly.
-	NTSTATUS status = WdfDeviceCreateDeviceInterface(
-		m_WdfDevice,
-		&GUID_DEVINTERFACE_ZAKO_VDD_CONTROL,
-		NULL);
-	if (!NT_SUCCESS(status))
-	{
-		stringstream ss;
-		ss << "WdfDeviceCreateDeviceInterface failed after adapter initialization. Status: 0x"
-		   << std::hex << status;
-		vddlog("e", ss.str().c_str());
-		return;
-	}
-
-	WdfDeviceSetDeviceInterfaceState(
-		m_WdfDevice,
-		&GUID_DEVINTERFACE_ZAKO_VDD_CONTROL,
-		NULL,
-		TRUE);
-	vddlog("i", "Registered and enabled Zako VDD control interface after adapter initialization.");
 }
 
 void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm)

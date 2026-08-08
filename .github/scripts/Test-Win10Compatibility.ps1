@@ -28,11 +28,11 @@ $ioctlCallback = Get-SourceSection `
     -EndMarker 'bool initpath()'
 
 if ($ioctlCallback -notmatch 'WdfWorkItemEnqueue\s*\(\s*g_CommandWorkItem\s*\)') {
-    throw 'IOCTL_VDD_COMMAND must leave the IddCx callback stack through the persistent WDF work item.'
+    throw 'The Win11 IOCTL_VDD_COMMAND path must leave the IddCx callback stack through the persistent WDF work item.'
 }
 
 if ($ioctlCallback -match 'DispatchVddCommandBuffer\s*\(') {
-    throw 'Do not dispatch VDD commands inline from VirtualDisplayDriverIoDeviceControl; Win10 IddCx rejects re-entrant monitor creation.'
+    throw 'Do not dispatch VDD commands inline from VirtualDisplayDriverIoDeviceControl.'
 }
 
 $workItem = Get-SourceSection `
@@ -46,7 +46,7 @@ if ($workItem -notmatch 'DispatchVddCommandBuffer\s*\(\s*INVALID_HANDLE_VALUE\s*
 $completeIndex = $ioctlCallback.IndexOf('WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0)', [StringComparison]::Ordinal)
 $enqueueIndex = $ioctlCallback.IndexOf('WdfWorkItemEnqueue(g_CommandWorkItem)', [StringComparison]::Ordinal)
 if ($completeIndex -lt 0 -or $enqueueIndex -lt 0 -or $completeIndex -gt $enqueueIndex) {
-    throw 'Win10 requires the IddCx-owned IOCTL request to be completed before the monitor-command worker is enqueued.'
+    throw 'The IddCx-owned IOCTL request must be completed before the monitor-command worker is enqueued.'
 }
 
 if ($workItem -match 'WdfRequestComplete') {
@@ -57,6 +57,55 @@ if ($source -notmatch 'IsAdapterReady\(\)' -or
     $source -notmatch 'Adapter is ready for monitor commands' -or
     $workItem -notmatch 'WaitForReadyAdapter') {
     throw 'Monitor commands must wait for successful EvtIddCxAdapterInitFinished completion.'
+}
+
+# Win10 22H2 ships the down-level IddCx 1.5.1 host. Registering the optional
+# custom device-control callback prevents that host from delivering
+# EvtIddCxAdapterInitFinished. Keep the last known-good named-pipe surface on
+# Win10 while retaining the IOCTL transport on Win11.
+if ($source -notmatch 'g_IsWin10OrOlder\.store\s*\(\s*DetectWin10OrOlderHost\(\)\s*\)') {
+    throw 'DriverEntry must resolve the Win10/Win11 transport before device creation.'
+}
+
+if ($source -notmatch 'if\s*\(\s*!g_IsWin10OrOlder\.load\(\)\s*\)\s*\{\s*IddConfig\.EvtIddCxDeviceIoControl\s*=\s*VirtualDisplayDriverIoDeviceControl') {
+    throw 'EvtIddCxDeviceIoControl must only be registered on Win11.'
+}
+
+$deviceAdd = Get-SourceSection `
+    -StartMarker 'VirtualDisplayDriverDeviceAdd(WDFDRIVER Driver' `
+    -EndMarker 'VirtualDisplayDriverDeviceD0Entry(WDFDEVICE Device'
+
+if ($deviceAdd -notmatch 'if\s*\(\s*!g_IsWin10OrOlder\.load\(\)\s*\)[\s\S]*?WdfDeviceCreateDeviceInterface') {
+    throw 'The custom control device interface must only be created on Win11.'
+}
+
+if ($deviceAdd -notmatch 'if\s*\(\s*g_IsWin10OrOlder\.load\(\)\s*\)\s*\{[\s\S]*?return STATUS_SUCCESS;[\s\S]*?WdfWorkItemCreate') {
+    throw 'Win10 must return before creating the IOCTL command work item.'
+}
+
+$pipeServer = Get-SourceSection `
+    -StartMarker 'static void HandlePipeClient(HANDLE pipe)' `
+    -EndMarker 'EVT_WDF_WORKITEM VddCommandWorkItem'
+
+if ($pipeServer -notmatch 'CreateNamedPipeW\s*\(' -or
+    $pipeServer -notmatch 'DispatchVddCommandBuffer\s*\(\s*pipe\s*,\s*buffer\s*\)') {
+    throw 'Win10 compatibility commands must use the shared parser through ZakoVDDPipe.'
+}
+
+if ($source -notmatch 'if\s*\(\s*g_IsWin10OrOlder\.load\(\)\s*\)\s*\{\s*StartWin10NamedPipeServer\(\)') {
+    throw 'DriverEntry must start the named pipe on Win10.'
+}
+
+if ($source -notmatch 'StopWin10NamedPipeServer\(\)') {
+    throw 'Driver unload must stop the Win10 named-pipe thread.'
+}
+
+$adapterInit = Get-SourceSection `
+    -StartMarker 'void IndirectDeviceContext::InitAdapter()' `
+    -EndMarker 'void IndirectDeviceContext::FinishInit()'
+
+if ($adapterInit -notmatch 'if\s*\(\s*g_IsWin10OrOlder\.load\(\)\s*\)[\s\S]*?AdapterCaps\.Size\s*=\s*sizeof\(AdapterCaps\)') {
+    throw 'Win10 must advertise the down-level IDDCX_ADAPTER_CAPS size used by the known-good 0.14.3 driver.'
 }
 
 if ($source -notmatch 'Adapter already registered; skipping duplicate IddCxAdapterInitAsync') {
@@ -110,4 +159,4 @@ if ($env:GITHUB_REF -match '^refs/tags/v0\.15\.') {
     }
 }
 
-Write-Host 'Win10 compatibility invariants passed: completed IOCTL before FIFO dispatch, single adapter registration across D3, and DISPLAY\ZAK2333.'
+Write-Host 'Compatibility invariants passed: Win10 pipe/legacy IddCx surface, Win11 deferred IOCTL path, single adapter registration across D3, and DISPLAY\ZAK2333.'

@@ -30,6 +30,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Guard Win10 compatibility invariants
+        if: github.base_ref == 'win10' || github.ref_name == 'win10' || startsWith(github.ref, 'refs/tags/v0.15.')
+        shell: pwsh
+        run: ./.github/scripts/Test-Win10Compatibility.ps1
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2

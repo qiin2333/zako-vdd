@@ -2886,7 +2886,10 @@ _Use_decl_annotations_
 
 	// If the driver wishes to handle custom IoDeviceControl requests, it's necessary to use this callback since IddCx
 	// redirects IoDeviceControl requests to an internal queue.
-	IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
+	// Diagnostic A/B: Win10 IddCx 1.5.1 never completes adapter initialization
+	// when the private IOCTL callback is registered on the IddCx device.
+	// Keep this disabled only long enough to verify that interaction in the VM.
+	IddConfig.EvtIddCxDeviceIoControl = nullptr;
 
 	IddConfig.EvtIddCxAdapterInitFinished = VirtualDisplayDriverAdapterInitFinished;
 
@@ -5708,8 +5711,9 @@ int IndirectDeviceContext::RefreshMonitorModes(bool refreshMonitorDescription)
 
 _Use_decl_annotations_
 	NTSTATUS
-	VirtualDisplayDriverAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_IN_ADAPTER_INIT_FINISHED *pInArgs)
+VirtualDisplayDriverAdapterInitFinished(IDDCX_ADAPTER AdapterObject, const IDARG_IN_ADAPTER_INIT_FINISHED *pInArgs)
 {
+	vddlog("i", "EvtIddCxAdapterInitFinished entered.");
 	// This is called when the OS has finished setting up the adapter for use by the IddCx driver. It's now possible
 	// to report attached monitors.
 

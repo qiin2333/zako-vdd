@@ -14,7 +14,11 @@ The driver compiled with a current WDK, but Windows 10 22H2 loaded IddCx 1.5.1. 
 
 ### Changing the control transport changed the callback context
 
-`v0.14.3` handled commands on a named-pipe worker thread. The `v0.15.x` IOCTL transport initially dispatched monitor commands inline from `EvtIddCxDeviceIoControl`. Calling `IddCxMonitorCreate` on that IddCx callback stack returned `STATUS_OPERATION_IN_PROGRESS` on Win10. VDD commands must be dispatched from the WDF work item and the request completed after that worker finishes.
+`v0.14.3` handled commands on a named-pipe worker thread. The `v0.15.x` IOCTL transport initially dispatched monitor commands inline from `EvtIddCxDeviceIoControl`. Calling `IddCxMonitorCreate` on that IddCx callback stack returned `STATUS_OPERATION_IN_PROGRESS` on Win10.
+
+The first attempted fix moved dispatch to a WDF work item but kept the IddCx-owned IOCTL request pending until the worker finished. That changed the thread, not the IddCx operation lifetime, and the exact `v0.15.5` CI package still returned `0xC0000476`. The corrected path copies the command into a persistent FIFO, completes the IOCTL request first, and only then enqueues the passive worker. Monitor-management commands additionally wait until `EvtIddCxAdapterInitFinished` has reported success.
+
+Do not explicitly set `ExecutionLevel` on the UMDF work-item object. Its callback is already passive; Win10 rejects that object attribute with `STATUS_WDF_EXECUTION_LEVEL_INVALID` (`0xC0200211`) and leaves the adapter at Device Manager Code 31.
 
 ### Display name and hardware ID are separate EDID fields
 
@@ -35,7 +39,11 @@ PR builds use the standard `pull_request` event and never receive the production
 `.github/scripts/Test-Win10Compatibility.ps1` runs for `win10`, PRs targeting `win10`, and `v0.15.*` tags. It rejects these known regressions:
 
 - inline command dispatch from `VirtualDisplayDriverIoDeviceControl`;
-- removal of the WDF work-item dispatch path;
+- removal of the FIFO WDF work-item dispatch path;
+- enqueuing monitor work before completing the IddCx-owned IOCTL request;
+- retaining/completing the IOCTL request from the worker;
+- removal of the adapter-ready gate;
+- an explicit execution level on the UMDF work item;
 - restoration of the `DISPLAY\MTT1337` EDID bytes;
 - a `v0.15.*` tag whose commit is not contained in `origin/win10`.
 

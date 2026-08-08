@@ -2886,10 +2886,7 @@ _Use_decl_annotations_
 
 	// If the driver wishes to handle custom IoDeviceControl requests, it's necessary to use this callback since IddCx
 	// redirects IoDeviceControl requests to an internal queue.
-	// Diagnostic A/B: Win10 IddCx 1.5.1 never completes adapter initialization
-	// when the private IOCTL callback is registered on the IddCx device.
-	// Keep this disabled only long enough to verify that interaction in the VM.
-	IddConfig.EvtIddCxDeviceIoControl = nullptr;
+	IddConfig.EvtIddCxDeviceIoControl = VirtualDisplayDriverIoDeviceControl;
 
 	IddConfig.EvtIddCxAdapterInitFinished = VirtualDisplayDriverAdapterInitFinished;
 
@@ -4696,7 +4693,7 @@ void IndirectDeviceContext::InitAdapter()
 	logStream.str("");
 
 	IDDCX_ADAPTER_CAPS AdapterCaps = {};
-	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps, IDDCX_ADAPTER_CAPS);
+	AdapterCaps.Size = sizeof(AdapterCaps);
 
 	if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2))
 	{
@@ -4732,7 +4729,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare basic feature support for the adapter (required)
 	AdapterCaps.MaxMonitorsSupported = numVirtualDisplays;
-	ZAKO_IDDCX_STRUCT_INIT(AdapterCaps.EndPointDiagnostics, IDDCX_ENDPOINT_DIAGNOSTIC_INFO);
+	AdapterCaps.EndPointDiagnostics.Size = sizeof(AdapterCaps.EndPointDiagnostics);
 	AdapterCaps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
 	AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
@@ -4743,7 +4740,7 @@ void IndirectDeviceContext::InitAdapter()
 
 	// Declare your hardware and firmware versions (required)
 	IDDCX_ENDPOINT_VERSION Version = {};
-	ZAKO_IDDCX_STRUCT_INIT(Version, IDDCX_ENDPOINT_VERSION);
+	Version.Size = sizeof(Version);
 	Version.MajorVer = 1;
 	AdapterCaps.EndPointDiagnostics.pFirmwareVersion = &Version;
 	AdapterCaps.EndPointDiagnostics.pHardwareVersion = &Version;

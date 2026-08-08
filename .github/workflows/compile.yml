@@ -2,6 +2,7 @@ name: Virtual Display Driver Building
 env:
   VS_VERSION_RANGE: '[17.0,18.0)'
   REQUIRED_VS_VERSION: '17.0'
+  TARGET_KIT_VERSION: '10.0.22621.0'
 on:
   workflow_dispatch:
   push:
@@ -46,22 +47,20 @@ jobs:
       - name: Install WDK
         shell: pwsh
         run: |
-          # Check if WDK and its VS2022 MSBuild tasks are installed.
+          # Reproduce the downlevel kit used by the last known-good Win10
+          # package instead of silently selecting the newest installed WDK.
           $requiredVsVersion = $env:REQUIRED_VS_VERSION
-          $wdkTaskPattern = "C:\Program Files*\Windows Kits\10\build\*\bin\Microsoft.DriverKit.Build.Tasks.$requiredVsVersion.dll"
-          $wdfHeader = Get-ChildItem "C:\Program Files*\Windows Kits\10\Include\*\wdf" -Directory -ErrorAction SilentlyContinue |
-                       Sort-Object { $_.Parent.Name } -Descending |
-                       Select-Object -First 1
-          $wdkTask = Get-ChildItem $wdkTaskPattern -ErrorAction SilentlyContinue |
-                     Sort-Object { $_.Directory.Parent.Name } -Descending |
-                     Select-Object -First 1
+          $kitVersion = $env:TARGET_KIT_VERSION
+          $wdkTaskPattern = "C:\Program Files*\Windows Kits\10\build\$kitVersion\bin\Microsoft.DriverKit.Build.Tasks.$requiredVsVersion.dll"
+          $wdfHeader = Get-Item "C:\Program Files (x86)\Windows Kits\10\Include\$kitVersion\wdf" -ErrorAction SilentlyContinue
+          $wdkTask = Get-Item $wdkTaskPattern -ErrorAction SilentlyContinue
 
           if ($wdfHeader -and $wdkTask) {
             Write-Host "WDK already installed at: $($wdfHeader.FullName)"
             Write-Host "WDK MSBuild task found at: $($wdkTask.FullName)"
           } else {
             Write-Host "Installing WDK..."
-            $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2272234"
+            $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2330411"
             $wdkInstaller = "$env:TEMP\wdksetup.exe"
             Invoke-WebRequest -Uri $wdkUrl -OutFile $wdkInstaller -UseBasicParsing
             $proc = Start-Process -FilePath $wdkInstaller -ArgumentList "/quiet", "/norestart", "/features", "+" -Wait -NoNewWindow -PassThru
@@ -72,9 +71,7 @@ jobs:
             }
           }
 
-          $wdkTask = Get-ChildItem $wdkTaskPattern -ErrorAction SilentlyContinue |
-                     Sort-Object { $_.Directory.Parent.Name } -Descending |
-                     Select-Object -First 1
+          $wdkTask = Get-Item $wdkTaskPattern -ErrorAction SilentlyContinue
           if ($wdkTask) {
             Write-Host "Verified WDK MSBuild task after setup: $($wdkTask.FullName)"
             exit 0
@@ -127,15 +124,13 @@ jobs:
 
       - name: Build the driver
         run: |
-          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
+          msbuild "Virtual Display Driver (HDR)/ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /p:WindowsTargetPlatformVersion=${{ env.TARGET_KIT_VERSION }}
 
       - name: Stamp driver version
         shell: pwsh
         run: |
           # Resolve stampinf path from WDK
-          $stampinf = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\stampinf.exe" -ErrorAction SilentlyContinue |
-                      Sort-Object { $_.Directory.Parent.Name } -Descending |
-                      Select-Object -First 1
+          $stampinf = Get-Item "C:\Program Files (x86)\Windows Kits\10\bin\$env:TARGET_KIT_VERSION\x64\stampinf.exe" -ErrorAction SilentlyContinue
           if (-not $stampinf) {
             Write-Error "stampinf.exe not found"
             exit 1
@@ -173,9 +168,7 @@ jobs:
           # rebuild the catalog, including on PRs where production signing is
           # intentionally unavailable, so every CI artifact is internally
           # consistent and can be test-signed without rebuilding its contents.
-          $inf2cat = Get-ChildItem "C:\Program Files*\Windows Kits\10\bin\*\x64\inf2cat.exe","C:\Program Files*\Windows Kits\10\bin\*\x86\inf2cat.exe" -ErrorAction SilentlyContinue |
-                     Sort-Object { $_.Directory.Parent.Name } -Descending |
-                     Select-Object -First 1
+          $inf2cat = Get-Item "C:\Program Files (x86)\Windows Kits\10\bin\$env:TARGET_KIT_VERSION\x86\inf2cat.exe" -ErrorAction SilentlyContinue
           if (-not $inf2cat) {
             Write-Error "inf2cat.exe not found"
             exit 1

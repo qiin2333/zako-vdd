@@ -27,8 +27,8 @@ $ioctlCallback = Get-SourceSection `
     -StartMarker 'VOID VirtualDisplayDriverIoDeviceControl(' `
     -EndMarker 'bool initpath()'
 
-if ($ioctlCallback -notmatch 'WdfWorkItemEnqueue\s*\(\s*g_CommandWorkItem\s*\)') {
-    throw 'The IOCTL_VDD_COMMAND path must leave the IddCx callback stack through the persistent WDF work item.'
+if ($ioctlCallback -notmatch 'ScheduleQueuedCommandWorkItem\s*\(\s*\)') {
+    throw 'The IOCTL_VDD_COMMAND path must schedule the persistent WDF work item after completing the request.'
 }
 
 if ($ioctlCallback -match 'DispatchVddCommandBuffer\s*\(') {
@@ -44,8 +44,8 @@ if ($workItem -notmatch 'DispatchVddCommandBuffer\s*\(\s*INVALID_HANDLE_VALUE\s*
 }
 
 $completeIndex = $ioctlCallback.IndexOf('WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0)', [StringComparison]::Ordinal)
-$enqueueIndex = $ioctlCallback.IndexOf('WdfWorkItemEnqueue(g_CommandWorkItem)', [StringComparison]::Ordinal)
-if ($completeIndex -lt 0 -or $enqueueIndex -lt 0 -or $completeIndex -gt $enqueueIndex) {
+$scheduleIndex = $ioctlCallback.IndexOf('ScheduleQueuedCommandWorkItem()', [StringComparison]::Ordinal)
+if ($completeIndex -lt 0 -or $scheduleIndex -lt 0 -or $completeIndex -gt $scheduleIndex) {
     throw 'The IddCx-owned IOCTL request must be completed before the monitor-command worker is enqueued.'
 }
 
@@ -55,8 +55,14 @@ if ($workItem -match 'WdfRequestComplete') {
 
 if ($source -notmatch 'IsAdapterReady\(\)' -or
     $source -notmatch 'Adapter is ready for monitor commands' -or
-    $workItem -notmatch 'WaitForReadyAdapter') {
-    throw 'Monitor commands must wait for successful EvtIddCxAdapterInitFinished completion.'
+    $workItem -notmatch 'AdapterReadyForQueuedCommand' -or
+    $source -notmatch 'Adapter is ready for monitor commands[\s\S]*?ScheduleQueuedCommandWorkItem\(\)') {
+    throw 'Monitor commands must remain queued until successful EvtIddCxAdapterInitFinished completion.'
+}
+
+if ($workItem -match 'WaitForReadyAdapter' -or
+    $workItem -match 'Sleep\s*\(\s*50\s*\)') {
+    throw 'Adapter readiness must be callback-driven; per-command 30-second polling must not return.'
 }
 
 # Sunshine uses the IOCTL control surface on both Win10 and Win11. Earlier
@@ -111,12 +117,18 @@ if ($source -notmatch 'Adapter already registered; skipping duplicate IddCxAdapt
     throw 'Win10 D0 wake must not register an existing IddCx adapter a second time.'
 }
 
-$d0Exit = Get-SourceSection `
-    -StartMarker 'VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device' `
-    -EndMarker 'vector<BYTE> loadEdid(const string &filePath)'
+if ($source -match 'EvtDeviceD0Exit\s*=' -or
+    $source -match 'VirtualDisplayDriverDeviceD0Exit\s*\(') {
+    throw 'IddCx owns SwapChain teardown through EvtIddCxMonitorUnassignSwapChain; do not add a parallel D0Exit cleanup path.'
+}
 
-if ($d0Exit -match 'MarkAdapterNotReady') {
-    throw 'D3 transitions preserve the registered IddCx adapter and must not erase its initialization-complete state.'
+$swapChainDestructor = Get-SourceSection `
+    -StartMarker 'SwapChainProcessor::~SwapChainProcessor()' `
+    -EndMarker 'void SwapChainProcessor::PublishModeMetadata'
+
+if ($swapChainDestructor -match 'WaitForSingleObject\s*\([^,]+,\s*5000\s*\)' -or
+    $swapChainDestructor -match 'Thread will be abandoned') {
+    throw 'SwapChainProcessor must not release state while its raw-this worker is still running.'
 }
 
 if ($source -match 'commandWorkItemAttributes\.ExecutionLevel') {

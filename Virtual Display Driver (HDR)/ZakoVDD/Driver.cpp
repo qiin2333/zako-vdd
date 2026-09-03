@@ -86,7 +86,6 @@ extern "C" DRIVER_INITIALIZE DriverEntry;
 
 EVT_WDF_DRIVER_DEVICE_ADD VirtualDisplayDriverDeviceAdd;
 EVT_WDF_DEVICE_D0_ENTRY VirtualDisplayDriverDeviceD0Entry;
-EVT_WDF_DEVICE_D0_EXIT VirtualDisplayDriverDeviceD0Exit;
 
 EVT_IDD_CX_DEVICE_IO_CONTROL VirtualDisplayDriverIoDeviceControl;
 
@@ -2345,6 +2344,48 @@ static bool WaitForReadyAdapter(const std::wstring &buffer)
 	return false;
 }
 
+static bool AdapterReadyForQueuedCommand(const std::wstring &buffer)
+{
+	if (!CommandRequiresReadyAdapter(buffer))
+	{
+		return true;
+	}
+
+	WDFDEVICE device = g_GlobalDevice;
+	if (device == nullptr)
+	{
+		return false;
+	}
+
+	auto *wrapper = WdfObjectGet_IndirectDeviceContextWrapper(device);
+	return wrapper && wrapper->pContext && wrapper->pContext->IsAdapterReady();
+}
+
+static void ScheduleQueuedCommandWorkItem()
+{
+	bool enqueueWorker = false;
+	{
+		lock_guard<mutex> queueLock(g_CommandQueueMutex);
+		if (g_CommandWorkItem == nullptr || g_CommandWorkScheduled || g_CommandQueue.empty())
+		{
+			return;
+		}
+
+		if (!AdapterReadyForQueuedCommand(g_CommandQueue.front().buffer))
+		{
+			return;
+		}
+
+		g_CommandWorkScheduled = true;
+		enqueueWorker = true;
+	}
+
+	if (enqueueWorker)
+	{
+		WdfWorkItemEnqueue(g_CommandWorkItem);
+	}
+}
+
 _Use_decl_annotations_
 VOID VddCommandWorkItem(WDFWORKITEM WorkItem)
 {
@@ -2365,13 +2406,15 @@ VOID VddCommandWorkItem(WDFWORKITEM WorkItem)
 				g_CommandWorkScheduled = false;
 				return;
 			}
+			if (!AdapterReadyForQueuedCommand(g_CommandQueue.front().buffer))
+			{
+				g_CommandWorkScheduled = false;
+				vddlog("i", "Pausing queued VDD commands until adapter initialization finishes.");
+				return;
+			}
+
 			command = std::move(g_CommandQueue.front());
 			g_CommandQueue.pop_front();
-		}
-
-		if (!WaitForReadyAdapter(command.buffer))
-		{
-			continue;
 		}
 
 		try
@@ -2467,25 +2510,16 @@ VOID VirtualDisplayDriverIoDeviceControl(
 			command.pop_back();
 		}
 
-		bool enqueueWorker = false;
 		{
 			lock_guard<mutex> queueLock(g_CommandQueueMutex);
 			g_CommandQueue.push_back({std::move(command)});
-			if (!g_CommandWorkScheduled)
-			{
-				g_CommandWorkScheduled = true;
-				enqueueWorker = true;
-			}
 		}
 
 		// Completing first is essential on Win10: while this IddCx-owned IOCTL
 		// remains pending, IddCxMonitorCreate returns
 		// STATUS_OPERATION_IN_PROGRESS (0xC0000476), even from another thread.
 		WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, 0);
-		if (enqueueWorker)
-		{
-			WdfWorkItemEnqueue(g_CommandWorkItem);
-		}
+		ScheduleQueuedCommandWorkItem();
 		return;
 	}
 
@@ -2997,7 +3031,6 @@ _Use_decl_annotations_
 	// Register for power callbacks - D0Entry for power-on, D0Exit for power-off (IDDCX 1.10 power management)
 	WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&PnpPowerCallbacks);
 	PnpPowerCallbacks.EvtDeviceD0Entry = VirtualDisplayDriverDeviceD0Entry;
-	PnpPowerCallbacks.EvtDeviceD0Exit = VirtualDisplayDriverDeviceD0Exit;
 	WdfDeviceInitSetPnpPowerEventCallbacks(pDeviceInit, &PnpPowerCallbacks);
 
 	IDD_CX_CLIENT_CONFIG IddConfig;
@@ -3257,78 +3290,6 @@ _Use_decl_annotations_
 		logStream << "Failed to get device context.";
 		vddlog("e", logStream.str().c_str());
 		return STATUS_INSUFFICIENT_RESOURCES;
-	}
-
-	return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_
-	NTSTATUS
-	VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
-{
-	stringstream logStream;
-
-	// Log the exit from D0 state
-	logStream << "Exiting D0 power state:"
-			  << "\n  Device Handle: " << static_cast<void *>(Device)
-			  << "\n  Target State: " << TargetState;
-	vddlog("d", logStream.str().c_str());
-
-	// This function is called by WDF when the device is transitioning to a low-power state (D3).
-	// For IDDCX 1.10 power management, we should pause SwapChain processing to save resources.
-
-	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
-	if (pContext && pContext->pContext)
-	{
-		logStream.str("");
-		logStream << "Preparing device for low-power state...";
-		vddlog("d", logStream.str().c_str());
-
-		// Stop SwapChain processing to save GPU/CPU resources during low-power state
-		if (pContext->pContext->HasActiveSwapChain())
-		{
-			logStream.str("");
-			logStream << "Pausing SwapChain processing for power management";
-			vddlog("i", logStream.str().c_str());
-
-			try
-			{
-				// Unassign all swap chains to stop processing
-				pContext->pContext->UnassignAllSwapChains();
-				Sleep(50);
-				
-				logStream.str("");
-				logStream << "SwapChain processing paused successfully for power management";
-				vddlog("d", logStream.str().c_str());
-			}
-			catch (const std::exception &e)
-			{
-				stringstream errorStream;
-				errorStream << "Exception while pausing SwapChain for power management: " << e.what();
-				vddlog("e", errorStream.str().c_str());
-			}
-			catch (...)
-			{
-				vddlog("e", "Unknown exception while pausing SwapChain for power management");
-			}
-		}
-		else
-		{
-			logStream.str("");
-			logStream << "No active SwapChain to pause";
-			vddlog("d", logStream.str().c_str());
-		}
-
-		logStream.str("");
-		logStream << "Device prepared for low-power state";
-		vddlog("d", logStream.str().c_str());
-	}
-	else
-	{
-		logStream.str("");
-		logStream << "Failed to get device context during D0Exit";
-		vddlog("w", logStream.str().c_str());
-		// Don't return error - allow power transition to continue
 	}
 
 	return STATUS_SUCCESS;
@@ -3895,8 +3856,9 @@ SwapChainProcessor::~SwapChainProcessor()
 
 	if (m_hThread.Get())
 	{
-		// Wait for the thread to terminate with a timeout to avoid hanging
-		DWORD waitResult = WaitForSingleObject(m_hThread.Get(), 5000); // 5 second timeout
+		// The worker owns a raw this pointer, so the destructor must not return
+		// until the thread has stopped touching object state.
+		DWORD waitResult = WaitForSingleObject(m_hThread.Get(), INFINITE);
 		switch (waitResult)
 		{
 		case WAIT_OBJECT_0:
@@ -3908,14 +3870,6 @@ SwapChainProcessor::~SwapChainProcessor()
 			logStream.str("");
 			logStream << "Thread wait was abandoned. GetLastError: " << GetLastError();
 			vddlog("e", logStream.str().c_str());
-			break;
-		case WAIT_TIMEOUT:
-			logStream.str("");
-			logStream << "Thread wait timed out after 5 seconds. Thread will be abandoned (unsafe to force terminate).";
-			vddlog("w", logStream.str().c_str());
-			// Note: TerminateThread is NOT used here because it can corrupt the heap,
-			// leave locks held, and cause deadlocks. The thread handle will be closed
-			// when m_hThread is destroyed, but the thread itself may still be running.
 			break;
 		default:
 			logStream.str("");
@@ -4972,6 +4926,7 @@ void IndirectDeviceContext::FinishInit()
 	m_AdapterReady.store(true, std::memory_order_release);
 	vddlog("i", "Applied Adapter configs.");
 	vddlog("i", "Adapter is ready for monitor commands.");
+	ScheduleQueuedCommandWorkItem();
 }
 
 void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClientGuid, float maxNits, float minNits, float maxFALL, float widthCm, float heightCm)

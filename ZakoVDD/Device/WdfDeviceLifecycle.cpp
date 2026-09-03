@@ -91,7 +91,6 @@ _Use_decl_annotations_
 	// Register for power callbacks - D0Entry for power-on, D0Exit for power-off (IDDCX 1.10 power management)
 	WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&PnpPowerCallbacks);
 	PnpPowerCallbacks.EvtDeviceD0Entry = VirtualDisplayDriverDeviceD0Entry;
-	PnpPowerCallbacks.EvtDeviceD0Exit = VirtualDisplayDriverDeviceD0Exit;
 	WdfDeviceInitSetPnpPowerEventCallbacks(pDeviceInit, &PnpPowerCallbacks);
 
 	IDD_CX_CLIENT_CONFIG IddConfig;
@@ -294,61 +293,6 @@ _Use_decl_annotations_
 	{
 		VDD_LOG_ERROR("Failed to get device context.");
 		return STATUS_INSUFFICIENT_RESOURCES;
-	}
-
-	return STATUS_SUCCESS;
-}
-
-_Use_decl_annotations_
-	NTSTATUS
-	VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
-{
-	// Log the exit from D0 state
-	VDD_LOG_DEBUG_STREAM("Exiting D0 power state:"
-	                     << "\n  Device Handle: " << static_cast<void *>(Device)
-	                     << "\n  Target State: " << TargetState);
-
-	// This function is called by WDF when the device is transitioning to a low-power state (D3).
-	// For IDDCX 1.10 power management, we should pause SwapChain processing to save resources.
-
-	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
-	if (pContext && pContext->pContext)
-	{
-		VDD_LOG_DEBUG("Preparing device for low-power state...");
-
-		// Stop SwapChain processing to save GPU/CPU resources during low-power state
-		if (pContext->pContext->HasActiveSwapChain())
-		{
-			VDD_LOG_INFO("Pausing SwapChain processing for power management");
-
-			try
-			{
-				// Unassign all swap chains to stop processing
-				pContext->pContext->UnassignAllSwapChains();
-				Sleep(50);
-
-				VDD_LOG_DEBUG("SwapChain processing paused successfully for power management");
-			}
-			catch (const std::exception &e)
-			{
-				VDD_LOG_ERROR_STREAM("Exception while pausing SwapChain for power management: " << e.what());
-			}
-			catch (...)
-			{
-				VDD_LOG_ERROR("Unknown exception while pausing SwapChain for power management");
-			}
-		}
-		else
-		{
-			VDD_LOG_DEBUG("No active SwapChain to pause");
-		}
-
-		VDD_LOG_DEBUG("Device prepared for low-power state");
-	}
-	else
-	{
-		VDD_LOG_WARNING("Failed to get device context during D0Exit");
-		// Don't return error - allow power transition to continue
 	}
 
 	return STATUS_SUCCESS;

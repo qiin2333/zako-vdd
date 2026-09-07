@@ -88,7 +88,9 @@ _Use_decl_annotations_
 	VDD_LOG_DEBUG_STREAM("Initializing device:"
 	                     << "\n  DeviceInit Pointer: " << static_cast<void *>(pDeviceInit));
 
-	// Register for power callbacks - D0Entry for power-on, D0Exit for power-off (IDDCX 1.10 power management)
+	// Keep the WDF power callbacks lightweight. D0Exit is diagnostic only.
+	// IddCx coordinates invalidation through EvtIddCxMonitorUnassignSwapChain;
+	// the driver-owned processor then releases its assigned swap-chain object.
 	WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&PnpPowerCallbacks);
 	PnpPowerCallbacks.EvtDeviceD0Entry = VirtualDisplayDriverDeviceD0Entry;
 	PnpPowerCallbacks.EvtDeviceD0Exit = VirtualDisplayDriverDeviceD0Exit;
@@ -287,8 +289,9 @@ _Use_decl_annotations_
 
 		VDD_LOG_DEBUG("InitAdapter called successfully.");
 
-		// Note: When recovering from D3, the system will automatically re-assign SwapChain
-		// through the EvtIddCxMonitorAssignSwapChain callback, so we don't need to do it here.
+		// Only IddCx can provide the swap-chain handle, render adapter and frame
+		// event required to create a processor. If the active display needs a new
+		// swap chain after D3, IddCx supplies it through AssignSwapChain.
 	}
 	else
 	{
@@ -303,53 +306,13 @@ _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
 {
-	// Log the exit from D0 state
+	// Do not stop or release swap chains from this power callback. IddCx reports
+	// invalidation through EvtIddCxMonitorUnassignSwapChain; that path stops the
+	// processor and its worker releases the driver-owned swap-chain object.
 	VDD_LOG_DEBUG_STREAM("Exiting D0 power state:"
 	                     << "\n  Device Handle: " << static_cast<void *>(Device)
-	                     << "\n  Target State: " << TargetState);
-
-	// This function is called by WDF when the device is transitioning to a low-power state (D3).
-	// For IDDCX 1.10 power management, we should pause SwapChain processing to save resources.
-
-	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
-	if (pContext && pContext->pContext)
-	{
-		VDD_LOG_DEBUG("Preparing device for low-power state...");
-
-		// Stop SwapChain processing to save GPU/CPU resources during low-power state
-		if (pContext->pContext->HasActiveSwapChain())
-		{
-			VDD_LOG_INFO("Pausing SwapChain processing for power management");
-
-			try
-			{
-				// Unassign all swap chains to stop processing
-				pContext->pContext->UnassignAllSwapChains();
-				Sleep(50);
-
-				VDD_LOG_DEBUG("SwapChain processing paused successfully for power management");
-			}
-			catch (const std::exception &e)
-			{
-				VDD_LOG_ERROR_STREAM("Exception while pausing SwapChain for power management: " << e.what());
-			}
-			catch (...)
-			{
-				VDD_LOG_ERROR("Unknown exception while pausing SwapChain for power management");
-			}
-		}
-		else
-		{
-			VDD_LOG_DEBUG("No active SwapChain to pause");
-		}
-
-		VDD_LOG_DEBUG("Device prepared for low-power state");
-	}
-	else
-	{
-		VDD_LOG_WARNING("Failed to get device context during D0Exit");
-		// Don't return error - allow power transition to continue
-	}
+	                     << "\n  Target State: " << TargetState
+	                     << "\n  SwapChain power handling: coordinated by IddCx callbacks");
 
 	return STATUS_SUCCESS;
 }

@@ -88,8 +88,9 @@ _Use_decl_annotations_
 	VDD_LOG_DEBUG_STREAM("Initializing device:"
 	                     << "\n  DeviceInit Pointer: " << static_cast<void *>(pDeviceInit));
 
-	// Keep the WDF power callbacks lightweight. D0Exit is diagnostic only;
-	// IddCx owns swap-chain teardown through EvtIddCxMonitorUnassignSwapChain.
+	// Keep the WDF power callbacks lightweight. D0Exit is diagnostic only.
+	// IddCx coordinates invalidation through EvtIddCxMonitorUnassignSwapChain;
+	// the driver-owned processor then releases its assigned swap-chain object.
 	WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&PnpPowerCallbacks);
 	PnpPowerCallbacks.EvtDeviceD0Entry = VirtualDisplayDriverDeviceD0Entry;
 	PnpPowerCallbacks.EvtDeviceD0Exit = VirtualDisplayDriverDeviceD0Exit;
@@ -288,8 +289,9 @@ _Use_decl_annotations_
 
 		VDD_LOG_DEBUG("InitAdapter called successfully.");
 
-		// Swap-chain ownership remains with IddCx. If a new swap chain is needed
-		// after D3, it will arrive through EvtIddCxMonitorAssignSwapChain.
+		// Only IddCx can provide the swap-chain handle, render adapter and frame
+		// event required to create a processor. If the active display needs a new
+		// swap chain after D3, IddCx supplies it through AssignSwapChain.
 	}
 	else
 	{
@@ -304,12 +306,13 @@ _Use_decl_annotations_
 	NTSTATUS
 	VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
 {
-	// Do not tear down swap chains here. IddCx reports invalid swap chains through
-	// EvtIddCxMonitorUnassignSwapChain; this callback only records power ordering.
+	// Do not stop or release swap chains from this power callback. IddCx reports
+	// invalidation through EvtIddCxMonitorUnassignSwapChain; that path stops the
+	// processor and its worker releases the driver-owned swap-chain object.
 	VDD_LOG_DEBUG_STREAM("Exiting D0 power state:"
 	                     << "\n  Device Handle: " << static_cast<void *>(Device)
 	                     << "\n  Target State: " << TargetState
-	                     << "\n  SwapChain teardown: delegated to IddCx");
+	                     << "\n  SwapChain power handling: coordinated by IddCx callbacks");
 
 	return STATUS_SUCCESS;
 }

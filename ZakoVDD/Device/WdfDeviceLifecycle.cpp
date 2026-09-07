@@ -88,9 +88,11 @@ _Use_decl_annotations_
 	VDD_LOG_DEBUG_STREAM("Initializing device:"
 	                     << "\n  DeviceInit Pointer: " << static_cast<void *>(pDeviceInit));
 
-	// Register for power callbacks - D0Entry for power-on, D0Exit for power-off (IDDCX 1.10 power management)
+	// Keep the WDF power callbacks lightweight. D0Exit is diagnostic only;
+	// IddCx owns swap-chain teardown through EvtIddCxMonitorUnassignSwapChain.
 	WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&PnpPowerCallbacks);
 	PnpPowerCallbacks.EvtDeviceD0Entry = VirtualDisplayDriverDeviceD0Entry;
+	PnpPowerCallbacks.EvtDeviceD0Exit = VirtualDisplayDriverDeviceD0Exit;
 	WdfDeviceInitSetPnpPowerEventCallbacks(pDeviceInit, &PnpPowerCallbacks);
 
 	IDD_CX_CLIENT_CONFIG IddConfig;
@@ -286,14 +288,28 @@ _Use_decl_annotations_
 
 		VDD_LOG_DEBUG("InitAdapter called successfully.");
 
-		// Note: When recovering from D3, the system will automatically re-assign SwapChain
-		// through the EvtIddCxMonitorAssignSwapChain callback, so we don't need to do it here.
+		// Swap-chain ownership remains with IddCx. If a new swap chain is needed
+		// after D3, it will arrive through EvtIddCxMonitorAssignSwapChain.
 	}
 	else
 	{
 		VDD_LOG_ERROR("Failed to get device context.");
 		return STATUS_INSUFFICIENT_RESOURCES;
 	}
+
+	return STATUS_SUCCESS;
+}
+
+_Use_decl_annotations_
+	NTSTATUS
+	VirtualDisplayDriverDeviceD0Exit(WDFDEVICE Device, WDF_POWER_DEVICE_STATE TargetState)
+{
+	// Do not tear down swap chains here. IddCx reports invalid swap chains through
+	// EvtIddCxMonitorUnassignSwapChain; this callback only records power ordering.
+	VDD_LOG_DEBUG_STREAM("Exiting D0 power state:"
+	                     << "\n  Device Handle: " << static_cast<void *>(Device)
+	                     << "\n  Target State: " << TargetState
+	                     << "\n  SwapChain teardown: delegated to IddCx");
 
 	return STATUS_SUCCESS;
 }

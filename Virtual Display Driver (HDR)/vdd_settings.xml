@@ -103,10 +103,9 @@
 		-->
 		<Vrr>false</Vrr>
 		<!--
-		VRR / FreeSync / G-Sync compatible support. When enabled the
-		adapter advertises IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
-		(IddCx >= 1.4). Default OFF until the EDID FreeSync Range Block
-		also lands; some hosts will refuse to enable VRR without it.
+		The Vrr setting is reserved for configuration compatibility. It does not
+		enable an adapter VRR capability on the Windows 10 compatibility driver.
+		A true value is ignored and does not affect virtual display creation.
 		-->
 	</edid>
 </vdd_settings>

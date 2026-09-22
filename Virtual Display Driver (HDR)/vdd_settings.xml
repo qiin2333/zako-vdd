@@ -103,9 +103,9 @@
 		-->
 		<Vrr>false</Vrr>
 		<!--
-		Reserved for configuration compatibility. The Windows 10 compatibility
-		driver does not advertise VRR / FreeSync / G-Sync support. A true value
-		is ignored and does not affect virtual display creation.
+		The Vrr setting is reserved for configuration compatibility. It does not
+		enable an adapter VRR capability on the Windows 10 compatibility driver.
+		A true value is ignored and does not affect virtual display creation.
 		-->
 	</edid>
 </vdd_settings>

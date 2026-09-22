@@ -164,12 +164,10 @@ std::atomic<bool> customEdid{false};
 // the bytes they were created with until they are recreated.
 std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Legacy)};
 
-// Variable Refresh Rate (FreeSync / G-Sync compatible) toggle. When enabled,
-// the adapter caps include IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
-// (added in IddCx 1.4); IddCx silently ignores unknown flag bits on older
-// hosts so this is safe to declare unconditionally, but the user-facing
-// toggle still defaults to OFF until we also publish the EDID FreeSync
-// Range Block (see ROADMAP P1).
+// Keep the VRR setting for XML and IOCTL compatibility, but do not derive an
+// adapter capability flag from it on the Win10 IddCx0102 path. IddCx exposes
+// no VARIABLE_REFRESH_RATE_SUPPORTED adapter flag here, and the old 0x4
+// fallback is IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER.
 std::atomic<bool> vrrEnabled{false};
 std::atomic<bool> hardwareCursor{false};
 std::atomic<bool> preventManufacturerSpoof{false};
@@ -4787,21 +4785,17 @@ void IndirectDeviceContext::InitAdapter()
 		logStream << "FP16 processing capability detected.";
 	}
 
-	// VRR / FreeSync support flag (IddCx >= 1.4). The flag value 0x4 is
-	// stable across SDK versions; older WDKs that don't ship the macro fall
-	// back to the literal so the build stays portable. IddCx hosts that
-	// don't understand the bit just ignore it, so this is safe.
+	// Win10's IddCx0102 path does not expose a VRR adapter capability. Keep a
+	// persisted true value harmless instead of reinterpreting 0x4 as VRR;
+	// 0x4 denotes IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER and can make
+	// IddCxAdapterInitAsync reject this local display adapter.
 	if (vrrEnabled.load())
 	{
-#ifdef IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED
-		AdapterCaps.Flags = static_cast<IDDCX_ADAPTER_FLAGS>(
-			static_cast<UINT>(AdapterCaps.Flags) |
-			static_cast<UINT>(IDDCX_ADAPTER_FLAGS_VARIABLE_REFRESH_RATE_SUPPORTED));
-#else
-		AdapterCaps.Flags = static_cast<IDDCX_ADAPTER_FLAGS>(
-			static_cast<UINT>(AdapterCaps.Flags) | 0x4u); // VARIABLE_REFRESH_RATE_SUPPORTED
-#endif
-		logStream << " VRR adapter flag enabled.";
+		if (!logStream.str().empty())
+		{
+			logStream << " ";
+		}
+		logStream << "VRR setting is not supported on the Win10 compatibility driver; ignoring it.";
 	}
 
 	// Validate and set monitor count with bounds checking

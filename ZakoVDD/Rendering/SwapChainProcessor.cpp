@@ -247,6 +247,43 @@ void SwapChainProcessor::Run()
 	}
 }
 
+void SwapChainProcessor::PollCursor()
+{
+	if (!m_CursorExporter)
+	{
+		return;
+	}
+
+	const HRESULT status = m_CursorExporter->Poll();
+	if (FAILED(status))
+	{
+		VDD_LOG_WARNING_STREAM("[VddCursor] Query failed for monitor=" << m_MonitorIndex
+		                     << " (status 0x" << std::hex << status << ")");
+	}
+}
+
+void SwapChainProcessor::ServiceCursor()
+{
+	if (!m_CursorExporter)
+	{
+		return;
+	}
+
+	const HANDLE hCursorEvent = m_CursorExporter->GetCursorDataAvailableEvent();
+	if (!hCursorEvent)
+	{
+		return;
+	}
+
+	// Non-blocking drain: the event is auto-reset, so a signalled event means
+	// there is cursor data to publish. Runs on the swap-chain processing thread
+	// together with all other IddCx calls for this monitor.
+	if (WaitForSingleObject(hCursorEvent, 0) == WAIT_OBJECT_0)
+	{
+		PollCursor();
+	}
+}
+
 void SwapChainProcessor::RunCore()
 {
 	// Get the DXGI device interface
@@ -287,6 +324,17 @@ void SwapChainProcessor::RunCore()
 		{
 			VDD_LOG_DEBUG("GPU priority raised to realtime for swap chain processing");
 		}
+	}
+
+	// Publish an initial hardware-cursor snapshot. The hNewCursorDataAvailable
+	// event only signals new cursor data; nothing guarantees that the state
+	// already present when the hardware cursor was set up triggers the event,
+	// so the shared mapping would otherwise stay empty/stale until the next
+	// cursor change. This thread owns the swap chain at this point, so the
+	// query is in the right place.
+	if (m_CursorExporter)
+	{
+		PollCursor();
 	}
 
 	// Cache function availability check outside the loop for better performance
@@ -330,13 +378,24 @@ void SwapChainProcessor::RunCore()
 		// AcquireBuffer immediately returns STATUS_PENDING if no buffer is yet available
 		if (hr == E_PENDING)
 		{
-			// We must wait for a new buffer
-			HANDLE WaitHandles[] =
-			    {
-			        m_hAvailableBufferEvent,
-			        m_hTerminateEvent.Get()};
+			// We must wait for a new buffer. The hardware-cursor event is added
+			// here so cursor queries run on this same thread (issue #8): IddCx
+			// DDI calls for a monitor must stay serialized with the
+			// swap-chain work, and no cursor query may outlive the swap chain.
+			HANDLE waitHandles[3];
+			DWORD waitHandleCount = 0;
+			waitHandles[waitHandleCount++] = m_hAvailableBufferEvent;
+			waitHandles[waitHandleCount++] = m_hTerminateEvent.Get();
+
+			HANDLE hCursorEvent = m_CursorExporter ? m_CursorExporter->GetCursorDataAvailableEvent() : nullptr;
+			const bool hasCursorWait = hCursorEvent != nullptr;
+			if (hasCursorWait)
+			{
+				waitHandles[waitHandleCount++] = hCursorEvent;
+			}
+
 			// Let the kernel wake us on the event.
-			DWORD WaitResult = WaitForMultipleObjects(ARRAYSIZE(WaitHandles), WaitHandles, FALSE, INFINITE);
+			DWORD WaitResult = WaitForMultipleObjects(waitHandleCount, waitHandles, FALSE, INFINITE);
 
 			if (WaitResult == WAIT_OBJECT_0)
 			{
@@ -347,6 +406,13 @@ void SwapChainProcessor::RunCore()
 			{
 				// We need to terminate
 				break;
+			}
+			else if (hasCursorWait && WaitResult == WAIT_OBJECT_0 + 2)
+			{
+				// New hardware-cursor data; query it on this thread, then keep
+				// waiting for the next frame.
+				PollCursor();
+				continue;
 			}
 			else
 			{
@@ -378,6 +444,13 @@ void SwapChainProcessor::RunCore()
 			{
 				break;
 			}
+
+			// While frames flow continuously, the E_PENDING wait above is never
+			// reached, so the cursor data-available event would never be served
+			// and the exported cursor would go stale under sustained frames.
+			// Drain any pending event non-blocking here, on this same thread,
+			// keeping all IddCx calls serialized once more.
+			ServiceCursor();
 
 			// Frame statistics can be reported here once encode/send timings are tracked.
 			// IddCxSwapChainReportFrameStatistics(m_hSwapChain, ...);

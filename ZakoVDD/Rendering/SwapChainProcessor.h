@@ -39,6 +39,8 @@ namespace Microsoft
 
 			void Run();
 			void RunCore();
+			void ServiceCursor();
+			void PollCursor();
 
 		public:
 			IDDCX_SWAPCHAIN m_hSwapChain;

@@ -93,6 +93,7 @@ function Get-EdidSummary([string]$DeviceInterfacePath) {
     $validLength = $bytes.Length -ge 128 -and $bytes.Length % 128 -eq 0
     $checksums = @()
     $declarations = @()
+    $parseErrors = @()
     if ($validLength) {
         for ($block = 0; $block -lt $bytes.Length / 128; $block++) {
             $start = 128 * $block
@@ -103,11 +104,22 @@ function Get-EdidSummary([string]$DeviceInterfacePath) {
             $end = $start + [int]$bytes[$start + 2]
             if ($end -eq $start) { continue }
             if ($end -lt $start + 4 -or $end -gt $start + 127) {
-                throw ('Invalid CTA data block boundary at block ' + $block)
+                $parseErrors += [pscustomobject]@{
+                    Block = $block; Offset = $start + 2
+                    Message = 'Invalid CTA data block boundary'
+                }
+                continue
             }
             for ($pos = $start + 4; $pos -lt $end;) {
                 $length = 1 + ($bytes[$pos] -band 31)
-                if ($pos + $length -gt $end) { throw 'CTA data block exceeds its declared boundary' }
+                if ($pos + $length -gt $end) {
+                    $parseErrors += [pscustomobject]@{
+                        Block = $block; Offset = $pos
+                        Message = 'CTA data block exceeds its declared boundary'
+                    }
+                    # Resume at the next extension; this block has no reliable next header.
+                    break
+                }
                 if (($bytes[$pos] -shr 5) -eq 7 -and $length -ge 2) {
                     $kind = $null
                     if ($bytes[$pos + 1] -eq 6) { $kind = 'HdrStaticMetadata' }
@@ -134,6 +146,7 @@ function Get-EdidSummary([string]$DeviceInterfacePath) {
         ExtensionCountMatchesLength = $validLength -and ($bytes[126] + 1) * 128 -eq $bytes.Length
         BlockChecksumsValid = $checksums
         Declarations = $declarations
+        ParseErrors = $parseErrors
     }
 }
 

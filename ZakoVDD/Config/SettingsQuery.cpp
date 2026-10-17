@@ -17,6 +17,7 @@ namespace
 {
 const map<wstring, pair<wstring, wstring>> SettingsQueryMap = {
 	{L"CustomEdidEnabled", {L"CUSTOMEDID", L"CustomEdid"}},
+	{L"DolbyVisionEnabled", {L"DOLBYVISION", L"DolbyVision"}},
 
 	{L"PreventMonitorSpoof", {L"PREVENTMONITORSPOOF", L"PreventSpoof"}},
 	{L"EdidCeaOverride", {L"EDIDCEAOVERRIDE", L"EdidCeaOverride"}},

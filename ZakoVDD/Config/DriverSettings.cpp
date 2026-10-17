@@ -97,6 +97,7 @@ void LoadDriverSettings()
 	initpath();
 
 	customEdid = EnabledQuery(L"CustomEdidEnabled");
+	dolbyVision = EnabledQuery(L"DolbyVisionEnabled");
 	preventManufacturerSpoof = EnabledQuery(L"PreventMonitorSpoof");
 	edidCeaOverride = EnabledQuery(L"EdidCeaOverride");
 

@@ -105,6 +105,10 @@ jobs:
         run: |
           msbuild "ZakoVDD.sln" /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }}
 
+      - name: Test built-in EDID profiles
+        shell: cmd
+        run: call tools\edid_test\build_consumer.bat
+
       - name: Build Vulkan HDR diagnostics
         shell: cmd
         run: |

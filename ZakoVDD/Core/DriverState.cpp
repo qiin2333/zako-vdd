@@ -23,6 +23,7 @@ std::wstring confpath = []()
 std::atomic<bool> HDRPlus{false};
 std::atomic<bool> SDR10{false};
 std::atomic<bool> customEdid{false};
+std::atomic<bool> dolbyVision{false};
 
 // Variable Refresh Rate (FreeSync / G-Sync compatible) toggle. Keep the
 // setting for UI/IOCTL compatibility, but do not infer adapter capability

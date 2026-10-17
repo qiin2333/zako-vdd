@@ -85,11 +85,39 @@ constexpr BYTE DEFAULT_EDID_DATA_LEGACY[256] = {
 // Returns a fresh copy of the EDID bytes for the given profile.
 // Auto leaks through as Modern; callers should resolve Auto themselves
 // (see DriverEntry / DetectAutoEdidProfile in Driver.cpp).
-inline std::vector<BYTE> GetDefaultEdid(Profile profile) {
+inline std::vector<BYTE> GetDefaultEdid(Profile profile, bool dolbyVision = false) {
     const BYTE* src = (profile == Profile::Legacy)
         ? DEFAULT_EDID_DATA_LEGACY
         : DEFAULT_EDID_DATA_MODERN;
-    return std::vector<BYTE>(src, src + 256);
+    std::vector<BYTE> edid(src, src + 256);
+    if (dolbyVision) {
+        // CTA extended vendor-specific block: Dolby OUI 00-D0-46, V2,
+        // BT.2020 primaries and approximately 1000-nit target luminance.
+        // Interface byte 0x87 includes Low-Latency-HDMI (bit 0). Windows
+        // needs this bit for IsDolbyVisionSupportedInHdrMode on the VDD.
+        // This descriptor does not add a Dolby Vision transport to IddCx.
+        constexpr BYTE dolbyVisionBlock[] = {
+            0xeb, 0x01, 0x46, 0xd0, 0x00, 0x49,
+            0x03, 0x87, 0x58, 0x99, 0xaa, 0x5c,
+        };
+        // Both built-in CTA extensions end their data blocks at 0x39,
+        // followed only by zero padding (no extension DTDs). Preserve all
+        // existing blocks and base timings, appending into that padding.
+        static_assert(DEFAULT_EDID_DATA_LEGACY[130] == 0x39 &&
+                      DEFAULT_EDID_DATA_MODERN[130] == 0x39,
+                      "Recheck Dolby Vision append offset when changing built-in CTA blocks");
+        const size_t offset = 128 + edid[130];
+        for (size_t i = 0; i < sizeof(dolbyVisionBlock); ++i) {
+            edid[offset + i] = dolbyVisionBlock[i];
+        }
+        edid[130] += static_cast<BYTE>(sizeof(dolbyVisionBlock));
+        unsigned int sum = 0;
+        for (size_t i = 128; i < 255; ++i) {
+            sum += edid[i];
+        }
+        edid[255] = static_cast<BYTE>((256 - (sum & 0xff)) & 0xff);
+    }
+    return edid;
 }
 
 // Parse a string spelling of the profile (case-insensitive).

@@ -15,6 +15,7 @@ using namespace std;
 using namespace Microsoft::IndirectDisp;
 
 extern std::atomic<bool> customEdid;
+extern std::atomic<bool> dolbyVision;
 extern std::atomic<bool> preventManufacturerSpoof;
 extern std::atomic<bool> edidCeaOverride;
 extern wstring confpath;
@@ -85,7 +86,10 @@ void ApplyEdidProfileSetting(const wstring &settingValue)
 static vector<BYTE> GetHardcodedEdid()
 {
 	auto profile = static_cast<VddEdid::Profile>(gEdidProfile.load());
-	return VddEdid::GetDefaultEdid(profile);
+	const bool enableDolbyVision = dolbyVision.load();
+	VDD_LOG_INFO_STREAM("Built-in EDID Dolby Vision declaration: "
+	                    << (enableDolbyVision ? "enabled" : "disabled"));
+	return VddEdid::GetDefaultEdid(profile, enableDolbyVision);
 }
 
 static void ModifyEdidManufacturer(vector<BYTE> &edid)

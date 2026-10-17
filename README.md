@@ -154,6 +154,23 @@
 
 > **注意**: 自定义 EDID 不支持模拟分辨率，仅用于显示特性模拟。
 
+#### 内置 Dolby Vision 声明
+
+在实际配置目录的 `vdd_settings.xml` 中设置：
+
+```xml
+<edid>
+    <CustomEdid>false</CustomEdid>
+    <DolbyVision>true</DolbyVision>
+</edid>
+```
+
+`DolbyVision` 默认关闭，兼容旧配置。开启后向 legacy 和 modern 内置 EDID 追加已验证的 Dolby Vision V2 数据块，包含 Windows 识别所需的 Low-Latency-HDMI 标志；保留现有 HDR10、色域、音频、HDMI、FreeSync 声明和时序，无需 `user_edid.bin`。注册表 `HKLM\SOFTWARE\ZakoTech\ZakoDisplayAdapter` 下的 `DOLBYVISION` DWORD（0/1）优先于 XML。
+
+安装包含此功能的驱动后，修改配置并执行 `RELOAD_DRIVER`，再通过客户端重新创建虚拟显示器；也可以重启适配器并重新创建显示器。关闭开关会恢复原始内置 EDID。启用有效的自定义 EDID 时，此开关仅在 `EdidCeaOverride=true` 使用内置 CTA 扩展的路径生效，其他情况保留自定义文件内容。
+
+此开关针对 Windows 的 `DisplayMonitor.IsDolbyVisionSupportedInHdrMode` 能力判定，不保证设置页提供独立开关，也不代表游戏自动切换、Dolby Vision 链路输出或 HDR10+ Gaming 已实现。Dolby 数据块使用约 1000 尼特目标，现有按客户端调整 HDR10 亮度和刷新范围的逻辑继续生效。可用 `tools/display_capabilities/Probe-DisplayCapabilities.ps1` 在 Windows PowerShell 5.1 中读取系统识别结果。
+
 ### 多显示器支持
 
 - **同时创建多个虚拟显示器** - 支持创建多个虚拟显示器实例

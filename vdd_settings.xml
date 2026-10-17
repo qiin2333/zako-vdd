@@ -77,6 +77,16 @@
 	<edid>
 		<CustomEdid>false</CustomEdid>
 		<!-- Custom Edid should be named "user_edid.bin"! This does not support emulating resolutions!-->
+		<DolbyVision>false</DolbyVision>
+		<!--
+		Append the Dolby Vision V2 declaration to the built-in EDID, preserving
+		existing HDR10 and other data blocks. Default OFF; no user_edid.bin needed.
+		Use CustomEdid=false. Also applies to the built-in CTA block used by
+		EdidCeaOverride; otherwise a valid custom EDID is left unchanged.
+		Reload settings and recreate monitors for Windows to re-read the EDID.
+		Enables Dolby Vision-in-HDR-mode recognition on tested Windows hosts;
+		actual Dolby Vision output/game activation depends on the rest of the pipeline.
+		-->
 		<PreventSpoof>false</PreventSpoof>
 		<!--Enable this to prevent manufacturer spoofing when using custom edid. Please only do so if you need to!-->
 		<EdidCeaOverride>false</EdidCeaOverride>

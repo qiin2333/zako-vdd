@@ -23,6 +23,7 @@ extern std::wstring confpath;
 extern std::atomic<bool> HDRPlus;
 extern std::atomic<bool> SDR10;
 extern std::atomic<bool> customEdid;
+extern std::atomic<bool> dolbyVision;
 extern std::atomic<bool> vrrEnabled;
 extern std::atomic<bool> hardwareCursor;
 extern std::atomic<bool> preventManufacturerSpoof;

@@ -1,6 +1,7 @@
 #include "..\Driver.h"
 #include "..\Core\DriverState.h"
 #include "..\Edid\Edid.h"
+#include "..\Edid\EdidLuminance.h"
 #include "..\Logging\Logger.h"
 #include "..\Util\StringConversion.h"
 #include "DisplayModeHelpers.h"
@@ -27,6 +28,11 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	{
 		VDD_LOG_INFO_STREAM("Monitor " << (index + 1) << " already exists; treating duplicate create as success");
 		return;
+	}
+
+	if (VddEdid::UseDefaultLuminanceIfInvalid(maxNits, minNits, maxFALL))
+	{
+		VDD_LOG_WARNING("Invalid monitor luminance parameters; using defaults (max=1000, min=0.0001, MaxFALL=1000 nits)");
 	}
 
 	wstring logMessage = L"Creating Monitor: " + to_wstring(index + 1);

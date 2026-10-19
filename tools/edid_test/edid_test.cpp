@@ -127,6 +127,37 @@ void CheckLuminance(VddEdid::Profile profile) {
         Require(VddEdid::UpdateLuminance(edid, 1000, 0, 0), "Default MaxFALL update failed");
         const auto hdr = ParseCta(edid).front();
         Require(hdr[6] == 0 && hdr[5] > 0 && hdr[5] < hdr[4], "Zero black level/default MaxFALL failed");
+
+        // Use the same normalization as CreateMonitor, including cached EDIDs
+        // that previously advertised a different client's capabilities.
+        auto defaults = VddEdid::GetDefaultEdid(profile, dolby);
+        Require(VddEdid::UpdateLuminance(defaults, 1000, 0.0001f, 1000), "Default fixture update failed");
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+        struct Luminance { float max, min, fall; };
+        for (auto invalid : {Luminance{nan, 0.1f, 1200}, Luminance{inf, 0.1f, 1200},
+                             Luminance{0, 0, 0}, Luminance{-1, 0, 0},
+                             Luminance{2000, nan, 1200}, Luminance{2000, inf, 1200},
+                             Luminance{2000, -1, 1200}, Luminance{400, 500, 300},
+                             Luminance{2000, 0.1f, nan}, Luminance{2000, 0.1f, inf},
+                             Luminance{2000, 0.1f, -1}}) {
+            Require(VddEdid::UpdateLuminance(edid, 2000, 0.1f, 1200), "Cached fixture update failed");
+            Require(VddEdid::UseDefaultLuminanceIfInvalid(invalid.max, invalid.min, invalid.fall),
+                    "Invalid creation parameters did not fall back");
+            Require(invalid.max == 1000 && invalid.min == 0.0001f && invalid.fall == 1000,
+                    "Fallback did not replace the entire runtime luminance tuple");
+            Require(VddEdid::UpdateLuminance(edid, invalid.max, invalid.min, invalid.fall) && edid == defaults,
+                    "Fallback retained a previous client's EDID luminance");
+            ParseCta(edid);
+        }
+        for (auto valid : {Luminance{400, 0.001f, 300}, Luminance{1000, 0, 0},
+                           Luminance{1000, 1000, 2000}}) {
+            const auto originalValid = valid;
+            Require(!VddEdid::UseDefaultLuminanceIfInvalid(valid.max, valid.min, valid.fall),
+                    "Valid creation parameters fell back");
+            Require(valid.max == originalValid.max && valid.min == originalValid.min && valid.fall == originalValid.fall,
+                    "Valid creation parameters changed");
+        }
     }
 
     // A Dolby-only CTA extension after a malformed extension must still update.
@@ -145,7 +176,7 @@ void CheckLuminance(VddEdid::Profile profile) {
     unsigned int sum = 0;
     for (size_t pos = 256; pos < 384; ++pos) sum += multi[pos];
     Require((sum & 255) == 0, "Later extension checksum invalid");
-    std::cout << "HDR/Dolby luminance sync, repeated clients, preservation, invalid input and extension recovery PASS\n";
+    std::cout << "HDR/Dolby luminance sync, repeated clients, preservation, invalid input/default fallback and extension recovery PASS\n";
 }
 }
 

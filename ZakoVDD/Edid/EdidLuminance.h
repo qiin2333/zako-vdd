@@ -6,6 +6,21 @@
 
 namespace VddEdid {
 
+inline bool IsValidLuminance(float maxNits, float minNits, float maxFALL) {
+    return std::isfinite(maxNits) && maxNits > 0 &&
+           std::isfinite(minNits) && minNits >= 0 && minNits <= maxNits &&
+           std::isfinite(maxFALL) && maxFALL >= 0;
+}
+
+// Apply the command defaults as a group so EDID and runtime metadata agree.
+inline bool UseDefaultLuminanceIfInvalid(float& maxNits, float& minNits, float& maxFALL) {
+    if (IsValidLuminance(maxNits, minNits, maxFALL)) return false;
+    maxNits = 1000.0f;
+    minNits = 0.0001f;
+    maxFALL = 1000.0f;
+    return true;
+}
+
 inline double ClampLuminance(double value, double low, double high) {
     return value < low ? low : (value > high ? high : value);
 }
@@ -25,9 +40,7 @@ inline double NitsToPq(double nits) {
 inline bool UpdateLuminance(std::vector<std::uint8_t>& edid,
                             float maxNits, float minNits, float maxFALL) {
     if (edid.size() < 256 || edid.size() % 128 != 0 ||
-        !std::isfinite(maxNits) || maxNits <= 0 ||
-        !std::isfinite(minNits) || minNits < 0 || minNits > maxNits ||
-        !std::isfinite(maxFALL) || maxFALL < 0) {
+        !IsValidLuminance(maxNits, minNits, maxFALL)) {
         return false;
     }
     const double fall = maxFALL == 0 ? maxNits * 0.8 : ClampLuminance(maxFALL, 0.0, maxNits);

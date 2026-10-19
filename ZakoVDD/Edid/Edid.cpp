@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cmath>
 #include <fstream>
 #include <sstream>
 

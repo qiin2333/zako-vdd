@@ -56,6 +56,7 @@
     <ClInclude Include="Driver.h" />
     <ClInclude Include="Edid\DefaultEdid.h" />
     <ClInclude Include="Edid\Edid.h" />
+    <ClInclude Include="Edid\EdidLuminance.h" />
     <ClInclude Include="Logging\Logger.h" />
     <ClInclude Include="Rendering\Direct3DDevice.h" />
     <ClInclude Include="Rendering\CursorExporter.h" />

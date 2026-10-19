@@ -169,7 +169,7 @@
 
 安装包含此功能的驱动后，修改配置并执行 `RELOAD_DRIVER`，再通过客户端重新创建虚拟显示器；也可以重启适配器并重新创建显示器。关闭开关会恢复原始内置 EDID。启用有效的自定义 EDID 时，此开关仅在 `EdidCeaOverride=true` 使用内置 CTA 扩展的路径生效，其他情况保留自定义文件内容。
 
-此开关针对 Windows 的 `DisplayMonitor.IsDolbyVisionSupportedInHdrMode` 能力判定，不保证设置页提供独立开关，也不代表游戏自动切换、Dolby Vision 链路输出或 HDR10+ Gaming 已实现。Dolby 数据块使用约 1000 尼特目标，现有按客户端调整 HDR10 亮度和刷新范围的逻辑继续生效。可用 `tools/display_capabilities/Probe-DisplayCapabilities.ps1` 在 Windows PowerShell 5.1 中读取系统识别结果。
+此开关针对 Windows 的 `DisplayMonitor.IsDolbyVisionSupportedInHdrMode` 能力判定，不保证设置页提供独立开关，也不代表游戏自动切换、Dolby Vision 链路输出或 HDR10+ Gaming 已实现。创建虚拟显示器时，HDR10 的峰值、最低及全屏亮度与 Dolby Vision V2 的峰值、最低亮度均按客户端参数更新；DV V2 没有独立的全屏亮度字段。EDID 编码存在量化误差，Windows 显示值不一定与请求值完全一致。复用显示器时，需要 Sunshine 在客户端亮度能力变化后重建监视器，让 Windows 重新读取 EDID，刷新范围逻辑继续保留。可用 `tools/display_capabilities/Probe-DisplayCapabilities.ps1` 在 Windows PowerShell 5.1 中读取系统识别结果。
 
 ### 多显示器支持
 

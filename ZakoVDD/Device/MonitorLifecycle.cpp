@@ -1,6 +1,7 @@
 #include "..\Driver.h"
 #include "..\Core\DriverState.h"
 #include "..\Edid\Edid.h"
+#include "..\Edid\EdidLuminance.h"
 #include "..\Logging\Logger.h"
 #include "..\Util\StringConversion.h"
 #include "DisplayModeHelpers.h"
@@ -27,6 +28,11 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	{
 		VDD_LOG_INFO_STREAM("Monitor " << (index + 1) << " already exists; treating duplicate create as success");
 		return;
+	}
+
+	if (VddEdid::UseDefaultLuminanceIfInvalid(maxNits, minNits, maxFALL))
+	{
+		VDD_LOG_WARNING("Invalid monitor luminance parameters; using defaults (max=1000, min=0.0001, MaxFALL=1000 nits)");
 	}
 
 	wstring logMessage = L"Creating Monitor: " + to_wstring(index + 1);
@@ -78,57 +84,37 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 	}
 
 	vector<BYTE> *pMonitorEdid = nullptr;
-	if (pClientGuid != nullptr)
 	{
-		lock_guard<mutex> edidLock(s_EdidMapMutex);
-		auto it = s_ClientGuidEdidMap.find(*pClientGuid);
-		if (it != s_ClientGuidEdidMap.end())
+		unique_lock<mutex> edidLock(s_EdidMapMutex, defer_lock);
+		if (pClientGuid != nullptr)
 		{
-			pMonitorEdid = &it->second;
-			VDD_LOG_DEBUG_STREAM("Using existing EDID for client GUID (monitor " << (index + 1) << ")");
-
-			UpdateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
-			UpdateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
-			if (widthCm > 0 || heightCm > 0)
+			edidLock.lock();
+			auto it = s_ClientGuidEdidMap.find(*pClientGuid);
+			if (it == s_ClientGuidEdidMap.end())
 			{
-				UpdateEdidPhysicalSize(*pMonitorEdid, widthCm, heightCm);
+				it = s_ClientGuidEdidMap.emplace(*pClientGuid, s_KnownMonitorEdid).first;
+				ModifyEdidSerialNumber(it->second, *pClientGuid);
+				VDD_LOG_DEBUG_STREAM("Created new EDID with serial number based on client GUID for monitor " << (index + 1));
 			}
-
-			BYTE checksum = CalculateEdidChecksum(*pMonitorEdid);
-			(*pMonitorEdid)[127] = checksum;
+			else
+			{
+				VDD_LOG_DEBUG_STREAM("Using existing EDID for client GUID (monitor " << (index + 1) << ")");
+			}
+			pMonitorEdid = &it->second;
 		}
 		else
 		{
-			s_ClientGuidEdidMap[*pClientGuid] = s_KnownMonitorEdid;
-			pMonitorEdid = &s_ClientGuidEdidMap[*pClientGuid];
-			ModifyEdidSerialNumber(*pMonitorEdid, *pClientGuid);
-
-			UpdateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
-			UpdateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
-			if (widthCm > 0 || heightCm > 0)
-			{
-				UpdateEdidPhysicalSize(*pMonitorEdid, widthCm, heightCm);
-			}
-
-			BYTE checksum = CalculateEdidChecksum(*pMonitorEdid);
-			(*pMonitorEdid)[127] = checksum;
-
-			VDD_LOG_DEBUG_STREAM("Created new EDID with serial number based on client GUID for monitor " << (index + 1));
+			pMonitorEdid = &s_KnownMonitorEdid;
 		}
-	}
-	else
-	{
-		UpdateEdidHdrMetadata(s_KnownMonitorEdid, maxNits, minNits, maxFALL);
-		UpdateEdidFreeSyncRange(s_KnownMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
+
+		UpdateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
+		UpdateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
 		if (widthCm > 0 || heightCm > 0)
 		{
-			UpdateEdidPhysicalSize(s_KnownMonitorEdid, widthCm, heightCm);
+			UpdateEdidPhysicalSize(*pMonitorEdid, widthCm, heightCm);
 		}
 
-		BYTE checksum = CalculateEdidChecksum(s_KnownMonitorEdid);
-		s_KnownMonitorEdid[127] = checksum;
-
-		pMonitorEdid = &s_KnownMonitorEdid;
+		(*pMonitorEdid)[127] = CalculateEdidChecksum(*pMonitorEdid);
 	}
 
 	IDDCX_MONITOR_INFO MonitorInfo = {};

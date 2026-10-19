@@ -92,7 +92,8 @@ inline std::vector<BYTE> GetDefaultEdid(Profile profile, bool dolbyVision = fals
     std::vector<BYTE> edid(src, src + 256);
     if (dolbyVision) {
         // CTA extended vendor-specific block: Dolby OUI 00-D0-46, V2,
-        // BT.2020 primaries and approximately 1000-nit target luminance.
+        // BT.2020 primaries and approximately 1000-nit default luminance.
+        // Monitor creation updates both HDR10 and DV targets for the client.
         // Interface byte 0x87 includes Low-Latency-HDMI (bit 0). Windows
         // needs this bit for IsDolbyVisionSupportedInHdrMode on the VDD.
         // This descriptor does not add a Dolby Vision transport to IddCx.

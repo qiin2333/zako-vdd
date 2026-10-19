@@ -1,8 +1,10 @@
 #include "../../ZakoVDD/Edid/DefaultEdid.h"
+#include "../../ZakoVDD/Edid/EdidLuminance.h"
 
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -77,6 +79,74 @@ void CheckProfile(VddEdid::Profile profile, const BYTE* original, const char* na
     }
     std::cout << name << ": original preserved; Dolby payload, CTA boundaries, checksums and isolation PASS\n";
 }
+
+void CheckLuminance(VddEdid::Profile profile) {
+    for (bool dolby : {false, true}) {
+        auto edid = VddEdid::GetDefaultEdid(profile, dolby);
+        const auto original = edid;
+        // Independent V2 code fixtures: 400/1000/2000 nits -> 9/16/21,
+        // and 0.001/0.01/0.1 nits -> 1/4/13 (ST 2084 + V2 quantization).
+        struct Target { float max, min, fall; BYTE dvMax, dvMin; };
+        for (const Target target : {Target{400, 0.001f, 300, 9, 1},
+                                    Target{1000, 0.01f, 600, 16, 4},
+                                    Target{2000, 0.1f, 1200, 21, 13},
+                                    Target{10000, 0.1f, 4000, 31, 13},
+                                    Target{400, 0.001f, 300, 9, 1}}) {
+            Require(VddEdid::UpdateLuminance(edid, target.max, target.min, target.fall), "Luminance update failed");
+            const auto blocks = ParseCta(edid);
+            const auto hdr = blocks.front();
+            const double peak = 50.0 * std::pow(2.0, hdr[4] / 32.0);
+            const double fall = 50.0 * std::pow(2.0, hdr[5] / 32.0);
+            const double minimum = peak / 100.0 * std::pow(hdr[6] / 255.0, 2.0);
+            Require(peak >= target.max && peak < target.max * 1.023, "HDR peak did not follow client");
+            Require(fall >= target.fall && fall < target.fall * 1.023, "HDR full-frame peak did not follow client");
+            Require(std::abs(minimum - target.min) < target.min * 0.5, "HDR black level used the wrong encoding");
+            if (dolby) {
+                const auto dv = blocks.back();
+                Require((dv[6] >> 3) == target.dvMin && (dv[7] >> 3) == target.dvMax,
+                        "Dolby Vision target did not follow client");
+                Require((dv[6] & 7) == 3 && (dv[7] & 7) == 7,
+                        "Dolby Vision feature or LL-HDMI bits changed");
+            }
+            for (size_t pos = 0; pos < edid.size(); ++pos) {
+                if (pos == 136 || pos == 137 || pos == 138 || pos == 255 ||
+                    (dolby && (pos == 191 || pos == 192))) continue;
+                Require(edid[pos] == original[pos], "Luminance update changed unrelated capabilities");
+            }
+            const auto once = edid;
+            Require(VddEdid::UpdateLuminance(edid, target.max, target.min, target.fall) && edid == once,
+                    "An identical target changed the EDID again");
+        }
+        Require(VddEdid::GetDefaultEdid(profile, dolby) == original, "Per-client update mutated template");
+        const auto beforeInvalid = edid;
+        Require(!VddEdid::UpdateLuminance(edid, std::numeric_limits<float>::quiet_NaN(), 0, 0), "Accepted NaN");
+        Require(!VddEdid::UpdateLuminance(edid, 0, 0, 0), "Accepted zero peak");
+        Require(!VddEdid::UpdateLuminance(edid, 1000, -1, 0), "Accepted negative black level");
+        Require(!VddEdid::UpdateLuminance(edid, 1000, 0, std::numeric_limits<float>::infinity()), "Accepted infinite MaxFALL");
+        Require(edid == beforeInvalid, "Invalid request modified EDID");
+        Require(VddEdid::UpdateLuminance(edid, 1000, 0, 0), "Default MaxFALL update failed");
+        const auto hdr = ParseCta(edid).front();
+        Require(hdr[6] == 0 && hdr[5] > 0 && hdr[5] < hdr[4], "Zero black level/default MaxFALL failed");
+    }
+
+    // A Dolby-only CTA extension after a malformed extension must still update.
+    auto multi = VddEdid::GetDefaultEdid(profile, true);
+    const auto cta = Bytes(multi.begin() + 128, multi.end());
+    multi.insert(multi.end(), cta.begin(), cta.end());
+    multi[126] = 2;
+    multi[130] = 255;
+    multi[258] = 16;
+    std::copy(cta.begin() + 57, cta.begin() + 69, multi.begin() + 260);
+    std::fill(multi.begin() + 272, multi.begin() + 383, BYTE{0});
+    const auto malformed = Bytes(multi.begin() + 128, multi.begin() + 256);
+    Require(VddEdid::UpdateLuminance(multi, 2000, 0.1f, 1200), "Did not recover at next extension");
+    Require(std::equal(malformed.begin(), malformed.end(), multi.begin() + 128), "Touched malformed extension");
+    Require((multi[267] >> 3) == 21 && (multi[266] >> 3) == 13, "Later Dolby block was not updated");
+    unsigned int sum = 0;
+    for (size_t pos = 256; pos < 384; ++pos) sum += multi[pos];
+    Require((sum & 255) == 0, "Later extension checksum invalid");
+    std::cout << "HDR/Dolby luminance sync, repeated clients, preservation, invalid input and extension recovery PASS\n";
+}
 }
 
 int main(int argc, char** argv) {
@@ -84,6 +154,8 @@ int main(int argc, char** argv) {
         const std::string outputDirectory = argc > 1 ? argv[1] : "";
         CheckProfile(VddEdid::Profile::Legacy, VddEdid::DEFAULT_EDID_DATA_LEGACY, "legacy", outputDirectory);
         CheckProfile(VddEdid::Profile::Modern, VddEdid::DEFAULT_EDID_DATA_MODERN, "modern", outputDirectory);
+        CheckLuminance(VddEdid::Profile::Legacy);
+        CheckLuminance(VddEdid::Profile::Modern);
         Require(GetDefaultEdid() == VddEdid::GetDefaultEdid(VddEdid::Profile::Legacy, false),
                 "Legacy global API compatibility changed");
         return 0;

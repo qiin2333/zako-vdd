@@ -1,6 +1,7 @@
 #include "Edid.h"
 
 #include "DefaultEdid.h"
+#include "EdidLuminance.h"
 #include "..\Device\IndirectDeviceContext.h"
 #include "..\Logging\Logger.h"
 #include "..\Util\StringConversion.h"
@@ -192,74 +193,15 @@ static BYTE CalculateCeaChecksum(const vector<BYTE> &edid)
 
 void UpdateEdidHdrMetadata(vector<BYTE> &edid, float maxNits, float minNits, float maxFALL)
 {
-	if (edid.size() < 256)
+	if (VddEdid::UpdateLuminance(edid, maxNits, minNits, maxFALL))
 	{
-		VDD_LOG_WARNING("EDID too small to update HDR metadata");
-		return;
+		VDD_LOG_DEBUG_STREAM("Updated EDID HDR/Dolby Vision luminance: max=" << maxNits
+		                     << " min=" << minNits << " MaxFALL=" << maxFALL);
 	}
-
-	if (maxFALL <= 0)
+	else
 	{
-		maxFALL = maxNits * 0.8f;
+		VDD_LOG_WARNING("No EDID luminance blocks updated (invalid parameters or no supported CTA blocks)");
 	}
-
-	const int ceaStart = 128;
-	int dtdOffset = edid[ceaStart + 2];
-	if (dtdOffset == 0)
-		dtdOffset = 4;
-
-	const int endPos = ceaStart + dtdOffset;
-
-	for (int pos = ceaStart + 4; pos < endPos && pos < 255;)
-	{
-		const BYTE header = edid[pos];
-		const int tag = (header >> 5) & 0x07;
-		const int length = header & 0x1F;
-
-		if (tag == 0x07 && length >= 1 && (pos + 1) < 256 && edid[pos + 1] == 0x06)
-		{
-			VDD_LOG_DEBUG_STREAM("Found HDR Static Metadata block at position " << pos);
-
-			auto calcLumCv = [](float nits) -> BYTE
-			{
-				float cv = 32.0f * log2f(nits / 50.0f);
-				return static_cast<BYTE>(ceilf(max(0.0f, min(255.0f, cv))));
-			};
-
-			if (length >= 4 && (pos + 4) < 256)
-			{
-				edid[pos + 4] = calcLumCv(maxNits);
-				float actualNits = 50.0f * powf(2.0f, edid[pos + 4] / 32.0f);
-				VDD_LOG_DEBUG_STREAM("Set MaxCLL cv=" << (int)edid[pos + 4]
-				                     << " (req " << maxNits << ", actual " << actualNits << " nits)");
-			}
-
-			if (length >= 5 && (pos + 5) < 256)
-			{
-				edid[pos + 5] = calcLumCv(maxFALL);
-				float actualNits = 50.0f * powf(2.0f, edid[pos + 5] / 32.0f);
-				VDD_LOG_DEBUG_STREAM("Set MaxFALL cv=" << (int)edid[pos + 5]
-				                     << " (req " << maxFALL << ", actual " << actualNits << " nits)");
-			}
-
-			if (length >= 6 && (pos + 6) < 256)
-			{
-				float minCv = (minNits * 255.0f * 255.0f) / (maxNits * 100.0f);
-				edid[pos + 6] = static_cast<BYTE>(roundf(max(0.0f, min(255.0f, minCv))));
-				float actualNits = (edid[pos + 6] * maxNits * 100.0f) / (255.0f * 255.0f);
-				VDD_LOG_DEBUG_STREAM("Set MinLum cv=" << (int)edid[pos + 6]
-				                     << " (req " << minNits << ", actual " << actualNits << " nits)");
-			}
-
-			edid[255] = CalculateCeaChecksum(edid);
-			VDD_LOG_DEBUG("Updated CEA extension checksum");
-			return;
-		}
-
-		pos += length + 1;
-	}
-
-	VDD_LOG_WARNING("HDR Static Metadata block not found in EDID");
 }
 
 void UpdateEdidFreeSyncRange(vector<BYTE> &edid, BYTE minHz, BYTE maxHz)

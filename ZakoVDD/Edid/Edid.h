@@ -6,6 +6,7 @@
 
 bool IsKnownEdidProfileSetting(const std::wstring &settingValue);
 void ApplyEdidProfileSetting(const std::wstring &settingValue);
+bool IsUsingBuiltInMonitorEdid();
 
 void ModifyEdidSerialNumber(std::vector<BYTE> &edid, const GUID &clientGuid);
 BYTE CalculateEdidChecksum(const std::vector<BYTE> &edid);

@@ -148,6 +148,25 @@
 
 ### EDID 支持
 
+内置 EDID 的原生时序在创建显示器时根据当前模式列表生成，不再始终声明 1920×1080。
+驱动选择 EDID 1.x 可表示的最大分辨率，在相同尺寸下优先选择接近 60 Hz 的刷新率；
+不会改变模式列表或其顺序。这样可以避免 Oblivion Remastered 等读取 EDID 原生尺寸的
+游戏在 4K 桌面上仍只提供 1080p。
+
+仅内置 EDID（包括自定义文件无效时的回退）会自动更新。有效的 `user_edid.bin` 保留
+用户的时序，HDR、Dolby Vision、色域及其他扩展块不变。EDID 1.x 详细时序最多表示
+4095×4095 和 655.35 MHz 像素时钟；超出范围的模式不会被截断。如果没有可表示的模式，
+保留原时序并记录警告。
+
+Built-in EDIDs derive their native timing from the configured mode list at monitor
+creation: the largest EDID 1.x encodable size, with a refresh rate near 60 Hz. This
+prevents games such as Oblivion Remastered from offering only 1080p on a 4K desktop.
+Valid custom EDIDs and HDR/Dolby Vision extension data are preserved. Unsupported DTD
+sizes/clocks are skipped without truncation; if none fit, the original timing is retained.
+Mode-list ordering and the IddCx preferred-mode index are unchanged. After changing
+the mode list, the monitor must be recreated for Windows to read its new EDID (the
+existing `SETMODES` recreation path does this).
+
 - **自定义 EDID** - 支持加载自定义 EDID 文件（`user_edid.bin`）
 - **CEA 扩展覆盖** - 可以覆盖或添加 CEA 扩展块以启用 HDR
 - **制造商信息** - 可选择防止制造商信息伪造

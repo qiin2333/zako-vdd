@@ -144,6 +144,9 @@
     <ClInclude Include="Edid\Edid.h">
       <Filter>Header Files\Edid</Filter>
     </ClInclude>
+    <ClInclude Include="Edid\EdidTiming.h">
+      <Filter>Header Files\Edid</Filter>
+    </ClInclude>
     <ClInclude Include="Logging\Logger.h">
       <Filter>Header Files\Logging</Filter>
     </ClInclude>

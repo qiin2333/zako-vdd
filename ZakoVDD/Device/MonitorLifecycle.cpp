@@ -2,6 +2,7 @@
 #include "..\Core\DriverState.h"
 #include "..\Edid\Edid.h"
 #include "..\Edid\EdidLuminance.h"
+#include "..\Edid\EdidTiming.h"
 #include "..\Logging\Logger.h"
 #include "..\Util\StringConversion.h"
 #include "DisplayModeHelpers.h"
@@ -55,10 +56,12 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 
 	BYTE freeSyncMinHz = 48;
 	BYTE freeSyncMaxHz = 60;
+	vector<tuple<int, int, int, int>> localModes;
 	{
 		lock_guard<mutex> dataLock(g_DataMutex);
+		localModes = monitorModes;
 		float maxHz = 0.0f;
-		for (const auto &m : monitorModes)
+		for (const auto &m : localModes)
 		{
 			int num = get<2>(m);
 			int den = get<3>(m);
@@ -107,6 +110,13 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			pMonitorEdid = &s_KnownMonitorEdid;
 		}
 
+		// Recompute even for a cached client GUID: SETMODES may have changed
+		// since the previous monitor. Never rewrite a successfully loaded user EDID.
+		const bool builtInEdid = IsUsingBuiltInMonitorEdid();
+		if (builtInEdid && !VddEdid::UpdateNativeTiming(*pMonitorEdid, localModes, true))
+		{
+			VDD_LOG_WARNING("No configured mode fits an EDID 1.x native timing; keeping the built-in timing");
+		}
 		UpdateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
 		UpdateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
 		if (widthCm > 0 || heightCm > 0)

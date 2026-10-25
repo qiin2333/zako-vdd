@@ -21,6 +21,12 @@ extern std::atomic<bool> edidCeaOverride;
 extern wstring confpath;
 
 static std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Legacy)};
+static std::atomic<bool> gUsingBuiltInMonitorEdid{true};
+
+bool IsUsingBuiltInMonitorEdid()
+{
+	return gUsingBuiltInMonitorEdid.load();
+}
 
 static VddEdid::Profile DetectAutoEdidProfile()
 {
@@ -249,8 +255,9 @@ void UpdateEdidFreeSyncRange(vector<BYTE> &edid, BYTE minHz, BYTE maxHz)
 	VDD_LOG_WARNING("AMD FreeSync VSDB not found in EDID");
 }
 
-static vector<BYTE> LoadEdid(const string &filePath)
+static vector<BYTE> LoadEdid(const string &filePath, bool &usingBuiltInEdid)
 {
+	usingBuiltInEdid = true;
 	vector<BYTE> hardcodedEdid = GetHardcodedEdid();
 
 	if (customEdid)
@@ -328,6 +335,7 @@ static vector<BYTE> LoadEdid(const string &filePath)
 		}
 
 		VDD_LOG_INFO("Using custom edid");
+		usingBuiltInEdid = false;
 		return buffer;
 	}
 
@@ -337,7 +345,8 @@ static vector<BYTE> LoadEdid(const string &filePath)
 
 int LoadKnownMonitorEdid()
 {
-	vector<BYTE> edid = LoadEdid(WStringToString(confpath) + "\\user_edid.bin");
+	bool usingBuiltInEdid = true;
+	vector<BYTE> edid = LoadEdid(WStringToString(confpath) + "\\user_edid.bin", usingBuiltInEdid);
 
 	if (edid.empty())
 	{
@@ -359,6 +368,7 @@ int LoadKnownMonitorEdid()
 	edid[127] = checksum;
 
 	IndirectDeviceContext::s_KnownMonitorEdid = edid;
+	gUsingBuiltInMonitorEdid.store(usingBuiltInEdid);
 
 	VDD_LOG_DEBUG_STREAM("EDID data loaded successfully (" << edid.size() << " bytes)");
 

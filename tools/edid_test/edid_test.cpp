@@ -180,6 +180,8 @@ void CheckLuminance(VddEdid::Profile profile) {
 }
 }
 
+#include "native_timing_test.h"
+
 int main(int argc, char** argv) {
     try {
         const std::string outputDirectory = argc > 1 ? argv[1] : "";
@@ -187,6 +189,8 @@ int main(int argc, char** argv) {
         CheckProfile(VddEdid::Profile::Modern, VddEdid::DEFAULT_EDID_DATA_MODERN, "modern", outputDirectory);
         CheckLuminance(VddEdid::Profile::Legacy);
         CheckLuminance(VddEdid::Profile::Modern);
+        CheckNativeTiming(VddEdid::Profile::Legacy);
+        CheckNativeTiming(VddEdid::Profile::Modern);
         Require(GetDefaultEdid() == VddEdid::GetDefaultEdid(VddEdid::Profile::Legacy, false),
                 "Legacy global API compatibility changed");
         return 0;

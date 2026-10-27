@@ -261,8 +261,8 @@ bool IndirectDeviceContext::DestroyMonitor(unsigned int index)
 			}
 		}
 
-		Sleep(300);
-
+		// The swap-chain worker was joined above, so nothing still holds the
+		// monitor; a departure that fails anyway is retried below.
 		NTSTATUS Status = STATUS_UNSUCCESSFUL;
 		{
 			VDD_LOG_DEBUG("Reporting monitor departure to system");

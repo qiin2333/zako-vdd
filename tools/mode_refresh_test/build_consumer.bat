@@ -5,5 +5,5 @@ for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio
 if not defined VSINSTALL exit /b 1
 call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 1
-call "%~dp0build.bat" %*
+call "%~dp0build.bat"
 exit /b %ERRORLEVEL%

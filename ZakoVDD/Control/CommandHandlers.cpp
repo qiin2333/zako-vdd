@@ -586,7 +586,9 @@ void HandleSetModesCommand(wchar_t *param)
 		auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
 		if (pContext && pContext->pContext)
 		{
-			int n = pContext->pContext->RefreshMonitorModes(modeListChanged);
+			// Re-create a monitor only when its live description lacks a mode
+			// or has a different preferred mode.
+			int n = pContext->pContext->RefreshMonitorModes(modeListChanged, true);
 			VDD_LOG_INFO_STREAM("SETMODES: published to " << n << " live monitor(s)");
 		}
 	}

@@ -554,6 +554,19 @@ void HandleSetModesCommand(wchar_t *param)
 		return;
 	}
 
+	// Windows was observed to drop the re-created monitor when its mode list
+	// exceeded about 100 entries (98 worked, 105 failed). Keep index 0 (the
+	// preferred mode) and the newest entries at the end of the list, where
+	// callers append newly requested sizes.
+	const size_t kMaxSetModes = 96;
+	if (parsed.size() > kMaxSetModes)
+	{
+		VDD_LOG_WARNING_STREAM("SETMODES: " << parsed.size() << " modes exceed the limit of " << kMaxSetModes
+		                       << "; dropping " << (parsed.size() - kMaxSetModes)
+		                       << " mode(s) after the preferred mode");
+		parsed.erase(parsed.begin() + 1, parsed.end() - static_cast<ptrdiff_t>(kMaxSetModes - 1));
+	}
+
 	// Compare, replace and publish the list atomically with respect to
 	// create/destroy commands.
 	lock_guard<mutex> lock(g_Mutex);

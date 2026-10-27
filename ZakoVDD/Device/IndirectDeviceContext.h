@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <tuple>
 #include <vector>
 
 namespace Microsoft
@@ -47,7 +48,7 @@ namespace Microsoft
 			void DestroyAllMonitors();
 			MonitorRecreationResult RecreateAllMonitors();
 
-			int RefreshMonitorModes(bool refreshMonitorDescription);
+			int RefreshMonitorModes(bool refreshMonitorDescription, bool reuseLiveDescriptions = false);
 
 		protected:
 			struct MonitorCreationParams
@@ -62,6 +63,7 @@ namespace Microsoft
 			};
 
 			bool RecreateMonitor(unsigned int index);
+			bool UpdateTargetModesWithinDescription(unsigned int index, const std::vector<std::tuple<int, int, int, int>> &modes);
 
 			WDFDEVICE m_WdfDevice;
 			IDDCX_ADAPTER m_Adapter;
@@ -69,6 +71,9 @@ namespace Microsoft
 			std::map<unsigned int, IDDCX_MONITOR> m_Monitors;
 			std::map<unsigned int, GUID> m_MonitorGuids;
 			std::map<unsigned int, MonitorCreationParams> m_MonitorCreationParams;
+			// Mode list each live monitor was created with, i.e. the monitor
+			// description Windows parsed on arrival.
+			std::map<unsigned int, std::vector<std::tuple<int, int, int, int>>> m_MonitorDescriptionModes;
 
 			std::map<IDDCX_MONITOR, DISPLAYCONFIG_VIDEO_SIGNAL_INFO> m_CommittedTargetModes;
 			// Presence in this map means CommitModes2 supplied an authoritative

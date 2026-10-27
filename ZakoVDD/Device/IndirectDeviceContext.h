@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <tuple>
 #include <vector>
 
@@ -74,6 +75,9 @@ namespace Microsoft
 			// Mode list each live monitor was created with, i.e. the monitor
 			// description Windows parsed on arrival.
 			std::map<unsigned int, std::vector<std::tuple<int, int, int, int>>> m_MonitorDescriptionModes;
+			// A failed recreation must be retried even if SETMODES repeats the
+			// staged list. The old monitor may already have been quiesced.
+			std::set<unsigned int> m_PendingMonitorModeRecreation;
 
 			std::map<IDDCX_MONITOR, DISPLAYCONFIG_VIDEO_SIGNAL_INFO> m_CommittedTargetModes;
 			// Presence in this map means CommitModes2 supplied an authoritative

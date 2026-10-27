@@ -109,6 +109,10 @@ jobs:
         shell: cmd
         run: call tools\edid_test\build_consumer.bat
 
+      - name: Test monitor mode refresh recovery
+        shell: cmd
+        run: call tools\mode_refresh_test\build_consumer.bat
+
       - name: Build Vulkan HDR diagnostics
         shell: cmd
         run: |

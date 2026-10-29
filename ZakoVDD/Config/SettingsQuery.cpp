@@ -33,6 +33,7 @@ const map<wstring, pair<wstring, wstring>> SettingsQueryMap = {
 	{L"SDR10Enabled", {L"SDR10BIT", L"SDR10bit"}},
 	{L"ColourFormat", {L"COLOURFORMAT", L"ColourFormat"}},
 	{L"EdidProfile", {L"EDIDPROFILE", L"EdidProfile"}},
+	{L"EdidNativeResolution", {L"EDIDNATIVERESOLUTION", L"EdidNativeResolution"}},
 	{L"VrrEnabled", {L"VRR", L"Vrr"}},
 	{L"LegacyNamedFrameChannel", {L"LEGACYNAMEDFRAMECHANNEL", L"LegacyNamedFrameChannel"}},
 	// Colour End

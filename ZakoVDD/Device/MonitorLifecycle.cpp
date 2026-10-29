@@ -86,30 +86,48 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		freeSyncMaxHz = static_cast<BYTE>(rounded);
 	}
 
+	// A failed creation has no monitor GUID registered for DestroyMonitor to
+	// clean up. Do not let its new cache entry survive a later EDID reload.
+	struct PendingEdidCacheEntry
+	{
+		const GUID *guid = nullptr;
+		~PendingEdidCacheEntry()
+		{
+			if (guid != nullptr)
+			{
+				lock_guard<mutex> edidLock(s_EdidMapMutex);
+				s_ClientGuidEdidMap.erase(*guid);
+			}
+		}
+	} pendingEdidCacheEntry;
 	vector<BYTE> *pMonitorEdid = nullptr;
 	{
-		unique_lock<mutex> edidLock(s_EdidMapMutex, defer_lock);
+		lock_guard<mutex> edidLock(s_EdidMapMutex);
+		bool monitorEdidIsBuiltIn;
 		if (pClientGuid != nullptr)
 		{
-			edidLock.lock();
 			auto it = s_ClientGuidEdidMap.find(*pClientGuid);
 			if (it == s_ClientGuidEdidMap.end())
 			{
-				it = s_ClientGuidEdidMap.emplace(*pClientGuid, s_KnownMonitorEdid).first;
-				ModifyEdidSerialNumber(it->second, *pClientGuid);
+				it = s_ClientGuidEdidMap.emplace(*pClientGuid, ClientEdid{s_KnownMonitorEdid, KnownMonitorEdidIsBuiltIn()}).first;
+				pendingEdidCacheEntry.guid = pClientGuid;
+				ModifyEdidSerialNumber(it->second.data, *pClientGuid);
 				VDD_LOG_DEBUG_STREAM("Created new EDID with serial number based on client GUID for monitor " << (index + 1));
 			}
 			else
 			{
 				VDD_LOG_DEBUG_STREAM("Using existing EDID for client GUID (monitor " << (index + 1) << ")");
 			}
-			pMonitorEdid = &it->second;
+			pMonitorEdid = &it->second.data;
+			monitorEdidIsBuiltIn = it->second.isBuiltIn;
 		}
 		else
 		{
 			pMonitorEdid = &s_KnownMonitorEdid;
+			monitorEdidIsBuiltIn = KnownMonitorEdidIsBuiltIn();
 		}
 
+		ApplyConfiguredEdidResolution(*pMonitorEdid, descriptionModes, monitorEdidIsBuiltIn);
 		UpdateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
 		UpdateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
 		if (widthCm > 0 || heightCm > 0)
@@ -202,6 +220,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			}
 
 			VDD_LOG_DEBUG("Monitor arrival successfully reported.");
+			pendingEdidCacheEntry.guid = nullptr;
 		}
 		else
 		{

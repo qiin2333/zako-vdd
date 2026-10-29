@@ -110,6 +110,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			pMonitorEdid = &s_KnownMonitorEdid;
 		}
 
+		ApplyConfiguredEdidResolution(*pMonitorEdid, descriptionModes);
 		UpdateEdidHdrMetadata(*pMonitorEdid, maxNits, minNits, maxFALL);
 		UpdateEdidFreeSyncRange(*pMonitorEdid, freeSyncMinHz, freeSyncMaxHz);
 		if (widthCm > 0 || heightCm > 0)

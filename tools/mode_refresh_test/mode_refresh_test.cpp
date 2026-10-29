@@ -4,6 +4,9 @@
 #include <windows.h>
 #include <objbase.h>
 #include <algorithm>
+#include <atomic>
+#include "../../ZakoVDD/Edid/DefaultEdid.h"
+#include "../../ZakoVDD/Edid/EdidNativeResolution.h"
 #include <cstdint>
 #include <climits>
 #include <cstring>
@@ -46,6 +49,9 @@ static vector<unsigned> updateCalls, createCalls;
 static map<unsigned, Modes> submittedModes;
 static uintptr_t nextHandle = 100;
 static map<IDDCX_MONITOR, unsigned> handleIndex;
+static atomic<bool> gKnownEdidIsBuiltIn{true};
+static wstring requestedEdidResolution;
+static wstring GetStringSetting(const wstring&) { return requestedEdidResolution; }
 static set<unsigned> failArrival;
 static set<unsigned> throwOnCreate;
 #define Sleep(ms) ((void)(ms))
@@ -150,6 +156,7 @@ static Wrapper wrapper{};
 static void* g_GlobalDevice = &wrapper;
 static Wrapper* WdfObjectGet_IndirectDeviceContextWrapper(void*) { return &wrapper; }
 #include "refresh.inc"
+#include "edid_resolution.inc"
 #include "lifecycle.inc"
 #include "commands.inc"
 
@@ -160,6 +167,8 @@ static void Reset() {
     monitorModes=ABCModes;apiAvailable=true;updateStatus.clear();submittedModes.clear();handleIndex.clear();
     failCreate.clear();failDestroy.clear();failArrival.clear();throwOnCreate.clear();
     updateCalls.clear();createCalls.clear();s_ClientGuidEdidMap.clear();s_MonitorHdrSettingsMap.clear();
+    requestedEdidResolution.clear();gKnownEdidIsBuiltIn=true;
+    IndirectDeviceContext::s_KnownMonitorEdid=VddEdid::GetDefaultEdid(VddEdid::Profile::Legacy);
 }
 static void Command(IndirectDeviceContext& context,const Modes& modes) {
     wstring param;
@@ -245,6 +254,46 @@ int main() {
         IndirectDeviceContext ctx;ctx.Seed(0,ABCModes);wrapper.pContext=&ctx;
         HandleRefreshModesCommand(nullptr);
         Require(updateCalls.empty() && createCalls.size()==1,"forced refresh reused monitor");
+    });
+    test("cached_client_edid_uses_current_native_preference",[]{
+        IndirectDeviceContext ctx;
+        const GUID guid{1,2,3,{4,5,6,7,8,9,10,11}};
+        const auto original=IndirectDeviceContext::s_KnownMonitorEdid;
+        auto cached=original;
+        VddEdid::ApplyNativeResolution(cached,true,L"3840x2160",{{3840,2160,60,1}});
+        s_ClientGuidEdidMap[guid]=cached;
+        requestedEdidResolution=L"default";
+        ctx.CreateMonitor(0,&guid);
+        Require(s_ClientGuidEdidMap.at(guid)[56]==original[56],"cached 4K timing survived default selection");
+        Require(ctx.DestroyMonitor(0),"could not remove monitor");
+        requestedEdidResolution=L"3840x2160";
+        monitorModes={{1920,1080,60,1},{3840,2160,60,1}};
+        ctx.CreateMonitor(0,&guid);
+        Require(s_ClientGuidEdidMap.at(guid)[56]==0 && s_ClientGuidEdidMap.at(guid)[58]==0xf2,
+                "recreated client did not get 4K timing");
+        Require(ctx.DestroyMonitor(0),"could not remove 4K monitor");
+        requestedEdidResolution=L"default";
+        ctx.CreateMonitor(0,&guid);
+        Require(s_ClientGuidEdidMap.at(guid)[56]==original[56],"return to default failed");
+    });
+    test("valid_custom_edid_is_preserved_at_monitor_creation",[]{
+        IndirectDeviceContext ctx;
+        gKnownEdidIsBuiltIn=false;requestedEdidResolution=L"3840x2160";
+        monitorModes={{3840,2160,60,1}};
+        const auto original=IndirectDeviceContext::s_KnownMonitorEdid;
+        ctx.CreateMonitor(0);
+        Require(equal(original.begin()+54,original.begin()+72,
+                      IndirectDeviceContext::s_KnownMonitorEdid.begin()+54),"custom timing changed");
+    });
+    test("explicit_custom_size_is_not_replaced_by_largest_mode",[]{
+        IndirectDeviceContext ctx;
+        const GUID guid{2,2,3,{4,5,6,7,8,9,10,11}};
+        requestedEdidResolution=L"3440x1440";
+        monitorModes={{1920,1080,60,1},{3440,1440,60,1},{3840,2160,60,1}};
+        ctx.CreateMonitor(0,&guid);
+        const auto& edid=s_ClientGuidEdidMap.at(guid);
+        Require(edid[56]+((edid[58]&240)<<4)==3440 && edid[59]+((edid[61]&240)<<4)==1440,
+                "selected ultrawide mode was replaced by an automatic maximum");
     });
     cout<<"RESULT passed="<<passed<<" failed="<<failed<<'\n';
     return failed?1:0;

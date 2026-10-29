@@ -1,11 +1,13 @@
 #pragma once
 
 #include <string>
+#include <tuple>
 #include <vector>
 #include <windows.h>
 
 bool IsKnownEdidProfileSetting(const std::wstring &settingValue);
 void ApplyEdidProfileSetting(const std::wstring &settingValue);
+void ApplyConfiguredEdidResolution(std::vector<BYTE> &edid, const std::vector<std::tuple<int, int, int, int>> &modes);
 
 void ModifyEdidSerialNumber(std::vector<BYTE> &edid, const GUID &clientGuid);
 BYTE CalculateEdidChecksum(const std::vector<BYTE> &edid);

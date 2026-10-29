@@ -1,5 +1,6 @@
 #include "../../ZakoVDD/Edid/DefaultEdid.h"
 #include "../../ZakoVDD/Edid/EdidLuminance.h"
+#include "../../ZakoVDD/Edid/EdidNativeResolution.h"
 
 #include <algorithm>
 #include <fstream>
@@ -13,6 +14,73 @@ void Require(bool condition, const char* message) {
 }
 
 using Bytes = std::vector<BYTE>;
+
+void CheckNativeResolution(VddEdid::Profile profile) {
+    using Result = VddEdid::NativeResolutionResult;
+    using Modes = std::vector<std::tuple<int, int, int, int>>;
+    const Modes modes{{1280,720,60,1},{1920,1080,60,1},{3840,2160,60,1}};
+    auto width = [](const Bytes& e) { return e[56] + ((e[58] & 240) << 4); };
+    auto height = [](const Bytes& e) { return e[59] + ((e[61] & 240) << 4); };
+    auto clock = [](const Bytes& e) { return (e[54] + (e[55] << 8)) * 10000u; };
+    for (bool dolby : {false, true}) {
+        const auto original = VddEdid::GetDefaultEdid(profile, dolby);
+        auto edid = original;
+        for (const auto* setting : {L"", L"default"})
+            Require(VddEdid::ApplyNativeResolution(edid,true,setting,{}) == Result::Default && edid == original,
+                    "Missing/default preference changed original EDID");
+        for (const auto* setting : {L"invalid",L"7680x4320",L"4096x2160",L"0x1080",L"3840x2160junk"})
+            Require(VddEdid::ApplyNativeResolution(edid,true,setting,modes) == Result::InvalidResolution && edid == original,
+                    "Invalid/unencodable size was not rejected");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"1920x1080",modes) == Result::Applied && edid == original,
+                "Explicit supported 1080p60 changed original timing");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"3840x2160",modes) == Result::Applied,
+                "Supported 4K was not selected");
+        Require(width(edid)==3840 && height(edid)==2160 && clock(edid)==594000000,
+                "4K60 differs from the verified timing");
+        const auto fourK = edid;
+        Require(VddEdid::ApplyNativeResolution(edid,false,L"default",modes) == Result::CustomEdid && edid == fourK,
+                "Valid custom EDID was modified");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"default",modes) == Result::Default && edid == original,
+                "Return to original EDID failed");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"3440x1440",modes) == Result::UnsupportedMode && edid == original,
+                "A missing driver mode was invented");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"3840x2160",{{3840,2160,120,1}}) == Result::UnencodableTiming && edid == original,
+                "An overflowing 4K120 pixel clock was truncated");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"3840x2160",{{3840,2160,2147483647,1}}) == Result::UnencodableTiming,
+                "Large refresh value overflowed clock calculation");
+        const Modes wide{{3440,1440,144,1},{3440,1440,60,1},{3440,1440,90,1}};
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"3440x1440",wide) == Result::Applied && width(edid)==3440 && height(edid)==1440,
+                "Configured ultrawide size was not encoded");
+        Require(clock(edid)==298390000, "Did not select the supported refresh nearest 60 Hz");
+        const auto ultrawide = edid;
+        auto reordered=wide; std::reverse(reordered.begin(),reordered.end());
+        VddEdid::ApplyNativeResolution(edid,true,L"3440x1440",reordered);
+        Require(edid==ultrawide, "Selection depends on SETMODES order");
+        for (size_t i=0;i<original.size();++i) {
+            if ((i>=54 && i<66) || i==127) continue;
+            Require(edid[i]==original[i], "Non-timing metadata or CTA data changed");
+        }
+        unsigned int sum=0;for(size_t i=0;i<128;++i)sum+=edid[i];
+        Require((sum&255)==0, "Generated EDID checksum invalid");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"2037x1109",{{2037,1109,60000,1001}}) == Result::Applied &&
+                width(edid)==2037 && height(edid)==1109, "Odd custom size/fractional refresh failed");
+        const double refresh=static_cast<double>(clock(edid))/(2041*1113);
+        Require(std::abs(refresh-60000.0/1001)<0.05, "EDID clock rounding changed refresh excessively");
+        VddEdid::ApplyNativeResolution(edid,true,L"2037x1109",{{2037,1109,70,1},{2037,1109,50,1}});
+        Require(std::abs(static_cast<double>(clock(edid))/(2041*1113)-50.0)<0.05,
+                "Equal-distance refresh tie did not prefer the lower refresh");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"3440x1440",{}) == Result::UnsupportedMode && edid==original,
+                "Missing mode left stale cached timing");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"1x1",{{1,1,1,1}}) == Result::UnencodableTiming,
+                "Zero encoded clock accepted");
+        Require(VddEdid::ApplyNativeResolution(edid,true,L"4095x4095",{{4095,4095,30,1}}) == Result::Applied && width(edid)==4095,
+                "Maximum encodable active dimensions failed");
+    }
+    Bytes truncated(64,0);const auto copy=truncated;
+    Require(VddEdid::ApplyNativeResolution(truncated,true,L"3440x1440",modes)==Result::InvalidEdid && truncated==copy,
+            "Truncated EDID was modified");
+    std::cout << "Configured EDID sizes, fractional/tied refresh, bounds, metadata/custom/default preservation PASS\n";
+}
 
 std::vector<Bytes> ParseCta(const Bytes& edid) {
     Require(edid.size() == 256 && edid[126] == 1, "Expected one CTA extension");
@@ -187,6 +255,8 @@ int main(int argc, char** argv) {
         CheckProfile(VddEdid::Profile::Modern, VddEdid::DEFAULT_EDID_DATA_MODERN, "modern", outputDirectory);
         CheckLuminance(VddEdid::Profile::Legacy);
         CheckLuminance(VddEdid::Profile::Modern);
+        CheckNativeResolution(VddEdid::Profile::Legacy);
+        CheckNativeResolution(VddEdid::Profile::Modern);
         Require(GetDefaultEdid() == VddEdid::GetDefaultEdid(VddEdid::Profile::Legacy, false),
                 "Legacy global API compatibility changed");
         return 0;

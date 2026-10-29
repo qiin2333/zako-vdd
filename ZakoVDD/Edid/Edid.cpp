@@ -2,6 +2,8 @@
 
 #include "DefaultEdid.h"
 #include "EdidLuminance.h"
+#include "EdidNativeResolution.h"
+#include "..\Config\DriverSettings.h"
 #include "..\Device\IndirectDeviceContext.h"
 #include "..\Logging\Logger.h"
 #include "..\Util\StringConversion.h"
@@ -21,6 +23,7 @@ extern std::atomic<bool> edidCeaOverride;
 extern wstring confpath;
 
 static std::atomic<int> gEdidProfile{static_cast<int>(VddEdid::Profile::Legacy)};
+static std::atomic<bool> gKnownEdidIsBuiltIn{true};
 
 static VddEdid::Profile DetectAutoEdidProfile()
 {
@@ -249,8 +252,9 @@ void UpdateEdidFreeSyncRange(vector<BYTE> &edid, BYTE minHz, BYTE maxHz)
 	VDD_LOG_WARNING("AMD FreeSync VSDB not found in EDID");
 }
 
-static vector<BYTE> LoadEdid(const string &filePath)
+static vector<BYTE> LoadEdid(const string &filePath, bool &builtIn)
 {
+	builtIn = true;
 	vector<BYTE> hardcodedEdid = GetHardcodedEdid();
 
 	if (customEdid)
@@ -328,6 +332,7 @@ static vector<BYTE> LoadEdid(const string &filePath)
 		}
 
 		VDD_LOG_INFO("Using custom edid");
+		builtIn = false;
 		return buffer;
 	}
 
@@ -337,7 +342,8 @@ static vector<BYTE> LoadEdid(const string &filePath)
 
 int LoadKnownMonitorEdid()
 {
-	vector<BYTE> edid = LoadEdid(WStringToString(confpath) + "\\user_edid.bin");
+	bool builtIn = true;
+	vector<BYTE> edid = LoadEdid(WStringToString(confpath) + "\\user_edid.bin", builtIn);
 
 	if (edid.empty())
 	{
@@ -359,8 +365,27 @@ int LoadKnownMonitorEdid()
 	edid[127] = checksum;
 
 	IndirectDeviceContext::s_KnownMonitorEdid = edid;
+	gKnownEdidIsBuiltIn.store(builtIn);
 
 	VDD_LOG_DEBUG_STREAM("EDID data loaded successfully (" << edid.size() << " bytes)");
 
 	return 0;
+}
+
+void ApplyConfiguredEdidResolution(vector<BYTE> &edid, const vector<tuple<int, int, int, int>> &modes)
+{
+	if (!gKnownEdidIsBuiltIn.load()) return;
+	// Read at monitor creation so XML changes apply on reconnect without a
+	// driver reload, including clients whose EDID is already cached.
+	const auto requested = GetStringSetting(L"EdidNativeResolution");
+	const auto result = VddEdid::ApplyNativeResolution(edid, true, requested, modes);
+	using Result = VddEdid::NativeResolutionResult;
+	if (result == Result::InvalidResolution)
+		VDD_LOG_WARNING("Invalid EdidNativeResolution: expected default or WIDTHxHEIGHT with dimensions 1..4095; using original 1080p EDID");
+	else if (result == Result::UnsupportedMode)
+		VDD_LOG_WARNING("EdidNativeResolution is not in the driver mode list; using original 1080p EDID");
+	else if (result == Result::UnencodableTiming)
+		VDD_LOG_WARNING("EdidNativeResolution has no refresh rate encodable in an EDID detailed timing; using original 1080p EDID");
+	VDD_LOG_INFO_STREAM("Built-in EDID native resolution: " <<
+		(result == Result::Applied ? WStringToString(requested) : "default (1920x1080)"));
 }

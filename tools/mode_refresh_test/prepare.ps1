@@ -17,3 +17,4 @@ Extract 'ZakoVDD/Device/MonitorLifecycle.cpp' 'void IndirectDeviceContext::Creat
 Extract 'ZakoVDD/Control/CommandHandlers.cpp' 'void HandleRefreshModesCommand(' 'void HandleUnknownCommand(' 'commands.inc'
 Extract 'ZakoVDD/Device/IndirectDeviceContext.h' 'struct MonitorCreationParams' "`n`t`t`tbool RecreateMonitor(" 'creation_params.inc'
 Extract 'ZakoVDD/Util/RefreshRate.cpp' '#include <cmath>' '' 'refresh.inc'
+Extract 'ZakoVDD/Edid/Edid.cpp' 'void ApplyConfiguredEdidResolution(' '' 'edid_resolution.inc'

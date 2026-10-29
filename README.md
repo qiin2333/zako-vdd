@@ -55,6 +55,7 @@
 - **HDR 支持** - 启用/禁用 HDR 功能
 - **颜色格式** - 支持 RGB、YCbCr444、YCbCr422、YCbCr420
 - **EDID** - 自定义 EDID 支持
+- **EDID 原生分辨率** - [可配置的内置 EDID 原生分辨率](docs/edid-native-resolution.md)，用于改善部分游戏的全屏分辨率选项，默认仍为 1080p
 - **日志** - 启用/禁用日志记录
 
 示例配置：

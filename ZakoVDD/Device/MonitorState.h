@@ -40,7 +40,13 @@ struct MonitorHdrSettings
 	float maxFALL;
 };
 
-extern std::map<GUID, std::vector<BYTE>, GuidComparator> s_ClientGuidEdidMap;
+struct ClientEdid
+{
+	std::vector<BYTE> data;
+	bool isBuiltIn;
+};
+
+extern std::map<GUID, ClientEdid, GuidComparator> s_ClientGuidEdidMap;
 extern std::mutex s_EdidMapMutex;
 
 extern std::map<IDDCX_MONITOR, MonitorHdrSettings> s_MonitorHdrSettingsMap;

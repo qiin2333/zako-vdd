@@ -76,7 +76,8 @@ struct HdrSettings { float maxNits=0,minNits=0,maxFALL=0; };
 using MonitorHdrSettings = HdrSettings;
 struct GuidLess { bool operator()(const GUID& a,const GUID& b) const { return memcmp(&a,&b,sizeof(GUID))<0; } };
 static mutex s_EdidMapMutex, s_HdrSettingsMutex;
-static map<GUID,vector<BYTE>,GuidLess> s_ClientGuidEdidMap;
+#include "client_edid.inc"
+static map<GUID,ClientEdid,GuidLess> s_ClientGuidEdidMap;
 static map<IDDCX_MONITOR,HdrSettings> s_MonitorHdrSettingsMap;
 namespace VddEdid { static bool UseDefaultLuminanceIfInvalid(float&,float&,float&) { return false; } }
 static void ModifyEdidSerialNumber(vector<BYTE>&,const GUID&) {}
@@ -263,20 +264,20 @@ int main() {
         const auto original=IndirectDeviceContext::s_KnownMonitorEdid;
         auto cached=original;
         VddEdid::ApplyNativeResolution(cached,true,L"3840x2160",{{3840,2160,60,1}});
-        s_ClientGuidEdidMap[guid]=cached;
+        s_ClientGuidEdidMap[guid]={cached,true};
         requestedEdidResolution=L"default";
         ctx.CreateMonitor(0,&guid);
-        Require(s_ClientGuidEdidMap.at(guid)[56]==original[56],"cached 4K timing survived default selection");
+        Require(s_ClientGuidEdidMap.at(guid).data[56]==original[56],"cached 4K timing survived default selection");
         Require(ctx.DestroyMonitor(0),"could not remove monitor");
         requestedEdidResolution=L"3840x2160";
         monitorModes={{1920,1080,60,1},{3840,2160,60,1}};
         ctx.CreateMonitor(0,&guid);
-        Require(s_ClientGuidEdidMap.at(guid)[56]==0 && s_ClientGuidEdidMap.at(guid)[58]==0xf2,
+        Require(s_ClientGuidEdidMap.at(guid).data[56]==0 && s_ClientGuidEdidMap.at(guid).data[58]==0xf2,
                 "recreated client did not get 4K timing");
         Require(ctx.DestroyMonitor(0),"could not remove 4K monitor");
         requestedEdidResolution=L"default";
         ctx.CreateMonitor(0,&guid);
-        Require(s_ClientGuidEdidMap.at(guid)[56]==original[56],"return to default failed");
+        Require(s_ClientGuidEdidMap.at(guid).data[56]==original[56],"return to default failed");
     });
     test("failed_creation_does_not_cache_old_edid_source",[]{
         for(bool custom:{false,true}) for(int fault=0;fault<4;++fault) {
@@ -296,7 +297,7 @@ int main() {
             requestedEdidResolution=L"3840x2160";
             monitorModes={{3840,2160,60,1}};
             ctx.CreateMonitor(0,&guid);
-            const auto& cached=s_ClientGuidEdidMap.at(guid);
+            const auto& cached=s_ClientGuidEdidMap.at(guid).data;
             Require(cached[10]==reloaded[10],"retry used the old source's cached EDID");
             if(custom)
                 Require(cached[56]==0 && cached[58]==0xf2,"built-in retry did not apply selected timing");
@@ -309,10 +310,43 @@ int main() {
     test("failed_creation_preserves_preexisting_client_cache",[]{
         IndirectDeviceContext ctx;
         const GUID guid{4,2,3,{4,5,6,7,8,9,10,11}};
-        s_ClientGuidEdidMap[guid]=IndirectDeviceContext::s_KnownMonitorEdid;
+        s_ClientGuidEdidMap[guid]={IndirectDeviceContext::s_KnownMonitorEdid,true};
         failCreate.insert(0);
         ctx.CreateMonitor(0,&guid);
         Require(s_ClientGuidEdidMap.count(guid)==1,"failure removed an existing cache entry");
+    });
+    test("failed_departure_retains_each_cached_edid_source_across_reload",[]{
+        for(bool builtIn:{false,true}) {
+            Reset();IndirectDeviceContext ctx;
+            const GUID guid{5,2,3,{4,5,6,7,8,9,10,11}};
+            gKnownEdidIsBuiltIn=builtIn;
+            const auto original=IndirectDeviceContext::s_KnownMonitorEdid;
+            ctx.CreateMonitor(0,&guid);
+            failDestroy.insert(0);
+            Require(!ctx.DestroyMonitor(0),"departure fault did not retain the live monitor");
+            // Reload from the other source while the old monitor/cache survives.
+            gKnownEdidIsBuiltIn=!builtIn;
+            IndirectDeviceContext::s_KnownMonitorEdid[10]=42;
+            requestedEdidResolution=L"3840x2160";
+            monitorModes={{3840,2160,60,1}};
+            // A different connector may reuse the same client description.
+            ctx.CreateMonitor(1,&guid);
+            const auto& entry=s_ClientGuidEdidMap.at(guid);
+            Require(entry.isBuiltIn==builtIn,"reload relabelled a cached EDID's source");
+            if(builtIn)
+                Require(entry.data[56]==0 && entry.data[58]==0xf2,"cached built-in EDID lost its native preference");
+            else
+                Require(equal(original.begin()+54,original.begin()+72,entry.data.begin()+54),"cached custom EDID received built-in timing");
+            // An uncached client must use the new template's own source.
+            const GUID fresh{6,2,3,{4,5,6,7,8,9,10,11}};
+            ctx.CreateMonitor(2,&fresh);
+            const auto& newEntry=s_ClientGuidEdidMap.at(fresh);
+            Require(newEntry.isBuiltIn==!builtIn && newEntry.data[10]==42,"new client did not use the reloaded source");
+            if(builtIn)
+                Require(equal(original.begin()+54,original.begin()+72,newEntry.data.begin()+54),"new custom EDID timing changed");
+            else
+                Require(newEntry.data[56]==0 && newEntry.data[58]==0xf2,"new built-in EDID did not use selected timing");
+        }
     });
     test("valid_custom_edid_is_preserved_at_monitor_creation",[]{
         IndirectDeviceContext ctx;
@@ -329,7 +363,7 @@ int main() {
         requestedEdidResolution=L"3440x1440";
         monitorModes={{1920,1080,60,1},{3440,1440,60,1},{3840,2160,60,1}};
         ctx.CreateMonitor(0,&guid);
-        const auto& edid=s_ClientGuidEdidMap.at(guid);
+        const auto& edid=s_ClientGuidEdidMap.at(guid).data;
         Require(edid[56]+((edid[58]&240)<<4)==3440 && edid[59]+((edid[61]&240)<<4)==1440,
                 "selected ultrawide mode was replaced by an automatic maximum");
     });

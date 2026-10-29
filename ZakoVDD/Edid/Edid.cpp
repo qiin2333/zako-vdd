@@ -5,6 +5,7 @@
 #include "EdidNativeResolution.h"
 #include "..\Config\DriverSettings.h"
 #include "..\Device\IndirectDeviceContext.h"
+#include "..\Device\MonitorState.h"
 #include "..\Logging\Logger.h"
 #include "..\Util\StringConversion.h"
 
@@ -364,17 +365,25 @@ int LoadKnownMonitorEdid()
 	BYTE checksum = CalculateEdidChecksum(edid);
 	edid[127] = checksum;
 
-	IndirectDeviceContext::s_KnownMonitorEdid = edid;
-	gKnownEdidIsBuiltIn.store(builtIn);
+	{
+		lock_guard<mutex> edidLock(s_EdidMapMutex);
+		IndirectDeviceContext::s_KnownMonitorEdid = edid;
+		gKnownEdidIsBuiltIn.store(builtIn);
+	}
 
 	VDD_LOG_DEBUG_STREAM("EDID data loaded successfully (" << edid.size() << " bytes)");
 
 	return 0;
 }
 
-void ApplyConfiguredEdidResolution(vector<BYTE> &edid, const vector<tuple<int, int, int, int>> &modes)
+bool KnownMonitorEdidIsBuiltIn()
 {
-	if (!gKnownEdidIsBuiltIn.load()) return;
+	return gKnownEdidIsBuiltIn.load();
+}
+
+void ApplyConfiguredEdidResolution(vector<BYTE> &edid, const vector<tuple<int, int, int, int>> &modes, bool isBuiltIn)
+{
+	if (!isBuiltIn) return;
 	// Read at monitor creation so XML changes apply on reconnect without a
 	// driver reload, including clients whose EDID is already cached.
 	const auto requested = GetStringSetting(L"EdidNativeResolution");

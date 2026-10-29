@@ -1,5 +1,9 @@
 # Configured native resolution in the built-in EDID
 
+Each cached client EDID retains its built-in/custom source independently of the
+currently loaded template. Reloading settings after a failed monitor removal
+does not turn a cached custom EDID into a built-in one or overwrite its timing.
+
 `EdidNativeResolution` is an explicit compatibility preference, independent of
 the legacy/modern colour profile and the session's actual desktop resolution.
 It is not an automatic selection of the largest mode or the current client size.

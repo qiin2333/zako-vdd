@@ -48,6 +48,12 @@ void CheckNativeResolution(VddEdid::Profile profile) {
                 "An overflowing 4K120 pixel clock was truncated");
         Require(VddEdid::ApplyNativeResolution(edid,true,L"3840x2160",{{3840,2160,2147483647,1}}) == Result::UnencodableTiming,
                 "Large refresh value overflowed clock calculation");
+        for (const Modes& mixed : {Modes{{3840,2160,80,1},{3840,2160,30,1}},
+                                   Modes{{3840,2160,30,1},{3840,2160,80,1}}}) {
+            Require(VddEdid::ApplyNativeResolution(edid,true,L"3840x2160",mixed) == Result::Applied &&
+                    width(edid)==3840 && height(edid)==2160 && clock(edid)==249550000,
+                    "Unencodable 4K80 displaced encodable 4K30 in a mixed mode list");
+        }
         const Modes wide{{3440,1440,144,1},{3440,1440,60,1},{3440,1440,90,1}};
         Require(VddEdid::ApplyNativeResolution(edid,true,L"3440x1440",wide) == Result::Applied && width(edid)==3440 && height(edid)==1440,
                 "Configured ultrawide size was not encoded");

@@ -54,6 +54,7 @@ static wstring requestedEdidResolution;
 static wstring GetStringSetting(const wstring&) { return requestedEdidResolution; }
 static set<unsigned> failArrival;
 static set<unsigned> throwOnCreate;
+static set<unsigned> nullCreateHandle;
 #define Sleep(ms) ((void)(ms))
 #define IDD_IS_FUNCTION_AVAILABLE(name) apiAvailable
 struct IDDCX_TARGET_MODE2 { Mode payload; };
@@ -88,6 +89,7 @@ static LONG IddCxMonitorCreate(void*,const IDARG_IN_MONITORCREATE* args,IDARG_OU
     createCalls.push_back(index);
     if(throwOnCreate.count(index)) throw runtime_error("injected create exception");
     if(failCreate.count(index)) return STATUS_UNSUCCESSFUL;
+    if(nullCreateHandle.count(index)) { output->MonitorObject=nullptr; return STATUS_SUCCESS; }
     output->MonitorObject=reinterpret_cast<IDDCX_MONITOR>(++nextHandle);
     handleIndex[output->MonitorObject]=index;
     return STATUS_SUCCESS;
@@ -165,7 +167,7 @@ static const Modes ABCModes{A,B,C}, AB{A,B};
 static void Require(bool ok,const char* message) { if(!ok) throw runtime_error(message); }
 static void Reset() {
     monitorModes=ABCModes;apiAvailable=true;updateStatus.clear();submittedModes.clear();handleIndex.clear();
-    failCreate.clear();failDestroy.clear();failArrival.clear();throwOnCreate.clear();
+    failCreate.clear();failDestroy.clear();failArrival.clear();throwOnCreate.clear();nullCreateHandle.clear();
     updateCalls.clear();createCalls.clear();s_ClientGuidEdidMap.clear();s_MonitorHdrSettingsMap.clear();
     requestedEdidResolution.clear();gKnownEdidIsBuiltIn=true;
     IndirectDeviceContext::s_KnownMonitorEdid=VddEdid::GetDefaultEdid(VddEdid::Profile::Legacy);
@@ -275,6 +277,42 @@ int main() {
         requestedEdidResolution=L"default";
         ctx.CreateMonitor(0,&guid);
         Require(s_ClientGuidEdidMap.at(guid)[56]==original[56],"return to default failed");
+    });
+    test("failed_creation_does_not_cache_old_edid_source",[]{
+        for(bool custom:{false,true}) for(int fault=0;fault<4;++fault) {
+            Reset();IndirectDeviceContext ctx;
+            const GUID guid{3,2,3,{4,5,6,7,8,9,10,11}};
+            gKnownEdidIsBuiltIn=!custom;
+            // Distinguish the old template from the next reload's template.
+            IndirectDeviceContext::s_KnownMonitorEdid[10]=42;
+            (fault==0?failCreate:fault==1?failArrival:fault==2?throwOnCreate:nullCreateHandle).insert(0);
+            try {ctx.CreateMonitor(0,&guid);} catch(const runtime_error&) {if(fault!=2) throw;}
+            Require(s_ClientGuidEdidMap.count(guid)==0,"failed creation retained an EDID without a registered monitor");
+            failCreate.clear();failArrival.clear();throwOnCreate.clear();nullCreateHandle.clear();
+            // Simulate reloading a different EDID source before retrying.
+            const auto reloaded=VddEdid::GetDefaultEdid(VddEdid::Profile::Legacy);
+            IndirectDeviceContext::s_KnownMonitorEdid=reloaded;
+            gKnownEdidIsBuiltIn=custom;
+            requestedEdidResolution=L"3840x2160";
+            monitorModes={{3840,2160,60,1}};
+            ctx.CreateMonitor(0,&guid);
+            const auto& cached=s_ClientGuidEdidMap.at(guid);
+            Require(cached[10]==reloaded[10],"retry used the old source's cached EDID");
+            if(custom)
+                Require(cached[56]==0 && cached[58]==0xf2,"built-in retry did not apply selected timing");
+            else
+                Require(equal(reloaded.begin()+54,reloaded.begin()+72,cached.begin()+54),"custom retry changed its timing");
+            Require(ctx.DestroyMonitor(0),"retry monitor could not be destroyed");
+            Require(s_ClientGuidEdidMap.count(guid)==0,"successful monitor did not own cache cleanup");
+        }
+    });
+    test("failed_creation_preserves_preexisting_client_cache",[]{
+        IndirectDeviceContext ctx;
+        const GUID guid{4,2,3,{4,5,6,7,8,9,10,11}};
+        s_ClientGuidEdidMap[guid]=IndirectDeviceContext::s_KnownMonitorEdid;
+        failCreate.insert(0);
+        ctx.CreateMonitor(0,&guid);
+        Require(s_ClientGuidEdidMap.count(guid)==1,"failure removed an existing cache entry");
     });
     test("valid_custom_edid_is_preserved_at_monitor_creation",[]{
         IndirectDeviceContext ctx;

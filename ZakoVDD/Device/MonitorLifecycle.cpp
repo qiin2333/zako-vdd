@@ -86,6 +86,20 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 		freeSyncMaxHz = static_cast<BYTE>(rounded);
 	}
 
+	// A failed creation has no monitor GUID registered for DestroyMonitor to
+	// clean up. Do not let its new cache entry survive a later EDID reload.
+	struct PendingEdidCacheEntry
+	{
+		const GUID *guid = nullptr;
+		~PendingEdidCacheEntry()
+		{
+			if (guid != nullptr)
+			{
+				lock_guard<mutex> edidLock(s_EdidMapMutex);
+				s_ClientGuidEdidMap.erase(*guid);
+			}
+		}
+	} pendingEdidCacheEntry;
 	vector<BYTE> *pMonitorEdid = nullptr;
 	{
 		unique_lock<mutex> edidLock(s_EdidMapMutex, defer_lock);
@@ -96,6 +110,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			if (it == s_ClientGuidEdidMap.end())
 			{
 				it = s_ClientGuidEdidMap.emplace(*pClientGuid, s_KnownMonitorEdid).first;
+				pendingEdidCacheEntry.guid = pClientGuid;
 				ModifyEdidSerialNumber(it->second, *pClientGuid);
 				VDD_LOG_DEBUG_STREAM("Created new EDID with serial number based on client GUID for monitor " << (index + 1));
 			}
@@ -203,6 +218,7 @@ void IndirectDeviceContext::CreateMonitor(unsigned int index, const GUID *pClien
 			}
 
 			VDD_LOG_DEBUG("Monitor arrival successfully reported.");
+			pendingEdidCacheEntry.guid = nullptr;
 		}
 		else
 		{
